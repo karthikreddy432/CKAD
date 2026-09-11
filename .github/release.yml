@@ -1,0 +1,33 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+
+  categories:
+    - title: "📚 Study Guide Improvements"
+      labels:
+        - documentation
+        - enhancement
+        - content
+
+    - title: "🐛 Fixes & Corrections"
+      labels:
+        - bug
+        - fix
+        - correction
+
+    - title: "🧪 Labs & Practice"
+      labels:
+        - lab
+        - practice
+        - mock
+
+    - title: "⚙️ Repository & Tooling"
+      labels:
+        - chore
+        - tooling
+        - ci
+
+    - title: "Other Changes"
+      labels:
+        - "*"
