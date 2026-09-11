@@ -4,7 +4,7 @@
 [![Kubernetes v1.35](https://img.shields.io/badge/Kubernetes-v1.35-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![CKAD Exam](<https://img.shields.io/badge/CKAD%20Exam-Verified-brightgreen>)](https://www.cncf.io/certification/ckad/)
 
-A **comprehensive, exam-focused study guide** for the Certified Kubernetes Application Developer (CKAD) certification. This guide combines theory, real-world examples, and practical exam patterns covering all 5 official domains — organized as **one continuous learning path**, from first principles through a full mock exam.
+A **comprehensive, exam-focused study guide** for the Certified Kubernetes Application Developer (CKAD) certification. This guide combines theory, real-world examples, and practical exam patterns covering all 5 official domains — organized as **one continuous learning path**, from first principles through three full mock exams.
 
 ## 📊 Quick Stats
 
@@ -42,14 +42,14 @@ flowchart TD
     C5 --> C6["Ch 6 — Command Mastery 🧭"]
     C6 --> C7["Ch 7 — End-to-End Worked Example 🔍"]
     C7 --> C8["Ch 8 — Reference & Cheat Sheets 🧭"]
-    C8 --> C9["Ch 9 — Practice & Labs 🏋️ (6 levels)"]
+    C8 --> C9["Ch 9 — Practice & Labs 🏋️ (6 levels + 3 mocks)"]
     C9 --> C10["Ch 10 — Study & Exam Plan 🧭"]
     C10 --> EXAM["Sit the CKAD exam"]
 ```
 
 The five domain chapters (1–5) mirror the five scored domains on the real exam, in the order dependencies actually run: design what you'll run, configure it, deploy it safely, expose it on the network, then learn to debug it when something breaks. **Each chapter includes hands-on practice for the concepts you just learned.** Chapters 6–10 then convert that knowledge into exam-day speed, cumulative practice, reference use, and final revision.
 
-> **Content preservation:** The chapter enhancements add practice and readability improvements without removing the existing learning content. **Chapter 8 remains unchanged.**
+> **Content preservation:** The chapter enhancements add practice and readability improvements without removing the existing learning content. Reference and cheat-sheet formatting has been kept aligned with the current chapter structure.
 
 ### Chapter Roadmap
 
@@ -83,7 +83,7 @@ Each integrated lab is designed to make you perform the Kubernetes task yourself
 - **Solutions are hidden.** In the Markdown files, hints and solutions are placed inside collapsible sections so they do not immediately reveal the answer on GitHub.
 - **Use the solution to learn, not to copy.** If you needed the solution, close it and repeat the task from scratch.
 - **Practice is exam-oriented.** Tasks specify the namespace, resource names, required configuration, verification expectations, and the outcome you must achieve rather than giving generic instructions.
-- **Chapter 9 is reinforcement.** After completing the chapter-by-chapter labs, use Chapter 9 for broader cumulative scenarios, timed practice, and mock-exam preparation.
+- **Chapter 9 is reinforcement.** After completing the chapter-by-chapter labs, use Chapter 9 for broader cumulative scenarios, timed practice, and three independent 17-task mock exams.
 
 ### Recommended Chapter Routine
 
@@ -104,7 +104,7 @@ This keeps the guide as **one continuous learning path** while building hands-on
 2. **Do the practice inside each chapter before moving on.** The integrated exercises are part of the chapter, not optional material to postpone.
 3. **Watch for the priority markers** inside each chapter: 🔴 **MUST KNOW** is heavily tested and non-negotiable, 🟡 **SHOULD KNOW** rounds out solid coverage, 🟢 **GOOD TO KNOW** is useful context. If you're short on time, prioritize in that order.
 4. **Read the "Real-world" and "Theory" callouts**, not just the command blocks — they're what make the commands stick instead of just being copied.
-5. **Use Chapter 9 for cumulative practice and timed labs** after progressing through the earlier chapters. Attempt every lab before opening its hidden solution.
+5. **Use Chapter 9 for cumulative practice and timed labs** after progressing through the earlier chapters. Attempt every lab and mock task before opening its hidden solution.
 6. **Use Chapter 10's phase plan** to pace yourself across your whole study window, and its Final Readiness Self-Check before you schedule the actual exam.
 
 ### Study Timeline
@@ -116,7 +116,7 @@ This keeps the guide as **one continuous learning path** while building hands-on
 | **Phase 1: Learn**                  | 15–20h        | Chapters 0–5, domain by domain                   |
 | **Phase 2: Command Drills**         | Ongoing, daily | Chapter 6, until typing is automatic              |
 | **Phase 3: Cumulative Practice**    | 15–25h        | Chapter 9, Levels 1–4 + repeat weak chapter labs |
-| **Phase 4: Timed Practice & Mocks** | 5–10h         | Chapter 9, Levels 5–6                            |
+| **Phase 4: Timed Practice & Mocks** | 6–10h         | Chapter 9, Levels 5–6 + three 2-hour mock exams |
 | **Phase 5: Final Revision**         | 5h             | Chapter 8 cheat sheets, weak-area review          |
 
 This mirrors Chapter 10's Phase-by-Phase Progression in more detail — see that chapter for the full breakdown and a Final Readiness Self-Check.
@@ -277,7 +277,7 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 
 ### Before the Exam
 
-1. **Practice under time pressure.** Do at least 3 full 2-hour mock exams — Chapter 9, Levels 5–6.
+1. **Practice under time pressure.** Complete the three independent 2-hour mock exams in Chapter 9 after finishing Levels 5–6.
 2. **Know kubectl.** You'll spend more time typing than thinking; practice `--dry-run=client -o yaml` (Chapter 6) until it's automatic.
 3. **Test your probes.** The gap between "knowing how probes work" and "writing a working startup probe" is exactly what costs exam points.
 4. **Verify your edits.** After every `kubectl apply`, run `kubectl describe` to confirm — typos that look correct in YAML are silent failures.
