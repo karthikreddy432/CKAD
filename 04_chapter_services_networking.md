@@ -493,6 +493,7 @@ A NetworkPolicy in namespace A does *not* affect Pods in namespace B. This is a 
 ---
 
 ---
+```
 
 ## 🧪 Practice — Default Deny, Then Allow Only Frontend → Backend
 
@@ -652,6 +653,7 @@ kubectl get ns app --show-labels
 </details>
 
 # Written in namespace A
+```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

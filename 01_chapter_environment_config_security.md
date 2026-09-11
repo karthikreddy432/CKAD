@@ -79,6 +79,7 @@ data:
 ```yaml
 
 ---
+```
 
 ## 🧪 Practice — ConfigMap Consumption and Update
 
@@ -188,6 +189,7 @@ kubectl exec -n checkout config-demo -- cat /etc/app-config/LOG_LEVEL
 </details>
 
 # 1. Single env var
+```yaml
 env:
 - name: MODE
   valueFrom:
@@ -601,6 +603,7 @@ kubectl exec -n checkout identity-demo -- printenv MY_POD_NAME MY_NAMESPACE MY_P
 kubectl run web --image=nginx --dry-run=client -o yaml > pod.yaml
 
 ---
+```
 
 ## 🧪 Practice — Requests, Limits, LimitRange, and Quota
 
@@ -713,7 +716,6 @@ kubectl get pod worker -n resource-demo -o jsonpath='{.spec.containers[0].resour
 </details>
 
 # then add:
-```
 ```yaml
 resources:
   requests:

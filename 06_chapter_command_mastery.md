@@ -387,14 +387,10 @@ Use JSONPath for individual fields and custom columns for compact output.
 <summary>✅ Solution</summary>
 
 ```bash
-kubectl get pod web -n practice -o jsonpath='{.status.podIP}{"
-"}'
-kubectl get pod web -n practice -o jsonpath='{.spec.containers[0].image}{"
-"}'
-kubectl get pod web -n practice -o jsonpath='{.metadata.name}{"
-"}'
-kubectl get pod web -n practice -o jsonpath='{.status.containerStatuses[0].restartCount}{"
-"}'
+kubectl get pod web -n practice -o jsonpath='{.status.podIP}{"\n"}'
+kubectl get pod web -n practice -o jsonpath='{.spec.containers[0].image}{"\n"}'
+kubectl get pod web -n practice -o jsonpath='{.metadata.name}{"\n"}'
+kubectl get pod web -n practice -o jsonpath='{.status.containerStatuses[0].restartCount}{"\n"}'
 ```
 
 </details>
@@ -449,14 +445,12 @@ Use `kubectl config current-context` and `kubectl config set-context --current -
 ```bash
 kubectl config current-context
 kubectl config set-context --current --namespace=practice
-kubectl config view --minify --output 'jsonpath={..namespace}{"
-"}'
+kubectl config view --minify --output 'jsonpath={..namespace}{"\n"}'
 
 # Perform the three practice tasks.
 
 kubectl config set-context --current --namespace=dev
-kubectl config view --minify --output 'jsonpath={..namespace}{"
-"}'
+kubectl config view --minify --output 'jsonpath={..namespace}{"\n"}'
 
 # Perform the final dev task.
 ```
@@ -533,8 +527,7 @@ kubectl run web --image=nginx
 kubectl label pod web app=web
 kubectl create deployment api --image=nginx --replicas=2
 kubectl scale deployment api --replicas=3
-kubectl get pod web -o jsonpath='{.status.podIP}{"
-"}'
+kubectl get pod web -o jsonpath='{.status.podIP}{"\n"}'
 kubectl set image deployment/api <container-name>=nginx:1.28
 kubectl create configmap settings --from-literal=MODE=prod
 kubectl expose deployment api --port=80

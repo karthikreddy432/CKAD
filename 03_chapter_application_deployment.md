@@ -563,6 +563,7 @@ Use the chart/repository supplied by the environment rather than assuming an ext
 ```yaml
 
 ---
+```
 
 ## 🧪 Practice — Build an Environment Overlay
 
@@ -656,6 +657,7 @@ kubectl get configmap
 </details>
 
 # base/kustomization.yaml
+```yaml
 resources:
 - deployment.yaml
 - service.yaml

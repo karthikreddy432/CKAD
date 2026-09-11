@@ -103,6 +103,7 @@ docker history myapp:1.0
 ---
 
 ---
+```
 
 ## 🧪 Practice — Build and Inspect a Multi-Stage Image
 
@@ -233,6 +234,7 @@ kubectl describe pod private-app -n registry-demo
 </details>
 
 # Create a Docker config secret (standard way)
+```bash
 kubectl create secret docker-registry myregistry \
   --docker-server=registry.example.com \
   --docker-username=myuser \
@@ -452,6 +454,7 @@ Unlike a normal Service, DNS doesn't stop at a single load-balanced IP — it re
 ---
 
 ---
+```
 
 ## 🧪 Practice — Choose the Correct Workload
 
@@ -598,6 +601,7 @@ web-1.web.default.svc.cluster.local
 </details>
 
 # Headless Service for StatefulSet discovery
+```yaml
 apiVersion: v1
 kind: Service
 metadata:
@@ -760,6 +764,7 @@ spec:
 ---
 
 ---
+```
 
 ## 🧪 Practice — Protect Replicas During Voluntary Disruption
 
@@ -817,6 +822,7 @@ kubectl describe pdb payments-pdb -n production
 </details>
 
 # Alternative: maxUnavailable (same concept, expressed as "how many *can* fail")
+```yaml
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
