@@ -298,8 +298,6 @@ kubectl get pod mypod -o json
 
 ---
 
----
-
 ## 🧪 Practice — Inspect an Existing Resource
 
 ### Task
@@ -455,8 +453,6 @@ kubectl expose deployment web --port=80 --dry-run=client -o yaml > svc.yaml
 🔴 **Never hand-write a manifest from a blank file if an imperative command can generate 90% of it.** Generate, then open in your editor and add only the fields the imperative command can't set (probes, volumes, resources, security context).
 
 > **🌍 Real-world example.** Platform teams building internal scaffolding tools (e.g., an internal `myco create-service` CLI) essentially automate this exact workflow: generate a baseline Deployment + Service + ConfigMap via `--dry-run=client -o yaml`, then programmatically layer in the org's required probes, resource limits, and security context defaults before committing the result to a Git repo for GitOps. Treating `--dry-run=client -o yaml` as your personal scaffolding generator during the exam mirrors exactly how real platform tooling is built.
-
----
 
 ---
 

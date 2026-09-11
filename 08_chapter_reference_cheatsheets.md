@@ -17,8 +17,8 @@ Use this chapter during timed practice, not during the real exam (no personal no
 By the end of this chapter, you should be able to:
 
 - Locate the correct cheat-sheet table for any command, YAML skeleton, or troubleshooting symptom in seconds.
-- Reproduce any YAML skeleton in 7.3 from memory, without looking.
-- Map a Pod/Service/Job symptom straight to its likely cause using 7.4, without re-deriving the diagnosis from first principles each time.
+- Reproduce any YAML skeleton in 8.3 from memory, without looking.
+- Map a Pod/Service/Job symptom straight to its likely cause using 8.4, without re-deriving the diagnosis from first principles each time.
 
 > **📚 Theory — why cheat sheets work as a study tool even though you can't bring them to the exam.** The goal of drilling against a cheat sheet isn't memorizing the sheet itself — it's *offloading recall* so your working memory during the exam is spent on reading the task and reasoning about the fix, not on reconstructing syntax. This mirrors how experienced engineers actually work: they don't have `kubectl explain` output memorized either, they've just internalized the handful of patterns that cover 90% of real usage (this is the same "recognize the pattern, then generate/edit" workflow from Chapter 0). Repetition against this reference is what converts "I could look this up" into "I just typed it," which is the only thing that matters under a 2-hour clock.
 
@@ -114,11 +114,19 @@ spec:
   ports: [{port: 80, targetPort: 8080}]
 ```
 ```yaml
-# ConfigMap / Secret
+# ConfigMap
 apiVersion: v1
-kind: ConfigMap        # or Secret (add "type: Opaque"; use stringData for plaintext)
+kind: ConfigMap
 metadata: {name: x}
 data: {KEY: "value"}
+```
+```yaml
+# Secret (plaintext authoring)
+apiVersion: v1
+kind: Secret
+metadata: {name: x}
+type: Opaque
+stringData: {KEY: "value"}
 ```
 ```yaml
 # NetworkPolicy — deny all ingress

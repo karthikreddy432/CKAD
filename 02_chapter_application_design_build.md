@@ -233,7 +233,7 @@ kubectl describe pod private-app -n registry-demo
 
 </details>
 
-# Create a Docker config secret (standard way)
+**Create a Docker config secret (standard way):**
 ```bash
 kubectl create secret docker-registry myregistry \
   --docker-server=registry.example.com \
@@ -447,15 +447,6 @@ clusterIP: None"| SVC["Service: db"]
 
 Unlike a normal Service, DNS doesn't stop at a single load-balanced IP — it resolves straight through to the specific Pod's own IP, which is what lets `db-1` reliably always mean the same replica.
 
-**Real exam pattern:**
-```yaml
----
-
----
-
----
-```
-
 ## 🧪 Practice — Choose the Correct Workload
 
 ### Task
@@ -600,7 +591,7 @@ web-1.web.default.svc.cluster.local
 
 </details>
 
-# Headless Service for StatefulSet discovery
+**Real exam pattern — headless Service for StatefulSet discovery:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -821,7 +812,7 @@ kubectl describe pdb payments-pdb -n production
 
 </details>
 
-# Alternative: maxUnavailable (same concept, expressed as "how many *can* fail")
+**Alternative: `maxUnavailable` (same concept, expressed as "how many *can* fail"):**
 ```yaml
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -1049,8 +1040,6 @@ kubectl describe pod mypod         # check each container's State/Ready column
 > **🌍 Real-world example.** The service mesh Istio is essentially a massive, standardized application of the ambassador pattern: every Pod in the mesh gets an `istio-proxy` sidecar container injected automatically, and the application container is configured to send *all* its network traffic to `localhost`, where the sidecar intercepts it, handles mutual TLS, retries, and traffic routing, and only then forwards it to the real destination. The app code never needs to know a service mesh exists. Similarly, the classic "log shipping" adapter pattern — a Fluent Bit or Filebeat sidecar tailing a shared `emptyDir` volume and forwarding formatted logs to a central store — is the standard way legacy apps that only write to local log files get integrated into centralized logging without any code changes.
 
 > **📚 Theory.** All three sidecar-family patterns (sidecar, ambassador, adapter) rely on the same underlying Kubernetes guarantee: containers in one Pod share a network namespace (so `localhost` reaches every container in the Pod) and can share volumes. This is fundamentally different from two Pods talking over a Service — there's no load-balancing, no DNS lookup, and no network hop between containers in the same Pod, which is exactly why the ambassador pattern can transparently intercept "localhost" traffic without the app being aware.
-
----
 
 ---
 

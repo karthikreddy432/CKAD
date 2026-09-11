@@ -75,12 +75,6 @@ data:
     timeout=30
 ```
 
-**Consuming it — three ways:**
-```yaml
-
----
-```
-
 ## 🧪 Practice — ConfigMap Consumption and Update
 
 ### Task
@@ -188,7 +182,8 @@ kubectl exec -n checkout config-demo -- cat /etc/app-config/LOG_LEVEL
 
 </details>
 
-# 1. Single env var
+**Consuming it — three ways:**
+**1. Single env var:**
 ```yaml
 env:
 - name: MODE
@@ -341,8 +336,6 @@ stringData:
 > **🌍 Real-world example.** A team migrating a legacy app to Kubernetes initially committed a Secret manifest straight into their GitHub repo, reasoning "it's a Secret object, it's protected." Six months later a security audit found the base64-encoded database password sitting in plain sight in the Git history — base64 is an *encoding*, not encryption, and anyone with repo access (or a clone of an old commit) could decode it with one command. The team's fix was standard now: Secrets are never committed to git at all; instead they're created at deploy time from a secrets manager (e.g., HashiCorp Vault or a cloud provider's secret store) via an external-secrets operator, or the manifest is encrypted at rest with a tool like `sealed-secrets` before it's safe to commit.
 
 > **📚 Theory.** By default, Secret data is stored in etcd as base64 — readable by anyone with etcd access or sufficient RBAC to `get` the Secret object. Real confidentiality requires layering on: encryption at rest for etcd (a cluster-admin concern, not developer-facing on the exam), RBAC restricting who can read Secret objects (Ch. 1.6), and often an external secrets backend. Understanding that "Secret" describes an API *shape*, not a security *guarantee*, is what separates surface-level and production-grade Kubernetes knowledge.
-
----
 
 ---
 
@@ -508,8 +501,6 @@ kubectl exec mypod -- cat /etc/podinfo/labels
 
 ---
 
----
-
 ## 🧪 Practice — Downward API
 
 ### Task
@@ -601,8 +592,6 @@ kubectl exec -n checkout identity-demo -- printenv MY_POD_NAME MY_NAMESPACE MY_P
 **Imperative / generate then edit:**
 ```bash
 kubectl run web --image=nginx --dry-run=client -o yaml > pod.yaml
-
----
 ```
 
 ## 🧪 Practice — Requests, Limits, LimitRange, and Quota
@@ -715,7 +704,7 @@ kubectl get pod worker -n resource-demo -o jsonpath='{.spec.containers[0].resour
 
 </details>
 
-# then add:
+**Then add to the generated `pod.yaml`:**
 ```yaml
 resources:
   requests:
@@ -957,8 +946,6 @@ kubectl exec web -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
 🟢 **Nice to know:** since Kubernetes 1.24+, ServiceAccount tokens are time-bound and projected, not stored as long-lived Secrets automatically — if you need a durable token you create it explicitly as a Secret of type `kubernetes.io/service-account-token`.
 
 > **🌍 Real-world example.** A CI/CD runner (e.g., an Argo CD or Jenkins agent Pod running inside the cluster) needs to apply manifests to the cluster on every merge to `main`. Instead of embedding a cluster-admin kubeconfig as a CI secret — a single leaked credential away from full cluster compromise — the runner gets its own ServiceAccount scoped by a Role that can only create/update/delete Deployments, Services, and ConfigMaps in specific namespaces. If that CI Pod is ever compromised, the blast radius is bounded to exactly what its ServiceAccount can do, which is the entire point of least-privilege identity design.
-
----
 
 ---
 
@@ -1277,8 +1264,6 @@ kubectl get pod secure-pod -o jsonpath='{.spec.containers[0].securityContext}'
 
 ---
 
----
-
 ## 🧪 Practice — Harden a Pod
 
 ### Task
@@ -1443,8 +1428,6 @@ kubectl run test --image=nginx -n dev     # observe the rejection message if non
 🟡 **Exam tip:** if a Pod is rejected with a message naming "PodSecurity" rather than a normal scheduling/image error, the fix lives in `securityContext` (1.7), not in the workload logic — read the rejection message, it names the exact missing field.
 
 > **🌍 Real-world example.** A bank's platform team enforces `restricted` Pod Security on every namespace by default, cluster-wide, via a policy applied at namespace-creation time. This means a developer who forgets to set `runAsNonRoot` doesn't ship an insecure Pod to production and get caught later in a security review — their `kubectl apply` simply fails immediately with a clear error, at the moment of mistake, which is far cheaper to fix than after a security incident. This "shift left" pattern (catching the problem at the earliest possible stage) is why Pod Security Admission replaced the older, admin-only PodSecurityPolicy: it's simple enough that any team can turn it on for their own namespace without needing cluster-admin help.
-
----
 
 ---
 

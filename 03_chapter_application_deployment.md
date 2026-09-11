@@ -135,8 +135,6 @@ kubectl describe deployment web
 
 ---
 
----
-
 ## 🧪 Practice — Control and Roll Back a Rolling Update
 
 ### Task
@@ -339,8 +337,6 @@ for i in $(seq 1 20); do curl -s web | grep version; done   # observe traffic sp
 
 ---
 
----
-
 ## 🧪 Practice — Perform a Blue/Green Cutover
 
 ### Task
@@ -489,8 +485,6 @@ kubectl get all -l app.kubernetes.io/instance=my-release
 
 ---
 
----
-
 ## 🧪 Practice — Install, Override, Upgrade, and Roll Back a Helm Release
 
 ### Task
@@ -558,12 +552,6 @@ Use the chart/repository supplied by the environment rather than assuming an ext
 | Built into `kubectl`? | No — separate `helm` binary | Yes — `kubectl apply -k` |
 | Packaging concept | "Chart" with `values.yaml` | "Base" + "overlays", no packaging format |
 | CKAD scope | Install/upgrade/rollback existing charts | Author your own overlays on your own base |
-
-**Base:**
-```yaml
-
----
-```
 
 ## 🧪 Practice — Build an Environment Overlay
 
@@ -656,7 +644,7 @@ kubectl get configmap
 
 </details>
 
-# base/kustomization.yaml
+**Base `kustomization.yaml`:**
 ```yaml
 resources:
 - deployment.yaml
