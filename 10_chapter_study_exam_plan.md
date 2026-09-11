@@ -42,8 +42,12 @@ flowchart TD
 | **2 — Command Drills** | Chapter 6 daily, until typing is automatic | Generate any covered YAML skeleton in under 30 seconds |
 | **3 — Troubleshooting** | Level 3 labs, repeated until diagnosis is instant | Identify the failure category from Events alone, before reading logs |
 | **4 — Speed** | Level 5 timed tasks | Consistently finish at or under the stated time target |
-| **5 — Mock Exams** | Level 6, full 2-hour sessions, then Killer.sh | Score ≥66% self-graded before sitting the real exam |
+| **5 — Mock Exams** | Level 6, full 2-hour sessions, then Killer.sh | For these 17-task mocks, aim for ≥12/17 fully verified tasks as a study proxy; then use Killer.sh for independent timed practice |
 | **6 — Final Revision** | Chapter 8 cheat sheets only | Can reconstruct any cheat-sheet table from memory |
+
+## How to Use Killer.sh
+
+Killer.sh provides two CKAD simulator sessions, each with 17 scenarios and a 120-minute countdown, and is intended to be used as realistic exam-pressure practice. Its score should not be treated as a direct predictor of the real exam score. Many candidates find the simulator more demanding than the real exam, so a difficult simulator result is a signal to review and learn—not a reason to panic. ([Linux Foundation](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/); [Killer.sh](https://killer.sh/ckad))
 
 ## Suggested Time Allocation (weight-proportional)
 
@@ -73,7 +77,7 @@ Before scheduling the real exam, confirm all of the following are true:
 | I can generate any common YAML skeleton in under 30 seconds without looking it up | Chapter 6 |
 | I can diagnose a Pod/Service/Ingress/NetworkPolicy failure from its symptom alone | Chapter 5, Chapter 9 Level 3 |
 | I finish Level 5 timed tasks at or under their target time | Chapter 9 Level 5 |
-| I scored ≥66% self-graded on both Mock Exam A and Mock Exam B | Chapter 9 Level 6 |
+| I can complete at least 12/17 tasks on both Mock Exam A and Mock Exam B with every required condition verified | Chapter 9 Level 6 |
 | I can reconstruct the Chapter 8 cheat sheets from memory | Chapter 8 |
 
 If any row isn't true yet, that's your signal for where to spend the remaining study time — not a reason to delay scheduling indefinitely.

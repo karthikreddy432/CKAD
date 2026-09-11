@@ -16,12 +16,12 @@ Everything above this point was reference. Everything from here on is hands-on. 
 By the end of this chapter, you should be able to:
 
 - Complete Level 1–2 fundamentals tasks from memory, without consulting Chapter 8.
-- Diagnose and fix every Level 3 failure category using only `describe`/`logs`/`get endpoints` — no starting hint beyond the symptom.
+- Diagnose and fix every Level 3 failure category using only `describe`/`logs`/`get EndpointSlices` — no starting hint beyond the symptom.
 - Decide, unprompted, which Kubernetes objects a Level 4 outcome-based task requires, the way the real exam expects.
 - Finish Level 5 timed tasks at or under their stated time targets.
 - Self-grade a full Level 6 mock exam at or above the 66% pass-proxy threshold.
 
-**Progression:** Level 1 (Fundamentals) -> Level 2 (Configuration & Design) -> Level 3 (Troubleshooting) -> Level 4 (Combined) -> Level 5 (Timed) -> Level 6 (Full Mock Exams). Difficulty and ambiguity increase as you go — later levels intentionally withhold which resource or command to use, exactly like the real exam.
+**Progression:** Level 1 (Fundamentals) -> Level 2 (Configuration & Design) -> Level 3 (Troubleshooting) -> Level 4 (Combined) -> Level 5 (Timed) -> Level 6 (Full Mock Exams). Difficulty and ambiguity increase as you go — later levels intentionally withhold which resource or command to use, in the style of a performance-based exam.
 
 ```mermaid
 flowchart LR
@@ -32,7 +32,7 @@ flowchart LR
     L5 --> L6["Level 6\nMock Exams\nfull 2-hour simulation"]
 ```
 
-Each level removes a little more scaffolding: Level 1 tells you exactly which object and command to use, Level 4 only describes an outcome, and Level 6 gives you nothing but a 2-hour clock — exactly like exam day.
+Each level removes a little more scaffolding: Level 1 tells you exactly which object and command to use, Level 4 only describes an outcome, and Level 6 gives you nothing but a 2-hour clock — under the same kind of time pressure.
 
 > **📚 Theory — why struggling first matters.** This is sometimes called "productive failure" or the generation effect: forcing yourself to attempt recall (even unsuccessfully) before seeing an answer builds a stronger, more durable memory trace than reading the answer first ever does — the retrieval attempt itself is what strengthens the neural pathway, not just exposure to the correct answer. It's the same reason flashcards work better than re-reading notes. Skipping straight to the solution below feels efficient in the moment and is measurably worse for retention under exam pressure three weeks later.
 
@@ -202,7 +202,7 @@ kubectl exec secret-pod -- cat /etc/secret/password
 
 **Task:** Create a Deployment `hello` with image `nginx:1.27` and 2 replicas. Expose it internally on port 80, forwarding to container port 80.
 
-**Verification:** `kubectl get endpoints hello` lists 2 IPs.
+**Verification:** `kubectl get endpointslice -l kubernetes.io/service-name=hello` lists 2 IPs.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -210,7 +210,7 @@ kubectl exec secret-pod -- cat /etc/secret/password
 ```bash
 kubectl create deployment hello --image=nginx:1.27 --replicas=2
 kubectl expose deployment hello --port=80 --target-port=80
-kubectl get endpoints hello
+kubectl get endpointslice -l kubernetes.io/service-name=hello
 ```
 
 </details>
@@ -714,7 +714,7 @@ selector:
 <summary>🔎 Diagnostic — reveal if needed</summary>
 
 ```bash
-kubectl get endpoints web -n dev     # empty
+kubectl get endpointslice -l kubernetes.io/service-name=web -n dev     # empty
 kubectl get pods --show-labels -n dev
 ```
 
@@ -736,7 +736,7 @@ kubectl patch service web -n dev -p '{"spec":{"selector":{"app":"web-frontend"}}
 - **Namespace:** `dev`
 - **Time Target:** 4 minutes
 
-**Starting State:** Endpoints exist and look correct, but `curl` to the Service times out. Container listens on `8080`; Service:
+**Starting State:** EndpointSlices exist and look correct, but `curl` to the Service times out. Container listens on `8080`; Service:
 
 ```yaml
 ports:
@@ -748,7 +748,7 @@ ports:
 <summary>🔎 Diagnostic — reveal if needed</summary>
 
 ```bash
-kubectl get endpoints web -n dev -o wide   # shows pod IPs with :8081 — wrong
+kubectl get endpointslice -l kubernetes.io/service-name=web -n dev -o wide   # shows pod IPs with :8081 — wrong
 kubectl exec <pod> -n dev -- netstat -tlnp  # confirms app is on 8080
 ```
 
@@ -904,7 +904,7 @@ spec:
 
 ## Level 4 — Combined CKAD Tasks
 
-**⏱ Level time budget:** 1.5–2 hours for all 6 tasks. These describe an outcome, not a resource. Decide what to use yourself, exactly like the real exam — the "Skills Tested" line is there for your review afterward, not as a hint before you start.
+**⏱ Level time budget:** 1.5–2 hours for all 6 tasks. These describe an outcome, not a resource. Decide what to use yourself, in the style of a performance-based exam — the "Skills Tested" line is there for your review afterward, not as a hint before you start.
 
 ### Task 4.1 — Externalize configuration for a running app
 
@@ -915,8 +915,6 @@ spec:
 
 **Task:** The `catalog` app needs an environment variable `FEATURE_FLAGS=beta` sourced from configuration (not hardcoded in the Pod spec), and every container should have a CPU limit of `300m` and a memory limit of `256Mi`. After your change, confirm the application is still reachable through its existing Service with zero Pods ever fully down at once.
 
-<div style="page-break-after: always;"></div>
-
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
 
@@ -926,7 +924,7 @@ kubectl set resources deployment/catalog -n shop -c=nginx --limits=cpu=300m,memo
 kubectl set env deployment/catalog -n shop --from=configmap/catalog-config
 kubectl patch deployment catalog -n shop -p '{"spec":{"strategy":{"rollingUpdate":{"maxUnavailable":0}}}}'
 kubectl rollout status deployment/catalog -n shop
-kubectl get endpoints catalog -n shop
+kubectl get endpointslice -l kubernetes.io/service-name=catalog -n shop
 ```
 
 **Explanation:** `maxUnavailable: 0` guarantees the Service always has at least the full replica count available during the rollout (relies on `maxSurge` to add capacity instead of removing it first).
@@ -1021,7 +1019,7 @@ kubectl run other-test --image=busybox -n shop --rm -it -- wget -qO- -T3 payment
 - **Time Target:** 12 minutes
 - **Skills Tested:** Canary pattern, Service selector design
 
-**Task:** Introduce version `myapp:2.0` so it receives roughly 20% of `checkout`'s traffic, without touching the existing stable Deployment's rollout strategy, and without any downtime.
+**Task:** Introduce version `myapp:2.0` so it receives an approximate minority share of `checkout`'s traffic (aim for roughly 20% based on ready endpoint counts), without touching the existing stable Deployment's rollout strategy and without downtime. Kubernetes Service routing does not guarantee an exact percentage split.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -1033,7 +1031,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: checkout-canary, namespace: shop}
 spec:
-  replicas: 1                       # 1 of (5+1)=6 total ≈ 17-20%
+  replicas: 1                       # 1 of 6 ready endpoints; only an approximate share
   selector: {matchLabels: {app: checkout, track: canary}}
   template:
     metadata: {labels: {app: checkout, track: canary}}
@@ -1172,6 +1170,8 @@ kubectl label pods -l app=web tier=frontend -n dev
 
 </details>
 
+> **Standalone Pod immutability reminder:** For a bare Pod, many `spec` fields—including container probes and container configuration—cannot be edited in place. If a task asks you to change such a field, modify the source manifest and recreate the Pod. If the Pod is managed by a Deployment/StatefulSet/etc., update the controller's Pod template instead.
+
 ### Task 5.3 (5 min) — Create a Secret and inject one key
 
 Create Secret `api-key` (`KEY=abc123`) in namespace `dev`, then patch existing Pod `worker` (assume it can be recreated) to expose it as env var `API_KEY`.
@@ -1182,8 +1182,10 @@ Create Secret `api-key` (`KEY=abc123`) in namespace `dev`, then patch existing P
 ```bash
 kubectl create secret generic api-key --from-literal=KEY=abc123 -n dev
 kubectl get pod worker -n dev -o yaml > worker.yaml
-# add env: [{name: API_KEY, valueFrom: {secretKeyRef: {name: api-key, key: KEY}}}]
-kubectl replace -f worker.yaml --force
+# Add the API_KEY env entry to the clean replacement manifest while preserving the required Pod spec.
+# Remove server-generated metadata/status before recreating the standalone Pod.
+kubectl delete pod worker -n dev
+kubectl create -f worker.yaml
 ```
 
 </details>
@@ -1196,7 +1198,12 @@ Pod `flaky` in `dev` has `readinessProbe.httpGet.port: 9999`; the app listens on
 <summary>✅ Solution — reveal after attempting the task</summary>
 
 ```bash
-kubectl edit pod flaky -n dev     # correct port to 8080 (or patch --type=json if the field is immutable on a running Pod — delete/recreate if needed)
+# Probe configuration on an existing Pod is immutable. Update the source manifest, then recreate the standalone Pod.
+kubectl get pod flaky -n dev -o yaml > flaky.yaml
+# Change readinessProbe.httpGet.port to 8080 and remove server-generated metadata/status.
+kubectl delete pod flaky -n dev
+kubectl create -f flaky.yaml
+kubectl get pod flaky -n dev
 ```
 
 </details>
@@ -1252,6 +1259,8 @@ Given only "`checkout` in namespace `shop` is unreachable," find and fix the roo
 
 ## Level 6 — Full Mock Exams
 
+> **Self-scoring note:** Each mock contains 17 tasks, but these are course-created practice tasks. For a simple internal score, treat each fully verified task as 1 point: **12/17 = 70.6%**. This is a study heuristic only, not a prediction of the real CKAD score, because the real exam uses subtask-based scoring and different tasks can contribute different amounts.
+
 
 # CKAD Mock Exam A
 
@@ -1302,7 +1311,7 @@ Requirements:
 * 3 Redis replicas using `redis:7`
 * Stable network identity for replicas
 * Each replica requires its own `1Gi` persistent volume
-* Use the cluster's default StorageClass
+* Use the cluster's default StorageClass (if one is available in the practice cluster)
 * Data must survive an individual Pod restart
 
 Expose the workload using the appropriate Service configuration.

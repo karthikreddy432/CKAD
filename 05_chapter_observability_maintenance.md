@@ -19,7 +19,7 @@ By the end of this chapter, you should be able to:
 - Follow a fixed, repeatable diagnostic sequence instead of guessing when something is broken.
 - Read a Pod's `Conditions` block to identify exactly which lifecycle stage is stuck, faster than scanning Events.
 - Recognize each common Pod failure state (`Pending`, `ImagePullBackOff`, `CrashLoopBackOff`, `OOMKilled`, etc.) on sight and know where to look first.
-- Read a container's exit code and map it directly to a likely cause without needing to open logs.
+- Interpret common container exit codes as clues, then confirm the termination reason and surrounding evidence.
 - Explain why `startupProbe` must gate `livenessProbe`/`readinessProbe` for slow-starting applications.
 - Use CLI monitoring commands (`top`, custom columns, event sorting) to get a fast operational picture of a namespace.
 - Recognize a deprecated `apiVersion` error and fix it without needing to touch the rest of the spec.
@@ -74,7 +74,7 @@ Use this exact sequence on every broken resource, every time, instead of guessin
 kubectl get <kind>
       ↓  (status, restarts, READY column)
 kubectl describe <kind> <name>
-      ↓  (Events section — almost always names the exact problem)
+      ↓  (Events section — often narrows the problem to the failing resource or condition)
 kubectl logs <pod> [-c <container>]
       ↓  (application-level errors)
 kubectl logs <pod> --previous
@@ -135,7 +135,7 @@ Conditions:
 | `ContainersReady` | A main container isn't ready — check readiness probe / crash state |
 | `Ready` | Follows from the above — overall Pod isn't serving traffic |
 
-🟡 Reading top-to-bottom, the **first `False` condition tells you exactly which stage to investigate** — no need to guess between a scheduling problem and a runtime problem before you've even opened Events.
+🟡 Read Conditions as a quick lifecycle snapshot: a `False` condition narrows the stage to investigate, while Events and container state provide the specific cause.
 
 ```mermaid
 flowchart TD
@@ -214,7 +214,7 @@ kubectl logs -l app=web --all-containers=true --prefix=true   # logs from every 
 
 🔴 `--previous` is the detail candidates forget most often — if a container has already restarted, `kubectl logs` without `--previous` shows the *new* attempt's logs, which are often just a clean startup with no sign of what actually crashed it.
 
-> **🌍 Real-world example.** A support engineer once spent twenty minutes convinced a service had "no error logs at all" during an incident — `kubectl logs` showed a perfectly clean, quiet startup sequence, nothing unusual. The container had actually been crash-looping every 90 seconds; every time they ran `kubectl logs`, it happened to catch the brand-new attempt's fresh boot, seconds after the previous crash. The instant they added `--previous`, the real stack trace (a missing environment variable causing a null pointer exception at startup) was right there. This gap between "the crash" and "the freshest restart" is the single most common reason logs look misleadingly clean during an active `CrashLoopBackOff`.
+> **🌍 Real-world example.** A support engineer once spent twenty minutes convinced a service had "no error logs at all" during an incident — `kubectl logs` showed a perfectly clean, quiet startup sequence, nothing unusual. The container had actually been crash-looping every 90 seconds; every time they ran `kubectl logs`, it happened to catch the brand-new attempt's fresh boot, seconds after the previous crash. The instant they added `--previous`, the real stack trace (a missing environment variable causing a null pointer exception at startup) was right there. This gap between "the crash" and "the freshest restart" is a common reason logs look misleadingly clean during an active `CrashLoopBackOff`.
 
 ---
 
@@ -320,8 +320,8 @@ kubectl describe pod mypod | grep -A5 "Last State"
 |---|---|---|
 | `0` | Clean exit | Normal for a Job/init container; unexpected for a long-running app — likely missing `sleep`/foreground process |
 | `1` | Generic application error | App-level logic error — check `logs` |
-| `137` | `128 + 9` = killed by `SIGKILL` | Almost always `OOMKilled` — check memory limit, or the node killed it |
-| `139` | `128 + 11` = segmentation fault | Application/runtime bug, not a Kubernetes config issue |
+| `137` | `128 + 9` = killed by `SIGKILL` | Often `OOMKilled`, but confirm the container's termination reason and node events before concluding |
+| `139` | `128 + 11` = commonly SIGSEGV | Application/runtime clue; confirm the actual termination reason |
 | `143` | `128 + 15` = killed by `SIGTERM` | Graceful shutdown request — normal during scale-down/rollout, investigate only if unexpected |
 
 ```bash
@@ -409,7 +409,7 @@ Verify with:
 ```bash
 kubectl rollout status deployment/api -n prod
 kubectl get pods -n prod
-kubectl get endpoints api -n prod
+kubectl get endpointslice -l kubernetes.io/service-name=api -n prod
 ```
 
 </details>
@@ -471,7 +471,7 @@ kubectl describe pod mypod | grep -A5 Events   # probe failure events appear her
 | Probe checks the wrong port | `port` doesn't match container's actual listening port | Align probe `port` with app config |
 | App marked healthy but actually deadlocked | Liveness probe target too shallow (e.g., pings a static file, not real app logic) | Point liveness at a meaningful health endpoint |
 
-🔴 **The one-line distinction the exam loves:** readiness failure = "stop sending me traffic, I'm still alive" (no restart). Liveness failure = "I'm broken, kill and restart me."
+🔴 **The one-line distinction:** readiness failure = "stop sending me traffic, I'm still alive" (the container is not restarted by readiness itself). Liveness failure = "I'm broken, kill and restart me." A readiness failure removes the Pod from matching Service EndpointSlices when it is not ready.
 
 ### Startup Probe Priority — Critical for Slow-Starting Apps
 
@@ -492,7 +492,7 @@ readinessProbe now active
 (normal operation)"]
 ```
 
-**Real exam pattern:**
+**High-value CKAD-style pattern:**
 ```yaml
 containers:
 - name: slow-app
@@ -591,7 +591,7 @@ kubectl get events --sort-by=.lastTimestamp
 kubectl get events -n dev --field-selector involvedObject.name=mypod
 ```
 
-🟢 `kubectl top` requires the metrics-server add-on to be running in-cluster — assume it's present in the exam environment.
+🟢 `kubectl top` requires a working resource-metrics API (commonly metrics-server). If metrics are unavailable, diagnose that explicitly rather than inventing usage values.
 
 ---
 
@@ -649,7 +649,7 @@ kubectl api-resources                                  # current available kinds
 kubectl api-versions
 kubectl explain deployment                              # shows the current recommended apiVersion
 kubectl apply -f old-manifest.yaml --dry-run=server     # server will reject/warn on removed APIs
-kubectl convert -f old.yaml --output-version apps/v1    # if the convert plugin is installed
+kubectl convert -f old.yaml --output-version apps/v1    # optional plugin; use only if installed
 ```
 
 Common historical migrations worth recognizing on sight: `extensions/v1beta1` -> `apps/v1` (Deployments, DaemonSets), `policy/v1beta1` -> `policy/v1` (PodDisruptionBudget), `batch/v1beta1` -> `batch/v1` (CronJob), `networking.k8s.io/v1beta1` -> `networking.k8s.io/v1` (Ingress).
@@ -660,6 +660,8 @@ Common historical migrations worth recognizing on sight: `extensions/v1beta1` ->
 
 ---
 
+> **Immutability reminder:** Many Pod-level fields cannot be changed in place after creation. For Pods managed by a Deployment/StatefulSet/Job, update the controller template instead. Recreate the Pod when necessary; treat `kubectl replace --force` as a last-resort destructive operation, not the normal fix.
+
 ## 5.7 Node Maintenance — Cordon and Drain 🟢 NICE TO KNOW
 
 ---
@@ -667,7 +669,7 @@ Common historical migrations worth recognizing on sight: `extensions/v1beta1` ->
 ## 🧪 Practice — Prepare a Node for Maintenance
 
 ### Task
-Node `node1` must be taken out of scheduling and prepared for maintenance. Cordon it, drain eligible workloads, verify the result, then uncordon it.
+A node named `<node-name>` must be taken out of scheduling and prepared for maintenance. Cordon it, drain eligible workloads, verify the result, then uncordon it.
 
 ### Requirements
 - Cordon before drain.
@@ -692,24 +694,27 @@ The node becomes `SchedulingDisabled`, eligible workloads are evicted/reschedule
 <summary>✅ Solution</summary>
 
 ```bash
-kubectl cordon node1
 kubectl get nodes
-kubectl drain node1 --ignore-daemonsets --delete-emptydir-data
+kubectl cordon <node-name>
+kubectl get nodes
+kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
 kubectl get pods -A -o wide
-kubectl uncordon node1
+kubectl uncordon <node-name>
 kubectl get nodes
 ```
 
 </details>
+
+**Important drain behavior:** `kubectl drain` will stop if it encounters standalone/unmanaged Pods unless you explicitly add `--force`. Read the error first; `--force` is an intentional exception, not a default flag.
 
 **What it is.** `cordon` marks a node unschedulable (existing Pods keep running); `drain` additionally evicts existing Pods so the node can be safely taken down.
 
 **Why CKAD tests it.** Listed under OM-05 debugging awareness — you may need to recognize *why* Pods rescheduled, even though performing cluster maintenance itself is more of a CKA task.
 
 ```bash
-kubectl cordon node1
-kubectl drain node1 --ignore-daemonsets --delete-emptydir-data
-kubectl uncordon node1
+kubectl cordon <node-name>
+kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
+kubectl uncordon <node-name>
 ```
 
 **Verify:**
@@ -726,17 +731,17 @@ kubectl get pods -o wide                   # confirm Pods moved off the drained 
 - Readiness ≠ Liveness: readiness pulls a Pod out of Service rotation without restarting it; liveness kills and restarts the container.
 - If `kubectl exec` isn't available (no shell in the image), reach for `kubectl debug` instead of declaring the Pod unfixable.
 - Check `Conditions` before `Events` when you just need to know *which stage* is stuck — it's a four-line snapshot instead of a scrolling log.
-- Exit code `137` means OOMKilled almost every time — go straight to the memory limit instead of reading application logs first.
+- Exit code `137` means the process received `SIGKILL`; OOM is a common cause, so confirm the termination reason before changing memory limits.
 
 ## Chapter Summary
 
 | Topic | One-line takeaway |
 |---|---|
 | Debugging workflow (5.1) | `get` → `describe` → `logs` → `exec`, in that order — match the tool to the failure stage |
-| Conditions (5.1) | The first `False` condition top-to-bottom tells you exactly which stage is stuck |
+| Conditions (5.1) | Conditions provide a quick lifecycle snapshot; use Events/container state to identify the specific cause |
 | Container logs (5.2) | `--previous` is the most forgotten flag — use it whenever RESTARTS > 0 |
 | Failure states (5.3) | Each status (`Pending`, `ImagePullBackOff`, `CrashLoopBackOff`, `OOMKilled`...) has one clear diagnostic path |
-| Exit codes (5.3) | `137` = OOMKilled, `139` = segfault, `143` = graceful SIGTERM — a faster read than logs when logs are empty |
+| Exit codes (5.3) | `137` = process received SIGKILL, `139` commonly indicates SIGSEGV, `143` commonly indicates SIGTERM — use these as clues and confirm the termination reason |
 | Probes (5.4) | Readiness failure = stop routing traffic (no restart); liveness failure = kill and restart; `startupProbe` gates both for slow-starting apps |
 | CLI monitoring (5.5) | `kubectl top` needs metrics-server; custom-columns and event sorting give a fast operational picture |
 | API deprecations (5.6) | A rejected `apiVersion` is a one-line fix — update the string, nothing else usually changes |

@@ -39,8 +39,6 @@ By the end of this chapter, you should be able to:
 | [8.11](#811-jsonpath-cheat-sheet) JSONPath | Common extraction patterns |
 | [8.12](#812-helm--kustomize-quick-reference) Helm/Kustomize | Install/upgrade/rollback and overlay commands |
 
-*(Note: section numbers below have been corrected from the original guide's `7.x` labels to `8.x`, matching this chapter's actual number — a numbering inconsistency in the source material.)*
-
 ## 8.1 kubectl Cheat Sheet
 
 | Command | Purpose |
@@ -82,6 +80,62 @@ kubectl create ingress <name> --rule="host/path=svc:port"
 ```
 
 ## 8.3 YAML Cheat Sheet — Skeletons
+
+### Ingress (v1)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  rules:
+  - host: app.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web
+            port:
+              number: 80
+```
+
+### StatefulSet with `volumeClaimTemplates`
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web
+spec:
+  serviceName: web
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - name: web
+        image: nginx
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+```
+
 
 ```yaml
 # Pod
@@ -200,12 +254,12 @@ Liveness probe failing (repeated restarts)
   -> describe -> Events, logs --previous
   -> check: initialDelaySeconds too short / probe target too strict
 
-Service has no endpoints
-  -> kubectl get endpoints <svc>
-  -> check: selector vs pod labels mismatch / pods not Ready
+Service has no ready backends
+  -> kubectl get endpointslice -l kubernetes.io/service-name=<svc>
+  -> check: selector vs pod labels mismatch / Pods not Ready
 
-Service has endpoints but unreachable
-  -> check: targetPort vs container's actual listening port / NetworkPolicy blocking / wrong Service type
+EndpointSlices exist but traffic is unreachable
+  -> check: targetPort vs application's actual listening port / NetworkPolicy blocking / wrong Service type
 
 Ingress not routing
   -> describe ingress -> check host/path/pathType
@@ -297,7 +351,7 @@ kubectl rollout pause|resume|restart deployment/x
 | `activeDeadlineSeconds` | Hard wall-clock timeout for the whole Job |
 | `restartPolicy` | Must be `Never` or `OnFailure` inside a Job's Pod template (never `Always`) |
 | `schedule` (CronJob) | Standard 5-field cron syntax |
-| `concurrencyPolicy` | `Allow` \| `Forbid` \| `Replace` |
+| `concurrencyPolicy` | `Allow` (default) \| `Forbid` \| `Replace` |
 | `suspend: true` (CronJob) | Pause future scheduling without deleting the object |
 
 ## 8.11 JSONPath Cheat Sheet

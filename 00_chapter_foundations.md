@@ -16,7 +16,7 @@ Not a scored domain by itself, but every scored domain depends on this. Move fas
 
 By the end of this chapter, you should be able to:
 
-- Explain the five parts of every Kubernetes object (`apiVersion`, `kind`, `metadata`, `spec`, `status`) and where each one lives.
+- Explain the core structure of Kubernetes objects (`apiVersion`, `kind`, `metadata`, `spec`) and understand how `status` is generally server-populated observed state.
 - Switch between namespaces confidently and recognize why namespace mistakes are the most common source of lost exam points.
 - Use labels and selectors to understand how Kubernetes objects reference each other without hard-coded links.
 - Look up any field name or nesting instantly with `kubectl explain`, without needing external documentation.
@@ -27,7 +27,7 @@ By the end of this chapter, you should be able to:
 
 ## 0.1 Core Concepts 🔴 MUST KNOW
 
-**What it is.** Every Kubernetes object — Pod, Deployment, Service, ConfigMap, anything — is a record in the API server, structured the same way: `apiVersion`, `kind`, `metadata`, `spec`, and (for many objects) `status`. Namespaces partition objects logically within one cluster. Labels are key/value tags on objects; selectors query objects by their labels. This is the vocabulary the entire exam is written in.
+**What it is.** Every Kubernetes object — Pod, Deployment, Service, ConfigMap, anything — is a record in the API server with core top-level fields: `apiVersion`, `kind`, `metadata`, and `spec`. Many objects also expose a `status` field, which is server-populated observed state. Namespaces partition objects logically within one cluster. Labels are key/value tags on objects; selectors query objects by their labels. This is the vocabulary the entire exam is written in.
 
 **Why CKAD tests it.** Every single task starts with "create/modify a `<kind>` with these properties" — if you're not fluent in reading and writing the object model, every other skill is slower.
 
@@ -35,7 +35,7 @@ By the end of this chapter, you should be able to:
 
 ### The shape of every Kubernetes object
 
-Before diving into namespaces and labels individually, it helps to see how the five top-level fields relate to each other. `spec` is the only part you normally write by hand — it's your request. `status` is filled in by Kubernetes itself and tells you what's actually happening.
+Before diving into namespaces and labels individually, it helps to see how the core top-level fields relate to each other. `spec` is the part you normally write by hand — it's your request. `status`, when present, is filled in by Kubernetes itself and tells you what's actually happening.
 
 ```mermaid
 flowchart TD
@@ -43,7 +43,7 @@ flowchart TD
     OBJ --> KIND[kind]
     OBJ --> META[metadata]
     OBJ --> SPEC[spec]
-    OBJ --> STATUS[status]
+    OBJ --> STATUS["status\n(often present)"]
 
     META --> M1["name / namespace\n(identity)"]
     META --> M2["labels\n(used by selectors)"]
@@ -67,7 +67,17 @@ kubectl get pods -A                                     # all namespaces
 
 🔴 **The single most common exam mistake is working in the wrong namespace.** Read every task for a namespace requirement before you type anything.
 
-> **🌍 Real-world example.** At a mid-size fintech, `payments`, `payments-staging`, and `payments-canary` are three separate namespaces on the *same* cluster, all running a Deployment named `api`. An engineer once ran `kubectl delete deployment api` intending to clean up a broken canary, but their terminal's default context was `payments` (production) — because `kubectl config set-context` had been run once, months earlier, and never revisited. Production went down for four minutes. The fix the team adopted afterward: shell prompts that print the current namespace (`kubectl config view --minify -o jsonpath='{..namespace}'`) inline, so the ambient context is never invisible. On the exam, the equivalent discipline is running `kubectl config get-contexts` and checking the task's namespace before your first keystroke.
+**Context vs. namespace flag.** Two ways to interact with namespaces:
+
+```bash
+kubectl get pods -n checkout              # affects only this command
+kubectl config set-context --current --namespace=checkout  # changes default for this context
+kubectl config current-context            # shows active context
+```
+
+The `-n` flag is temporary and command-specific. `config set-context --namespace=...` persists in your kubeconfig until explicitly changed — which is why the namespace-context mistake is easy to make and hard to detect.
+
+> **🌍 Illustrative scenario.** Imagine a fintech platform with namespaces `payments`, `payments-staging`, and `payments-canary` on the *same* cluster, all running a Deployment named `api`. An engineer intends to delete a broken canary but their terminal's default context is `payments` (production) — because `kubectl config set-context` was run months earlier and never revisited. Production goes down. The lesson: namespace context is persistent and often invisible. The defensive habit: shell prompts that display the current namespace via `kubectl config view --minify -o jsonpath='{..namespace}'`, and always verify the active context before executing commands. On the exam, the equivalent discipline is running `kubectl config get-contexts` and checking the task's namespace requirement before your first keystroke.
 
 > **📚 Theory.** Namespaces are a purely logical partition, not a security or resource boundary by default — two Pods in different namespaces still share the same nodes, kernel, and network fabric unless you layer on ResourceQuotas (Ch. 1.4) and NetworkPolicies (Ch. 4.3) explicitly. This is why "just put it in its own namespace" is necessary but not sufficient for real isolation between teams or tenants.
 
@@ -76,6 +86,8 @@ kubectl get pods -A                                     # all namespaces
 ---
 
 ## 🧪 Practice — Namespace and Working Context
+
+**Context note:** Unless otherwise stated, subsequent Chapter 0 exercises assume the `checkout` namespace is the active namespace (via `kubectl config set-context --current --namespace=checkout`). Verify your active context and namespace before beginning each task.
 
 ### Task
 
@@ -105,7 +117,7 @@ Then create a Pod named `probe` in the `checkout` namespace using image `busybox
 <details>
 <summary>💡 Hint</summary>
 
-Set the current context namespace before creating the Pod. Remember that a namespace set in the kubeconfig persists until you change it.
+Set the current context namespace before creating the Pod. Remember that a namespace set in the kubeconfig persists until you change it. When overriding the image command with `kubectl run`, use `--command -- sleep 3600`.  Use `kubectl config current-context` to confirm the active context before you begin.
 
 </details>
 
@@ -116,6 +128,7 @@ Set the current context namespace before creating the Pod. Remember that a names
 kubectl create namespace checkout
 kubectl config set-context --current --namespace=checkout
 kubectl run probe --image=busybox:1.36 --command -- sleep 3600
+# `--command --` tells kubectl to treat `sleep 3600` as the container command/entrypoint rather than arguments to the image's default command.
 kubectl get pods
 ```
 
@@ -145,7 +158,7 @@ selector:
     app: nginx
 ```
 
-The diagram below is the mental model to hold onto for the rest of the guide: a Service (or Deployment, or NetworkPolicy) never references a Pod by name — it references a **label**, and anything carrying that label is automatically included.
+The diagram below is the mental model to hold onto for the rest of the guide: labels identify and tag resources; selectors identify resources based on their labels. Services use selectors to identify backend Pods. Deployments use selectors to identify the Pods belonging to the Deployment. NetworkPolicies use `podSelector` and `namespaceSelector` to define policy targets and peers.
 
 ```mermaid
 flowchart LR
@@ -216,7 +229,7 @@ The final selector returns only `web-1`.
 
 </details>
 
-### kubectl explain — your offline API reference
+### kubectl explain — cluster-native API schema reference
 
 ```bash
 kubectl explain pod
@@ -225,11 +238,11 @@ kubectl explain pod.spec.containers.livenessProbe --recursive
 kubectl explain deployment.spec.strategy
 ```
 
-🔴 `kubectl explain <kind>.<path>` is faster than searching docs for field names and nesting — use it constantly during the exam when you can't remember exact YAML structure.
+🔴 `kubectl explain <kind>.<path>` queries the API server's resource schema and is invaluable for discovering field names, nesting, types, and supported values — use it constantly during the exam when you can't remember exact YAML structure.
 
-> **🌍 Real-world example.** A common on-the-job moment: you're told "add a toleration so this Pod can run on the GPU-tainted nodes," but you can't remember whether `tolerations` takes `effect` or `Effect`, or whether the operator field is `operator` or `op`. Instead of tabbing to a browser, `kubectl explain pod.spec.tolerations --recursive` prints the exact field names, types, and enum values straight from the cluster's own OpenAPI schema — which is also guaranteed to match the exact Kubernetes version you're running, unlike a stale blog post.
+> **🌍 Illustrative scenario.** You're asked to add a toleration so a Pod can run on GPU-tainted nodes, but you can't recall whether `tolerations` takes `effect` or `Effect`, or whether the operator field is `operator` or `op`. Running `kubectl explain pod.spec.tolerations --recursive` prints the exact field names, types, and enum values from the *cluster's* own API schema — a highly reliable reference specific to your cluster and version, unlike a potentially stale blog post.
 
-> **📚 Theory.** `kubectl explain` isn't reading a static help file — it queries the API server's OpenAPI/JSON-schema definition for that resource version, so the output is always accurate for *your* cluster's actual API surface, including any CRDs installed (see 1.9). That's why it's the recommended reference even for experienced engineers, not just exam-takers.
+> **📚 Theory.** `kubectl explain` queries the API server's published resource schema for that resource version, so the output is a highly reliable way to check fields, types, and supported values for *your* cluster's actual API surface, including any CRDs installed (see 1.9). That's why it's the recommended reference even for experienced engineers, not just exam-takers.
 
 ---
 
@@ -282,7 +295,7 @@ The field is under `pod.spec`, and the output shows its supported values.
 ```bash
 kubectl api-resources                     # every kind, short names, whether namespaced
 kubectl api-resources --namespaced=true
-kubectl get all -n dev
+kubectl get all -n dev                    # common workload and service resources
 kubectl get pod mypod -o yaml
 kubectl get pod mypod -o json
 ```
@@ -391,9 +404,6 @@ spec:
         port: 80
       initialDelaySeconds: 10
       periodSeconds: 10
-    securityContext:
-      runAsNonRoot: true
-      allowPrivilegeEscalation: false
   initContainers:
   - name: init-perms
     image: busybox
@@ -450,9 +460,9 @@ kubectl run web --image=nginx --dry-run=client -o yaml > pod.yaml
 kubectl expose deployment web --port=80 --dry-run=client -o yaml > svc.yaml
 ```
 
-🔴 **Never hand-write a manifest from a blank file if an imperative command can generate 90% of it.** Generate, then open in your editor and add only the fields the imperative command can't set (probes, volumes, resources, security context).
+🔴 **Prefer generating a manifest skeleton when an imperative command can produce most of what you need, then edit the missing fields.** This is often faster than hand-authoring, especially for Pods, Deployments, and Services. However, hand-authoring is sometimes clearer or faster for complex resources like NetworkPolicies, security policies, and configurations where generation doesn't save much effort.
 
-> **🌍 Real-world example.** Platform teams building internal scaffolding tools (e.g., an internal `myco create-service` CLI) essentially automate this exact workflow: generate a baseline Deployment + Service + ConfigMap via `--dry-run=client -o yaml`, then programmatically layer in the org's required probes, resource limits, and security context defaults before committing the result to a Git repo for GitOps. Treating `--dry-run=client -o yaml` as your personal scaffolding generator during the exam mirrors exactly how real platform tooling is built.
+> **🌍 Illustrative scenario.** Platform teams building internal scaffolding tools (e.g., an internal `myco create-service` CLI) essentially automate this workflow: generate a baseline Deployment + Service + ConfigMap via `--dry-run=client -o yaml`, then programmatically layer in the org's required probes, resource limits, and security context defaults before committing to a Git repo for GitOps. Treating `--dry-run=client -o yaml` as your personal scaffolding generator during the exam mirrors exactly how production platform tooling is built.
 
 ---
 
@@ -555,19 +565,21 @@ kubectl get deployment web -o yaml
 ## Exam Tips — Chapter 0
 
 - Confirm the namespace before touching anything; re-check it if the task changes namespace mid-scenario.
-- Set `export do="--dry-run=client -o yaml"` and `alias k=kubectl` in your first 60 seconds; muscle memory saves minutes across the exam.
+- Set `alias k=kubectl` and, when useful, `export do="--dry-run=client -o yaml"` early; avoid memorizing a force-delete shortcut you might use accidentally.
 - If you don't remember a field name or nesting, `kubectl explain <path> --recursive` beats searching docs almost every time.
 - Read the entire task before editing anything — multi-part tasks often specify a namespace, a name, and a verification step in different sentences.
+
+> **Command override reminder:** `kubectl run ... --command -- sleep 3600` tells `kubectl run` to pass `sleep 3600` as the container command/entrypoint. Without `--command`, arguments after `--` are treated as arguments to the image's existing entrypoint.
 
 ## Chapter Summary
 
 | Concept | One-line takeaway |
 |---|---|
-| Object model | Every object = `apiVersion` + `kind` + `metadata` + `spec` (you write) + `status` (Kubernetes writes) |
+| Object model | Core structure = `apiVersion` + `kind` + `metadata` + `spec`; `status` is generally server-populated observed state |
 | Namespaces | Logical partition only — always verify which one you're in |
-| Labels/selectors | Loose coupling — objects reference each other by label match, never by name |
-| `kubectl explain` | Your offline, always-version-correct field reference |
-| YAML generation | Generate with `--dry-run=client -o yaml`, then hand-edit only what's missing |
+| Labels/selectors | Resources are tagged with labels; selectors identify/group resources based on labels; controllers use selectors to manage resources |
+| `kubectl explain` | Cluster-native API schema reference reflecting your cluster's version and installed CRDs |
+| YAML generation | Generate with `--dry-run=client -o yaml`, then hand-edit missing fields; hand-author when generation isn't faster |
 
 **Next:** Chapter 1 — Application Environment, Configuration and Security, the heaviest-weighted domain on the exam (25%), builds directly on the object model and `kubectl explain` fluency from this chapter.
 \newpage

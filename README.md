@@ -2,7 +2,7 @@
 
 [![License: CC BY 4.0](<https://img.shields.io/badge/License-CC%20BY%204.0-blue.svg>)](https://creativecommons.org/licenses/by/4.0/)
 [![Kubernetes v1.35](https://img.shields.io/badge/Kubernetes-v1.35-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
-[![CKAD Exam](<https://img.shields.io/badge/CKAD%20Exam-Verified-brightgreen>)](https://www.cncf.io/certification/ckad/)
+[![CKAD Exam](<https://img.shields.io/badge/CKAD%20Exam-Prep-brightgreen>)](https://www.cncf.io/certification/ckad/)
 
 A **comprehensive, exam-focused study guide** for the Certified Kubernetes Application Developer (CKAD) certification. This guide combines theory, real-world examples, and practical exam patterns covering all 5 official domains — organized as **one continuous learning path**, from first principles through three full mock exams.
 
@@ -10,8 +10,8 @@ A **comprehensive, exam-focused study guide** for the Certified Kubernetes Appli
 
 - **Coverage:** Comprehensive coverage of all the CKAD syllabus.
 - **Chapters:** 11 (Foundations + 5 Domains + Mastery + Worked Example + Reference + Practice + Plan)
-- **Examples:** 60+ real-world scenarios
-- **Code Snippets:** 150+ tested patterns
+- **Examples:** 60+ illustrative real-world scenarios
+- **Code Snippets:** 150+ practical patterns
 - **Total study time:** ~40–60 hours end to end (reading + drilling + practice — see the roadmap below)
 
 ---
@@ -67,6 +67,13 @@ The five domain chapters (1–5) mirror the five scored domains on the real exam
 | 9  | [Practice &amp; Labs](09_chapter_practice_labs.md)                                     | 🏋️ Practice      | —     | 6–9 hrs                  |
 | 10 | [Study &amp; Exam Plan](10_chapter_study_exam_plan.md)                                 | 🧭 Exam Focus      | —     | 15–20 min                |
 
+### Companion & Architecture References
+
+| Reference | Purpose |
+|---|---|
+| [YAML Structure Companion](yaml_structure.md) | Read Kubernetes YAML as a tree; identify maps, lists, ownership, and nesting |
+| [Kubernetes Architecture & Communication Flow](kubernetes-architecture-and-communication-flow.md) | Build the control-plane, reconciliation, scheduling, networking, and troubleshooting mental model |
+
 ---
 
 ## 🧪 How Practice Works
@@ -102,7 +109,7 @@ This keeps the guide as **one continuous learning path** while building hands-on
 
 1. **Start at Chapter 0** and move through the chapters in order — the roadmap above *is* the plan.
 2. **Do the practice inside each chapter before moving on.** The integrated exercises are part of the chapter, not optional material to postpone.
-3. **Watch for the priority markers** inside each chapter: 🔴 **MUST KNOW** is heavily tested and non-negotiable, 🟡 **SHOULD KNOW** rounds out solid coverage, 🟢 **GOOD TO KNOW** is useful context. If you're short on time, prioritize in that order.
+3. **Watch for the priority markers** inside each chapter: 🔴 **MUST KNOW** is heavily tested and non-negotiable, 🟡 **SHOULD KNOW** rounds out solid coverage, 🟢 **NICE TO KNOW** is useful context. If you're short on time, prioritize in that order.
 4. **Read the "Real-world" and "Theory" callouts**, not just the command blocks — they're what make the commands stick instead of just being copied.
 5. **Use Chapter 9 for cumulative practice and timed labs** after progressing through the earlier chapters. Attempt every lab and mock task before opening its hidden solution.
 6. **Use Chapter 10's phase plan** to pace yourself across your whole study window, and its Final Readiness Self-Check before you schedule the actual exam.
@@ -161,7 +168,7 @@ Not just "how to" but "why": Linux kernel compressible vs. incompressible resour
 
 Every major chapter includes focused practice tasks that immediately apply the material just learned. Tasks are concrete and exam-oriented, with explicit requirements and success criteria. Hints and solutions are collapsed so you can attempt the task without seeing the answer first.
 
-### Exam Pattern Recognition
+### Exam-Style Pattern Recognition
 
 Task-to-solution shortcuts trained throughout the guide:
 
@@ -261,7 +268,7 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 - Format: Hands-on, terminal-based (no multiple choice)
 - Passing score: 66%, weighted across 5 domains
 - Environment: Pre-configured Linux terminal + a real Kubernetes cluster
-- Resources allowed: kubernetes.io and a few whitelisted sites during the exam
+- Documentation/resources: follow the current Linux Foundation exam-resource policy; the Kubernetes documentation is the primary reference allowed during the exam. Verify the current policy before exam day.
 
 **Domain Breakdown:**
 
@@ -290,7 +297,7 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 3. **Generate, don't hand-write.** Use `kubectl create <kind> ... --dry-run=client -o yaml`, then edit — don't start from blank YAML.
 4. **Verify every step.** After `apply`, run `get` and `describe` to confirm the resource is correct.
 5. **If stuck, move on.** The exam has many smaller tasks; spend at most ~15 minutes on one, then come back later if time remains.
-6. **Read error messages carefully.** The API server's error almost always names the exact problem.
+6. **Read error messages carefully.** API errors often identify the failing resource, field, or authorization boundary directly.
 
 ### After the Exam
 

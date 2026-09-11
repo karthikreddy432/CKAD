@@ -29,6 +29,9 @@ When you need to add a field:
 
 > **Don't memorize indentation. Understand the tree.**
 
+> **YAML warning:** YAML uses spaces, not tab characters, for indentation. Configure your editor to insert spaces.
+
+
 ---
 
 ## 2. YAML Has Three Shapes You Must Recognize
@@ -39,6 +42,8 @@ When you need to add a field:
 replicas: 3
 image: nginx
 ```
+
+Some YAML scalars can be interpreted as booleans, numbers, or other native types. Quote a value when the Kubernetes field expects a string and the unquoted form could be ambiguous (for example, a ConfigMap value such as `"NO"` or a version-like string). Do not quote a field merely to change its YAML type when the Kubernetes schema expects an integer or boolean.
 
 One key has one value.
 
@@ -169,6 +174,44 @@ spec:
 
 ---
 
+
+## 5A. Multi-Document YAML
+
+Multiple Kubernetes objects can share one file by separating documents with `---`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - name: web
+        image: nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
+This is useful when a task requires several related resources in one manifest file.
+
 ## 6. The Kubernetes Object Envelope
 
 Most manifests begin with:
@@ -193,6 +236,26 @@ Object
 ```
 
 `metadata` describes the object; `spec` contains the desired configuration.
+
+> **YAML syntax trap:** Use spaces for indentation, never tab characters. YAML parsers reject tabs used for indentation.
+
+### Multi-document YAML
+
+Multiple Kubernetes objects can live in one file separated by `---`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+```
+
+This is useful when a task requires a Deployment and its Service in one manifest.
 
 ---
 
@@ -287,11 +350,15 @@ spec:
 
 Pod-level fields do **not** automatically belong directly under the Deployment's `spec`.
 
+For `apps/v1` Deployments, every key in `spec.selector.matchLabels` must be present in the Pod template's labels. The template may contain additional labels.
+
 For a Deployment, the Pod configuration generally lives under:
 
 ```text
 spec.template.spec
 ```
+
+The Deployment selector must match the labels on the Pod template (for `apps/v1`, the selector is required and cannot be changed after creation).
 
 ---
 
@@ -399,7 +466,21 @@ spec
 Remember:
 
 - `port` = Service port
-- `targetPort` = port targeted on the selected Pods
+- `targetPort` = port targeted on the selected Pods; it may be an integer or a named port such as `http-web`
+
+Example named-port mapping:
+
+```yaml
+# Pod
+ports:
+- name: http-web
+  containerPort: 8080
+
+# Service
+ports:
+- port: 80
+  targetPort: http-web
+```
 
 ---
 

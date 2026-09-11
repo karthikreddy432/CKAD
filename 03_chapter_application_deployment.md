@@ -18,7 +18,7 @@ By the end of this chapter, you should be able to:
 - Explain when `Recreate` is the correct strategy instead of `RollingUpdate`, and why.
 - Use `kubectl rollout` (status, history, undo, pause, resume) to manage and recover a deployment.
 - Build a blue/green release using two Deployments and a Service selector switch.
-- Build a canary release using two Deployments sharing a Service's selector, with traffic ratio controlled by replica count.
+- Build a canary release using two Deployments sharing a Service's selector, with exposure influenced by the relative number of ready matching endpoints.
 - Install, upgrade, and roll back an existing Helm chart, and inspect what values it was installed with.
 - Apply environment-specific overlays to a shared base of manifests using Kustomize.
 
@@ -66,7 +66,11 @@ kubectl rollout resume deployment/web
 kubectl rollout restart deployment/web
 ```
 
-With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, a rollout might progress like this — capacity never drops below 5, and never exceeds 8:
+**Rollback note:** `kubectl rollout undo` needs a previous revision. If the Deployment only has revision 1, there is nothing to roll back to and the command returns an error.
+
+With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, a rollout might progress like this — capacity never drops below 5, and never exceeds 8.
+
+For stalled rollouts, `spec.progressDeadlineSeconds` controls how long Kubernetes waits for deployment progress before surfacing `ProgressDeadlineExceeded` in Deployment status. It reports the condition; it does not automatically roll the Deployment back.
 
 ```mermaid
 flowchart LR
@@ -109,7 +113,7 @@ spec:
 | Best for | Stateless apps, backward-compatible changes | Incompatible schema/version changes, single-writer workloads |
 | Rollback speed | Fast — old ReplicaSet already exists at scale 0 | Same rollback mechanism, but a fresh outage window either way |
 
-🟡 Add `--record` (or set `kubectl.kubernetes.io/change-cause` via annotation) so `rollout history` shows meaningful change descriptions instead of blank entries:
+🟡 Add a change-cause annotation if you want `rollout history` to show a meaningful description:
 ```bash
 kubectl annotate deployment/web kubernetes.io/change-cause="bump nginx to 1.28"
 ```
@@ -263,7 +267,7 @@ kind: Deployment
 metadata:
   name: web-stable
 spec:
-  replicas: 9                          # ~90% of traffic
+  replicas: 9                          # approximately 9/10 of matching endpoints
   selector: {matchLabels: {app: web, track: stable}}
   template:
     metadata: {labels: {app: web, track: stable}}
@@ -275,7 +279,7 @@ kind: Deployment
 metadata:
   name: web-canary
 spec:
-  replicas: 1                          # ~10% of traffic
+  replicas: 1                          # approximately 1/10 of matching endpoints
   selector: {matchLabels: {app: web, track: canary}}
   template:
     metadata: {labels: {app: web, track: canary}}
@@ -297,20 +301,20 @@ spec:
 flowchart LR
     SVC["Service: web
 selector: app=web only"]
-    SVC -->|"~90% of traffic
-(9 of 10 Pods)"| STABLE["Deployment: web-stable
+    SVC -->|"roughly 9/10 endpoint share
+(approximate)"| STABLE["Deployment: web-stable
 replicas: 9, image: myapp:1.0"]
-    SVC -->|"~10% of traffic
-(1 of 10 Pods)"| CANARY["Deployment: web-canary
+    SVC -->|"roughly 1/10 endpoint share
+(approximate)"| CANARY["Deployment: web-canary
 replicas: 1, image: myapp:2.0"]
 ```
 
-Unlike blue/green, both versions receive traffic simultaneously here — the split is proportional to replica count because a Service load-balances evenly across every matching endpoint, with no separate weighting mechanism needed.
+Unlike blue/green, both versions receive traffic simultaneously here — replica counts can influence approximate exposure because a Service routes across matching endpoints, but ordinary Kubernetes Service routing does not provide an exact percentage-weighting guarantee.
 
 **Verify:**
 ```bash
-kubectl get endpoints web -o wide       # confirm Pods from both Deployments are listed
-for i in $(seq 1 20); do curl -s web | grep version; done   # observe traffic split
+kubectl get endpointslice -l kubernetes.io/service-name=web -o wide  # inspect the Service's EndpointSlices
+kubectl run canary-test --rm -it --restart=Never --image=busybox:1.36 -- sh -c 'for i in $(seq 1 20); do wget -qO- http://web | grep version; done'  # observe approximate exposure from inside the cluster
 ```
 
 **Troubleshoot:**
@@ -321,7 +325,7 @@ for i in $(seq 1 20); do curl -s web | grep version; done   # observe traffic sp
 | Blue/green cutover doesn't take effect | Wrong Service patched, or Service selector still pinned to old version label | `kubectl get svc -o yaml`, verify selector |
 | Rollback after bad canary | Simply scale canary Deployment to 0 or delete it | `kubectl scale deployment web-canary --replicas=0` |
 
-🔴 **Exam pattern:** if the task says "route only 10% of traffic to a new version without disrupting the stable version," it wants a canary via replica-count ratio and a shared-label Service — not `kubectl rollout` on a single Deployment.
+🔴 **CKAD-style pattern:** when a task asks for a canary using only ordinary Deployments and a Service, use shared selector labels so both versions are eligible. Treat replica-count-based exposure as approximate, not an exact 10%/90% guarantee.
 
 > **🌍 Real-world example.** A social media company rolling out a new recommendation-ranking model doesn't trust a rolling update alone — a subtle ranking regression wouldn't crash any Pods or fail any probe, so a normal `RollingUpdate` would happily ship it to 100% of users. Instead they run it as a canary at 5% of traffic for an hour, watching business metrics (click-through rate, session length) rather than infrastructure metrics, before manually promoting it to 100%. This is the real reason canary and blue/green exist as *separate* concepts from rolling updates: rolling updates protect against infrastructure-level failure (crashes, failed health checks); canary and blue/green protect against business-logic regressions that Kubernetes itself has no way to detect.
 
@@ -329,7 +333,7 @@ for i in $(seq 1 20); do curl -s web | grep version; done   # observe traffic sp
 
 | | Blue/Green | Canary |
 |---|---|---|
-| Traffic split | All-or-nothing (Service selector switch) | Proportional (replica-count ratio) |
+| Traffic approach | All-or-nothing (Service selector switch) | Both versions selected simultaneously; exposure is approximate |
 | Both versions receive live traffic? | No — only whichever the selector currently matches | Yes — simultaneously |
 | Rollback speed | Instant (repoint the selector) | Instant (scale canary to 0) |
 | Resource cost | Double — both versions fully scaled | Low — canary usually runs 1-2 replicas |
@@ -420,11 +424,11 @@ spec:
 Verify and switch:
 
 ```bash
-kubectl get endpoints web
+kubectl get endpointslice -l kubernetes.io/service-name=web
 kubectl patch service web -p '{"spec":{"selector":{"app":"web","version":"green"}}}'
-kubectl get endpoints web
+kubectl get endpointslice -l kubernetes.io/service-name=web
 kubectl patch service web -p '{"spec":{"selector":{"app":"web","version":"blue"}}}'
-kubectl get endpoints web
+kubectl get endpointslice -l kubernetes.io/service-name=web
 ```
 
 </details>
@@ -469,7 +473,8 @@ mychart/
 **Verify:**
 ```bash
 helm list -A
-helm get values my-release
+helm get values my-release              # user-supplied values
+helm get values my-release --all         # include computed chart values
 kubectl get all -l app.kubernetes.io/instance=my-release
 ```
 
@@ -489,7 +494,7 @@ kubectl get all -l app.kubernetes.io/instance=my-release
 
 ### Task
 
-Use an existing Helm chart available in the exam environment. Inspect its values, install a release named `ckad-web` with a replica override, upgrade the replica count, then roll back to the previous revision.
+Use an existing Helm chart available in the practice environment. Inspect its values, install a release named `ckad-web` with a replica override, upgrade the replica count, then roll back to the previous revision.
 
 ### Requirements
 
@@ -522,7 +527,7 @@ Example using a supplied/available NGINX chart:
 
 ```bash
 helm show values <repo>/<chart> | less
-helm install ckad-web <repo>/<chart> --set replicaCount=2
+helm install ckad-web <repo>/<chart> -n staging --create-namespace --set replicaCount=2
 helm get values ckad-web
 helm upgrade ckad-web <repo>/<chart> --set replicaCount=4
 helm history ckad-web
@@ -537,11 +542,30 @@ Use the chart/repository supplied by the environment rather than assuming an ext
 
 ## 3.4 Kustomize 🟡 SHOULD KNOW
 
-**What it is.** A template-free way to customize raw YAML using overlays and patches, built into `kubectl` (`kubectl apply -k`).
+**What it is.** A template-free way to customize raw YAML using overlays and patches, built into `kubectl` (`kubectl apply -k`). Kustomize supports both Strategic Merge-style patches and JSON 6902 patches; the latter uses operations such as `replace`, `add`, and `remove` with explicit JSON paths.
 
 **Why CKAD tests it.** AD-04, explicitly in scope. Kustomize is how many teams manage the same base manifests across dev/staging/prod without Helm's templating.
 
 **Real-world why.** You often want the *same* Deployment YAML in every environment except a couple of fields (replica count, image tag, a ConfigMap value) — Kustomize expresses that as small overlay diffs instead of duplicated files.
+
+### Strategic Merge example
+
+For simple field changes on Kubernetes resources that support strategic merge, a small patch can be faster than JSON pointer syntax:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  template:
+    spec:
+      containers:
+      - name: web
+        image: nginx:1.28
+```
+
+This contrasts with JSON 6902 patches, which use explicit operations such as `replace` and JSON paths. Not every resource supports strategic merge semantics; JSON 6902 is the general option when you need arbitrary field targeting.
 
 **Helm vs Kustomize — a common point of confusion:**
 
@@ -712,8 +736,8 @@ kubectl get deployment web -o jsonpath='{.spec.replicas}'
 > **🌍 Real-world example.** A platform team maintains one `base/` directory of Deployment, Service, and Ingress manifests for their internal API gateway, then three thin overlays — `overlays/dev`, `overlays/staging`, `overlays/prod` — each patching only replica count, resource limits, and an image tag. When a new field needs to be added to every environment's Deployment (say, a new probe), it's added once in `base/deployment.yaml` and every overlay inherits it automatically. This is Kustomize's core value proposition versus copy-pasting: eliminate the "I updated staging's YAML but forgot prod's" class of bug entirely, without needing Helm's templating language for teams who find raw YAML overlays simpler to reason about.
 
 **Exam Tips — Chapter 3**
-- Blue/green = two Deployments + a Service you repoint. Canary = two Deployments sharing the Service's selector, ratio controlled by replica counts. Know both cold — this is a favorite scenario-style task.
-- `maxSurge`/`maxUnavailable` questions are almost always "why did the rollout behave this way" — read the current values with `kubectl get deployment -o yaml` before guessing.
+- Blue/green = two Deployments + a Service you repoint. Canary = two Deployments sharing the Service's selector, with exposure influenced by endpoint/replica distribution. Know both patterns well.
+- `maxSurge`/`maxUnavailable` questions often reduce to "why did the rollout behave this way" — read the current values with `kubectl get deployment -o yaml` before guessing.
 - For Helm/Kustomize tasks, render first (`helm template` / `kubectl kustomize`) and read the output before applying — catches mistakes for free and costs no cluster state.
 - `kubectl rollout undo --to-revision=N` beats trying to manually recreate an old spec from memory.
 
@@ -802,7 +826,7 @@ spec:
 Create stable with 4 replicas and canary with 1 replica, then verify:
 
 ```bash
-kubectl get endpoints shop
+kubectl get endpointslice -l kubernetes.io/service-name=shop
 ```
 
 Promote:
@@ -810,7 +834,7 @@ Promote:
 ```bash
 kubectl scale deployment shop-canary --replicas=4
 kubectl scale deployment shop-stable --replicas=0
-kubectl get endpoints shop
+kubectl get endpointslice -l kubernetes.io/service-name=shop
 ```
 
 Rollback:
@@ -820,7 +844,7 @@ kubectl scale deployment shop-stable --replicas=4
 kubectl scale deployment shop-canary --replicas=0
 ```
 
-The key exam pattern is that both versions share the Service's selector during the canary phase; the approximate traffic split follows the number of matching endpoints.
+The key CKAD-style pattern is that both versions share the Service's selector during the canary phase; exposure may be influenced by the number of matching ready endpoints, but ordinary Service routing does not guarantee an exact percentage split.
 
 </details>
 

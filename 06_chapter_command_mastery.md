@@ -166,6 +166,8 @@ kubectl run mypod --image=nginx
 kubectl run mypod --image=nginx --port=80 --env="MODE=prod" --labels="app=web"
 kubectl run mypod --image=nginx --restart=Never    # a bare Pod, not a Deployment
 
+**Batch-Pod note:** `kubectl run` defaults a Pod to `restartPolicy: Always`; use `--restart=Never` or `--restart=OnFailure` when the Pod is intended for batch-style execution.
+
 kubectl create deployment web --image=nginx --replicas=3
 kubectl create job report --image=busybox -- echo done
 kubectl create cronjob nightly --image=busybox --schedule="*/5 * * * *" -- echo hi
@@ -343,10 +345,10 @@ kubectl apply -f manifests/                 # every file in a directory
 kubectl apply -k overlays/prod/             # Kustomize
 kubectl diff -f deploy.yaml                 # preview changes before applying
 kubectl delete -f deploy.yaml
-kubectl replace -f deploy.yaml --force      # delete + recreate, for immutable field changes
+kubectl replace -f deploy.yaml --force      # destructive delete + recreate; use only when deliberately replacing an object
 ```
 
-🟡 **Common mistake:** reaching for `kubectl replace --force` out of habit. It deletes and recreates the object (briefly removing it from the cluster), so reserve it for the specific case of changing an immutable field (like a Job's `spec.selector`) — for everything else, `apply` converges state without the disruption.
+🟡 **Common mistake:** reaching for `kubectl replace --force` out of habit. It deletes and recreates the object (briefly removing it from the cluster), so do not reach for it as a normal edit mechanism. For immutable Pod fields, prefer updating the owning controller or deliberately recreating the standalone Pod.
 
 ---
 
@@ -404,6 +406,8 @@ kubectl get pods -l app=web
 kubectl get pods --field-selector=status.phase=Running
 kubectl get pods -o jsonpath='{.items[*].metadata.name}'
 kubectl get pod mypod -o jsonpath='{.status.podIP}'
+
+kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}'
 kubectl get pods -o custom-columns='NAME:.metadata.name,IMAGE:.spec.containers[0].image'
 kubectl get pods --sort-by=.metadata.creationTimestamp
 ```

@@ -58,7 +58,7 @@ flowchart TB
 
 This is the target. Each step below adds one labeled piece of it to the same Deployment spec.
 
-## Step 1 — Application Design and Build: the base Deployment 🟢 GOOD TO KNOW
+## Step 1 — Application Design and Build: the base Deployment 🟢 NICE TO KNOW
 
 Start with the container spec and an init container that waits for the database.
 
@@ -153,7 +153,7 @@ kubectl exec -n checkout deploy/checkout-api -- env | grep FEATURE_MODE
 
 </details>
 
-## Step 2 — Environment, Configuration and Security: wire in config, secrets, resources, identity 🟢 GOOD TO KNOW
+## Step 2 — Environment, Configuration and Security: wire in config, secrets, resources, identity 🟢 NICE TO KNOW
 
 ```yaml
 apiVersion: v1
@@ -234,7 +234,7 @@ kubectl exec -n checkout deploy/checkout-api -- env | grep -E 'LOG_LEVEL|DB_HOST
 
 🟡 **Note the pattern:** `readOnlyRootFilesystem: true` is why the `tmp` `emptyDir` volume exists — a hardened container often needs at least one writable scratch mount even when the rest of the filesystem is locked down. This pairing (read-only root + a narrow writable `emptyDir`) is a common CKAD security task in its own right.
 
-## Step 3 — Application Deployment: the database it depends on, and a rollout-safe strategy 🟢 GOOD TO KNOW
+## Step 3 — Application Deployment: the database it depends on, and a rollout-safe strategy 🟢 NICE TO KNOW
 
 `checkout-db` is a StatefulSet so it gets a stable name the init container's `nc -z checkout-db 5432` can resolve:
 
@@ -287,6 +287,7 @@ Now that `checkout-db` exists, add a rollout strategy to the `checkout-api` Depl
 ```bash
 kubectl apply -f db-service.yaml -f db-statefulset.yaml
 kubectl apply -f deployment.yaml
+kubectl wait --for=condition=Ready pod/checkout-db-0 -n checkout --timeout=60s
 kubectl rollout status deployment/checkout-api -n checkout
 ```
 
@@ -354,7 +355,7 @@ kubectl describe pod -n checkout -l app=checkout-api
 
 </details>
 
-## Step 4 — Application Observability and Maintenance: probes 🟢 GOOD TO KNOW
+## Step 4 — Application Observability and Maintenance: probes 🟢 NICE TO KNOW
 
 The API isn't actually being health-checked yet. Add probes to the same container block from Step 2:
 
@@ -427,7 +428,7 @@ kubectl run test-client -n checkout --image=busybox:1.36 --rm -it --restart=Neve
 
 </details>
 
-## Step 5 — Services and Networking: exposing and restricting traffic 🟢 GOOD TO KNOW
+## Step 5 — Services and Networking: exposing and restricting traffic 🟢 NICE TO KNOW
 
 ```yaml
 apiVersion: v1
@@ -479,7 +480,7 @@ spec:
 
 ```bash
 kubectl apply -f service.yaml -f ingress.yaml -f networkpolicy.yaml
-kubectl get endpoints checkout-api -n checkout
+kubectl get endpointslice -l kubernetes.io/service-name=checkout-api -n checkout
 kubectl get ingress checkout-api -n checkout
 ```
 
@@ -524,7 +525,7 @@ Start with `get` for Pods, Service, and endpoints. Then use `describe` and Event
 ```bash
 kubectl get pods -n checkout
 kubectl get svc -n checkout
-kubectl get endpoints checkout-api -n checkout
+kubectl get endpointslice -l kubernetes.io/service-name=checkout-api -n checkout
 kubectl get events -n checkout --sort-by=.lastTimestamp
 kubectl describe pod -n checkout -l app=checkout-api
 kubectl describe service checkout-api -n checkout
@@ -542,7 +543,7 @@ Fix only the field supported by the evidence, then verify:
 
 ```bash
 kubectl rollout status deployment/checkout-api -n checkout
-kubectl get endpoints checkout-api -n checkout
+kubectl get endpointslice -l kubernetes.io/service-name=checkout-api -n checkout
 kubectl run test-client -n checkout --image=busybox:1.36 --rm -it --restart=Never -- wget -qO- checkout-api:80
 ```
 
@@ -553,16 +554,17 @@ Use the final Service port if it differs from `80`.
 ## Full Verification Pass 🔴 MUST KNOW
 
 ```bash
-kubectl get all -n checkout
+kubectl get deploy,sts,pods,svc -n checkout
 kubectl get pods -n checkout -o wide
-kubectl get endpoints checkout-api checkout-db -n checkout
+kubectl get endpointslice -l kubernetes.io/service-name=checkout-api -n checkout
+kubectl get endpointslice -l kubernetes.io/service-name=checkout-db -n checkout
 kubectl describe pod -n checkout -l app=checkout-api | grep -A6 Conditions
 kubectl exec -n checkout deploy/checkout-api -- env | grep DB_HOST
 kubectl get pod -n checkout -l app=checkout-api -o jsonpath='{.items[0].status.qosClass}'
 kubectl run tmp -n checkout --image=busybox --rm -it -- wget -qO- checkout-api.checkout
 ```
 
-🔴 **Exam habit this trains:** never consider a task "done" after `kubectl apply` alone. Every one of the commands above is checking a *different* claim (Pods ready, endpoints populated, env vars actually injected, QoS class, and finally an end-to-end request) — a real exam task is only fully correct when the outcome it describes is independently verifiable, not just when `apply` returns without an error.
+🔴 **CKAD habit this trains:** never consider a task "done" after `kubectl apply` alone. Every one of the commands above is checking a *different* claim (Pods ready, EndpointSlices populated, env vars actually injected, QoS class, and finally an end-to-end request) — a real exam task is only fully correct when the outcome it describes is independently verifiable, not just when `apply` returns without an error.
 
 ---
 

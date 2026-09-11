@@ -62,11 +62,15 @@ kubectl get configmap app-config -o yaml
 ```
 
 **Declarative:**
+
+For configuration that should never change in place, ConfigMaps and Secrets can be marked immutable with `immutable: true`. This prevents accidental data mutation and can reduce kubelet watch load for large clusters. Once immutable, the data cannot be changed; recreate the object instead.
+
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: app-config
+immutable: true
 data:
   MODE: "prod"
   LOG_LEVEL: "info"
@@ -237,9 +241,19 @@ kubectl describe pod mypod       # check "Mounts" and "Environment" sections
 | Pod stuck `CreateContainerConfigError` | ConfigMap key referenced doesn't exist, or ConfigMap not created yet | `kubectl describe pod` -> Events | Fix key name or create the ConfigMap first |
 | Env var missing inside container | Wrong ConfigMap name, or `envFrom` vs `env` misused | `kubectl exec -- env`, `kubectl describe pod` | Correct the reference |
 | File not appearing at mount path | `volumeMounts.name` doesn't match `volumes.name` | `kubectl describe pod` -> Volumes/Mounts | Align the names |
-| Updated ConfigMap not reflected | Env-var-based config doesn't hot-reload; only mounted-file config eventually syncs (with delay) | n/a | Restart the Pod/Deployment (`kubectl rollout restart`) to pick up new values |
+| Updated ConfigMap not reflected | Env-var-based config doesn't hot-reload; only mounted-file config eventually syncs (with delay); subPath mounts do not sync | n/a | For env-vars and subPath: restart the Pod/Deployment (`kubectl rollout restart`). For normal mounted files: wait for kubelet sync or restart |
 
-🟡 **Exam tip:** Env-var ConfigMap changes never propagate to a running Pod — a rollout restart is required. Mounted ConfigMap files *do* eventually sync (kubelet sync period), but for the exam, assume you should restart the workload after any config change and verify.
+**ConfigMap update behavior — exact mechanics:**
+
+- **Consumed via `env.valueFrom.configMapKeyRef` (single env var):** The container's environment is set once at startup. If the ConfigMap changes, the running container's environment variable does NOT update automatically. A Pod restart (or Deployment rollout restart) is required to pick up the new value.
+
+- **Consumed via `envFrom.configMapRef` (all keys as env vars):** Same as single env var — environment is set at startup and does not auto-update. A restart is required.
+
+- **Consumed as a normal `volumes.configMap` mount:** Mounted files on the Pod can eventually sync after the kubelet's sync period (default 60 seconds). The update is not immediate, but the files will eventually reflect the ConfigMap's new content without requiring a restart.
+
+- **Consumed via `subPath` volume mount:** Files mounted with `subPath` do NOT receive updates — the mounted file is static for the lifetime of the mount. A restart is required to see changes.
+
+In practice on CKAD, always verify your ConfigMap change with a second `kubectl exec` command to confirm the behavior you expect.
 
 > **🌍 Real-world example.** An e-commerce checkout service runs identical container images across `us-east`, `eu-west`, and `ap-south` regions, but each region needs a different `PAYMENT_GATEWAY_URL` and `CURRENCY_DEFAULT`. Rather than baking region-specific values into three separate images (which then need three separate CI pipelines and three sets of vulnerability scans), each region gets its own ConfigMap with identical keys and different values, mounted into the *same* image. This is the practical payoff of the 12-factor "config in the environment" principle: one artifact, promoted unchanged from staging to production, with only the ConfigMap changing at each stage.
 
@@ -262,7 +276,7 @@ kubectl create secret generic tls-secret --from-file=tls.crt --from-file=tls.key
 kubectl create secret tls my-tls --cert=tls.crt --key=tls.key
 kubectl create secret docker-registry regcred \
   --docker-server=registry.example.com \
-  --docker-username=user --docker-password=pass --docker-email=a@b.com
+  --docker-username=user --docker-password=pass
 ```
 
 **Declarative:**
@@ -319,7 +333,7 @@ kubectl exec mypod -- env | grep DB_PASSWORD
 
 | Problem | Likely cause | Fix |
 |---|---|---|
-| `ImagePullBackOff` from a private registry | Missing/wrong `imagePullSecrets` | Create correct `docker-registry` secret, reference it in Pod spec |
+| `ImagePullBackOff` from a private registry | Image pull failed; credentials are one possible cause | Inspect Pod Events to distinguish credentials, image/tag, registry, network/TLS, or rate-limit problems | Fix the specific cause; use `imagePullSecrets` when Pod-supplied registry credentials are required |
 | `CreateContainerConfigError` | Secret or key doesn't exist | `kubectl describe pod`, check exact key names |
 | Base64 confusion | Wrote raw text under `data:` instead of encoding it | Use `stringData:` for plain text — Kubernetes encodes it for you |
 
@@ -333,9 +347,18 @@ stringData:
   password: S3cr3t
 ```
 
-> **🌍 Real-world example.** A team migrating a legacy app to Kubernetes initially committed a Secret manifest straight into their GitHub repo, reasoning "it's a Secret object, it's protected." Six months later a security audit found the base64-encoded database password sitting in plain sight in the Git history — base64 is an *encoding*, not encryption, and anyone with repo access (or a clone of an old commit) could decode it with one command. The team's fix was standard now: Secrets are never committed to git at all; instead they're created at deploy time from a secrets manager (e.g., HashiCorp Vault or a cloud provider's secret store) via an external-secrets operator, or the manifest is encrypted at rest with a tool like `sealed-secrets` before it's safe to commit.
+> **🌍 Real-world example.** A team initially committed a Secret manifest into GitHub, assuming the "Secret" object name provided protection. Six months later an audit found the base64-encoded password visible in Git history — base64 is encoding, not encryption. The defensive practice: Secrets are never committed to Git; instead they're created at deploy time from a secrets manager or encrypted with tools like `sealed-secrets` before committing.
 
 > **📚 Theory.** By default, Secret data is stored in etcd as base64 — readable by anyone with etcd access or sufficient RBAC to `get` the Secret object. Real confidentiality requires layering on: encryption at rest for etcd (a cluster-admin concern, not developer-facing on the exam), RBAC restricting who can read Secret objects (Ch. 1.6), and often an external secrets backend. Understanding that "Secret" describes an API *shape*, not a security *guarantee*, is what separates surface-level and production-grade Kubernetes knowledge.
+
+**Secret update behavior — same as ConfigMaps:**
+
+| Consumption Method | Behavior After Secret Data Changes |
+|---|---|
+| `env.valueFrom.secretKeyRef` | Existing container environment does NOT change; restart/recreate the Pod to receive the new value |
+| `envFrom.secretRef` | Existing container environment does NOT change; restart/recreate the Pod to receive the new value |
+| Secret volume mount (normal) | Mounted files can update automatically after kubelet sync delay; no restart required |
+| Secret volume via `subPath` | Updates do NOT propagate into the mounted file; restart required to see changes |
 
 ---
 
@@ -583,6 +606,9 @@ kubectl exec -n checkout identity-demo -- printenv MY_POD_NAME MY_NAMESPACE MY_P
 
 ## 1.4 Resource Requests, Limits, and Quotas 🔴 MUST KNOW
 
+In addition to CPU and memory, Pods can request/limit `ephemeral-storage` when a workload needs explicit local ephemeral-storage accounting.
+
+
 **What it is.** `requests` tell the scheduler how much CPU/memory a container needs to be placed on a node; `limits` cap what it can consume. `LimitRange` sets defaults/bounds per container in a namespace; `ResourceQuota` caps the total consumption across a namespace.
 
 **Why CKAD tests it.** Application developers are expected to right-size their own workloads and understand namespace-level guardrails set by platform teams.
@@ -734,6 +760,8 @@ spec:
     type: Container
 ```
 
+`maxLimitRequestRatio` can also enforce a maximum limit-to-request ratio for a resource, for example `maxLimitRequestRatio: { cpu: 2 }`.
+
 **ResourceQuota (namespace-wide cap):**
 ```yaml
 apiVersion: v1
@@ -768,17 +796,19 @@ kubectl describe limitrange cpu-limit-range -n dev
 | Pod rejected outright, "exceeded quota" | `ResourceQuota` in namespace hit | `kubectl describe resourcequota` | Reduce request or ask for higher quota |
 | Pod created with unexpected resources | `LimitRange` default applied because Pod spec had none | `kubectl describe limitrange` | Set the desired values explicitly |
 
-🟡 **CPU vs memory failure modes are a favorite exam distinction:** CPU is *compressible* (throttled when limit hit); memory is *incompressible* (process is OOMKilled when limit hit). Know which symptom points to which resource.
+**ResourceQuota workload behavior:** A quota violation may reject a directly-created Pod at admission time. However, a higher-level workload such as a Deployment may be created successfully (no quota violation for the Deployment itself), but then be unable to create the Pods it needs — the Pods are continually rejected when the controller tries to reconcile them, leaving the Deployment with 0 ready replicas and a "quota exceeded" error visible only in the Pod events, not in the Deployment status. This distinction matters during troubleshooting: a stuck Deployment might not show a quota error in `kubectl describe deployment`, but each Pod attempt will.
+
+🟡 **CPU vs memory failure modes — a high-value exam-style distinction:** CPU is *compressible* (throttled when limit hit); memory is *incompressible* (process is OOMKilled when limit hit). Know which symptom points to which resource.
 
 ### QoS classes — why requests/limits matter beyond scheduling
 
-Every Pod is automatically assigned a Quality of Service class based on how its `requests`/`limits` are set. This class decides eviction order when a node runs low on memory.
+Every Pod is automatically assigned a Quality of Service class based on how its `requests`/`limits` are set. QoS class is useful for predicting likely eviction behavior when a node experiences memory pressure, but it is not the sole determinant; the kubelet also considers whether usage exceeds requests and the Pod's Priority field when deciding which Pods to evict.
 
-| QoS Class | How it's assigned | Eviction priority |
+| QoS Class | How it's assigned | Eviction likelihood |
 |---|---|---|
-| **Guaranteed** | Every container sets `requests == limits` for both CPU and memory | Evicted last — safest |
-| **Burstable** | At least one container sets a request or limit, but not equal on all of them | Evicted after BestEffort, before Guaranteed |
-| **BestEffort** | No requests or limits set on any container | Evicted first under node pressure |
+| **Guaranteed** | Every container has CPU and memory requests/limits, and each request equals its corresponding limit | Generally among the last candidates for node-pressure eviction |
+| **Burstable** | At least one container sets a request or limit, but not equal on all of them | More likely to be evicted than Guaranteed, less likely than BestEffort |
+| **BestEffort** | No requests or limits set on any container | Most likely to be evicted under node pressure |
 
 ```bash
 kubectl get pod mypod -o jsonpath='{.status.qosClass}'
@@ -786,7 +816,7 @@ kubectl get pod mypod -o jsonpath='{.status.qosClass}'
 
 🟡 **Exam tip:** "make this workload evict last under memory pressure" or "make this Pod Guaranteed QoS" means setting `requests` exactly equal to `limits` on every container — nothing more exotic than that.
 
-> **🌍 Real-world example.** A streaming video company once had their recommendation service silently OOMKilled every few hours in production, with no obvious pattern. The root cause: the team had copy-pasted `resources` from an older, lighter-weight service without adjusting for the new service's actual memory footprint under load — the memory *limit* was tighter than the real peak usage, so the kernel's OOM killer terminated the container every time traffic spiked, well before any alert fired on CPU. The fix was mundane but is the single highest-leverage habit in this section: run `kubectl top pod` under realistic load *before* setting limits, not after guessing.
+> **🌍 Real-world example.** A streaming service was repeatedly OOM-killed because its memory limit was copied from a lighter workload. The fix was to measure realistic usage before setting the limit rather than guessing.
 
 > **📚 Theory.** The CPU-vs-memory distinction in the troubleshooting table isn't a Kubernetes quirk — it reflects a real Linux kernel difference. CPU time is a *compressible* resource: the kernel scheduler can simply give a process less CPU time per period (throttling) without killing anything. Memory is *incompressible* — once a process needs more memory than is available, there's no way to "slow down" a memory allocation; the kernel's OOM killer must terminate a process to reclaim space. This is precisely why CPU-limited containers get slow and memory-limited containers get killed, never the reverse.
 
@@ -878,7 +908,7 @@ kubectl describe limitrange dev-limits -n dev
 kubectl describe resourcequota dev-quota -n dev | grep -A 10 "Resource"
 ```
 
-**Real exam pattern scenarios:**
+**CKAD-style scenario examples:**
 
 1. **"Pod rejected, event says 'exceeded quota'"**
    - Cause: ResourceQuota hit (namespace total requests exceeded)
@@ -892,6 +922,8 @@ kubectl describe resourcequota dev-quota -n dev | grep -A 10 "Resource"
    - Cause: LimitRange defaults applied because Pod didn't specify
    - Fix: Set explicit requests/limits in the Pod spec
 
+**LimitRange update behavior:** Changing a LimitRange does not retroactively modify existing Pods. New constraints and defaults apply only to Pods created *after* the LimitRange is modified. Existing Pods retain their original resource configuration.
+
 🔴 **Exam tip:** If a task says "the namespace can only use 10 CPUs total," that's ResourceQuota. If it says "each container must be between 100m and 2 CPUs," that's LimitRange.
 
 > **🌍 Real-world example.** A platform team has a shared cluster with three teams: frontend, backend, and data-processing. Without ResourceQuota, the data-processing team's single runaway Pod requesting 100 CPUs can starve the frontend and backend teams, taking down production. With ResourceQuota (`data-processing` namespace gets `hard: {requests.cpu: "20"}`), that runaway Pod is rejected outright, preventing cascade failure. Then LimitRange in each namespace sets sensible defaults so developers don't have to remember to set requests/limits on every single container — if they forget, the LimitRange defaults kick in, avoiding the Burstable QoS class and the risk of mid-workload eviction.
@@ -902,11 +934,13 @@ kubectl describe resourcequota dev-quota -n dev | grep -A 10 "Resource"
 
 ## 1.5 ServiceAccounts 🔴 MUST KNOW
 
-**What it is.** An identity Pods use to authenticate to the Kubernetes API. Every Pod runs as some ServiceAccount — `default` if none is specified.
+> **Modern token behavior:** Since Kubernetes 1.24, creating a ServiceAccount does not automatically create a long-lived token Secret. Pods normally receive short-lived projected ServiceAccount tokens. Only create a long-lived `kubernetes.io/service-account-token` Secret when a task explicitly requires a persisted token; prefer the TokenRequest mechanism otherwise.
 
-**Why CKAD tests it.** Correctly scoping API access from application code (or explicitly disabling it) is now core to Environment/Config/Security.
+**What it is.** An identity Pods use to authenticate to the Kubernetes API. Every Pod runs as some ServiceAccount — `default` if none is specified. Since Kubernetes 1.24+, ServiceAccount tokens are time-bound and projected into the Pod via a service-account-token volume, governed by the `automountServiceAccountToken` setting.
 
-**Real-world why.** An app that queries the Kubernetes API (a controller, an operator, a CI job) needs its own identity with only the permissions it needs — not the namespace default.
+**Why CKAD tests it.** Correctly scoping API access from application code (or explicitly disabling it when the app doesn't need API access) is now core to Environment/Config/Security.
+
+**Real-world why.** An app that queries the Kubernetes API (a controller, an operator, a CI job) needs its own identity with only the permissions it needs — not the namespace default. Apps that don't need API access should explicitly disable token mounting to reduce their attack surface.
 
 **Imperative:**
 ```bash
@@ -932,18 +966,17 @@ spec:
 **Verify:**
 ```bash
 kubectl get pod web -o jsonpath='{.spec.serviceAccountName}'
-kubectl exec web -- ls /var/run/secrets/kubernetes.io/serviceaccount
-kubectl exec web -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+# automountServiceAccountToken:false means the API token is intentionally absent
+kubectl exec web -- sh -c 'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token'
 ```
+
 
 **Troubleshoot:**
 
 | Problem | Cause | Fix |
 |---|---|---|
 | App gets 403 calling the API | ServiceAccount lacks a Role/RoleBinding granting the verb/resource | Check with `kubectl auth can-i --as=system:serviceaccount:<ns>:<sa> get pods` |
-| Token unexpectedly available in a Pod that shouldn't call the API | `automountServiceAccountToken` not disabled | Set `automountServiceAccountToken: false` at Pod or ServiceAccount level |
-
-🟢 **Nice to know:** since Kubernetes 1.24+, ServiceAccount tokens are time-bound and projected, not stored as long-lived Secrets automatically — if you need a durable token you create it explicitly as a Secret of type `kubernetes.io/service-account-token`.
+| Token unexpectedly available in a Pod that shouldn't call the API | `automountServiceAccountToken` not disabled; every Pod gets a mounted token by default | Set `automountServiceAccountToken: false` at Pod or ServiceAccount level to disable automatic token mounting |
 
 > **🌍 Real-world example.** A CI/CD runner (e.g., an Argo CD or Jenkins agent Pod running inside the cluster) needs to apply manifests to the cluster on every merge to `main`. Instead of embedding a cluster-admin kubeconfig as a CI secret — a single leaked credential away from full cluster compromise — the runner gets its own ServiceAccount scoped by a Role that can only create/update/delete Deployments, Services, and ConfigMaps in specific namespaces. If that CI Pod is ever compromised, the blast radius is bounded to exactly what its ServiceAccount can do, which is the entire point of least-privilege identity design.
 
@@ -1053,9 +1086,11 @@ The expected results are `yes`, `yes`, and `no`.
 
 </details>
 
-## 1.6 Authentication, Authorization, and Admission Control 🟡 SHOULD KNOW
+## 1.6 Authentication, Authorization, and Admission Control 🔴 MUST KNOW
 
 **What it is.** RBAC (Role-Based Access Control) governs *what* an authenticated identity can do. Admission controllers intercept requests after auth to mutate or validate them before they're persisted.
+
+**CKAD Focus:** The MUST KNOW core of this section includes ServiceAccount creation, Role/RoleBinding/ClusterRole/ClusterRoleBinding design, RBAC verbs and resources (including subresources like `pods/log` vs `pods/exec`), and using `kubectl auth can-i` to verify permissions. Admission control mechanics are SHOULD KNOW / conceptual — you need to understand how requests flow through authentication, authorization, and admission stages, but not to administer admission controllers or webhooks.
 
 **Why CKAD tests it.** Application developers regularly need to grant their own workloads narrowly-scoped permissions and diagnose "why can't my Pod's ServiceAccount do X" — full RBAC administration is CKA territory, but reading/writing basic Roles is now explicitly in CKAD's scope.
 
@@ -1150,7 +1185,7 @@ A critical exam distinction:
   verbs: ["patch", "update"]
 ```
 
-**Real exam pattern:** "Grant access to read logs but *not* to exec into Pods" means:
+**Common CKAD-style pattern:** "Grant access to read logs but *not* to exec into Pods" means:
 ```yaml
 rules:
 - apiGroups: [""]
@@ -1216,7 +1251,7 @@ spec:
   containers:
   - name: app
     image: myapp
-    securityContext:          # container-level: overrides Pod-level for this container
+    securityContext:          # container-level: overrides applicable container-level settings for this container
       runAsNonRoot: true
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
@@ -1227,7 +1262,7 @@ spec:
         type: RuntimeDefault
 ```
 
-Pod-level `securityContext` sets the default for every container in the Pod; a container-level `securityContext` overrides that default for just that one container:
+Pod-level `securityContext` provides default security settings for every container in the Pod; a container-level `securityContext` can override applicable container-level settings for just that one container:
 
 ```mermaid
 flowchart TD
@@ -1258,9 +1293,9 @@ kubectl get pod secure-pod -o jsonpath='{.spec.containers[0].securityContext}'
 | App fails a low-port bind (e.g., port 80) | Dropped `NET_BIND_SERVICE` capability, non-root user | Add back `NET_BIND_SERVICE`, or bind a port ≥1024 |
 | Volume files owned by wrong group | `fsGroup` not set | Set `spec.securityContext.fsGroup` |
 
-🔴 **Exam pattern:** tasks often say "ensure this Pod cannot run as root" or "the container must not be able to escalate privileges" — the exact fields are `runAsNonRoot: true` and `allowPrivilegeEscalation: false`. Memorize these two field names precisely; they're graded literally.
+🔴 **CKAD-style tasks:** Expect to see "ensure this Pod cannot run as root" or "the container must not be able to escalate privileges" — the exact fields are `runAsNonRoot: true` and `allowPrivilegeEscalation: false`. These field names are graded literally.
 
-> **🌍 Real-world example.** In 2019, a widely publicized container escape technique (runc CVE-2019-5736) allowed a malicious container running as root to overwrite the host's `runc` binary and gain code execution on the *node itself* — not just the container. Every one of the mitigations in this section directly narrows that kind of attack: `runAsNonRoot` denies the attacker root inside the container in the first place; `allowPrivilegeEscalation: false` blocks setuid-style escalation even if a vulnerability is found; `readOnlyRootFilesystem: true` stops an attacker from persisting a malicious binary on disk; dropping all Linux capabilities removes the specific kernel privileges (like `CAP_SYS_ADMIN`) that most container-breakout exploits depend on. This is why "harden this Pod" tasks on the exam map directly to real CVE mitigation checklists used by platform security teams.
+> **🌍 Real-world example.** Container escapes like runc CVE-2019-5736 allow root containers to gain node access. Every mitigation in this section narrows that attack surface: `runAsNonRoot` blocks root entry; `allowPrivilegeEscalation: false` blocks setuid escalation; `readOnlyRootFilesystem: true` prevents malicious binary persistence; dropping capabilities removes kernel privileges needed for breakout exploits.
 
 ---
 
@@ -1268,7 +1303,7 @@ kubectl get pod secure-pod -o jsonpath='{.spec.containers[0].securityContext}'
 
 ### Task
 
-Create a Pod named `secure-demo` in namespace `security-demo` using image `nginx:1.27`.
+Create a Pod named `secure-demo` in namespace `security-demo` using image `busybox:1.36`.
 
 Configure the container so that:
 
@@ -1277,19 +1312,18 @@ Configure the container so that:
 - The root filesystem is read-only.
 - All Linux capabilities are dropped.
 
-The Pod must become Ready.
+The Pod must become Ready and remain running with `sleep 3600`.
 
 ### Requirements
 
 - Namespace: `security-demo`
 - Pod: `secure-demo`
-- Image: `nginx:1.27`
+- Image: `busybox:1.36`
+- Command: `sleep 3600`
 - `runAsNonRoot: true`
 - `allowPrivilegeEscalation: false`
 - `readOnlyRootFilesystem: true`
 - Drop all Linux capabilities.
-
-If the image cannot start with the requested read-only filesystem because it needs writable runtime paths, provide the necessary writable `emptyDir` mounts without weakening the required security settings.
 
 ### Success Criteria
 
@@ -1301,12 +1335,12 @@ If the image cannot start with the requested read-only filesystem because it nee
 
 ### Suggested Time
 
-**10–12 minutes**
+**8–10 minutes**
 
 <details>
 <summary>💡 Hint</summary>
 
-Security settings belong in `securityContext`. A read-only root filesystem can still have selected writable paths by mounting an `emptyDir` there.
+Security settings belong in `securityContext` at the Pod and/or container level. Test with a simple command like `sleep` that doesn't require special privileges or filesystem write access.
 
 </details>
 
@@ -1321,35 +1355,19 @@ metadata:
   namespace: security-demo
 spec:
   securityContext:
-    runAsUser: 101
-    runAsGroup: 101
+    runAsUser: 1000
+    runAsGroup: 1000
     runAsNonRoot: true
   containers:
-  - name: nginx
-    image: nginx:1.27
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
     securityContext:
-      runAsUser: 101
-      runAsGroup: 101
-      runAsNonRoot: true
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
       capabilities:
         drop:
         - ALL
-    volumeMounts:
-    - name: run
-      mountPath: /var/run
-    - name: cache
-      mountPath: /var/cache/nginx
-    - name: tmp
-      mountPath: /tmp
-  volumes:
-  - name: run
-    emptyDir: {}
-  - name: cache
-    emptyDir: {}
-  - name: tmp
-    emptyDir: {}
 ```
 
 Verify:
@@ -1362,11 +1380,11 @@ kubectl get pod secure-demo -n security-demo -o yaml
 
 </details>
 
-## 1.8 Pod Security Admission 🟡 SHOULD KNOW
+## 1.8 Pod Security Admission 🟢 NICE TO KNOW
 
 **What it is.** A built-in admission controller that enforces one of three Pod Security Standards — `privileged`, `baseline`, `restricted` — at the **namespace** level via labels, rejecting or warning on Pods that don't comply. It replaced the older, more complex PodSecurityPolicy.
 
-**Why CKAD tests it.** It's the namespace-wide enforcement mechanism behind the per-Pod `securityContext` settings from 1.7 — you're expected to recognize why a Pod gets rejected by the namespace's policy, not just how to set its own security fields.
+**Why CKAD tests it.** PSA is supporting knowledge for the core SecurityContext skill from 1.7 — you're expected to recognize why a Pod gets rejected by a namespace's policy and how to satisfy it. The core CKAD skill is hardening a Pod's own `securityContext`; PSA is the namespace-level enforcement mechanism that makes per-Pod security settings mandatory.
 
 **Real-world why.** Individual developers can forget to set `runAsNonRoot`; a `restricted` namespace label enforces it automatically for every Pod created there, so hardening isn't optional per-team.
 
@@ -1427,7 +1445,7 @@ kubectl run test --image=nginx -n dev     # observe the rejection message if non
 
 🟡 **Exam tip:** if a Pod is rejected with a message naming "PodSecurity" rather than a normal scheduling/image error, the fix lives in `securityContext` (1.7), not in the workload logic — read the rejection message, it names the exact missing field.
 
-> **🌍 Real-world example.** A bank's platform team enforces `restricted` Pod Security on every namespace by default, cluster-wide, via a policy applied at namespace-creation time. This means a developer who forgets to set `runAsNonRoot` doesn't ship an insecure Pod to production and get caught later in a security review — their `kubectl apply` simply fails immediately with a clear error, at the moment of mistake, which is far cheaper to fix than after a security incident. This "shift left" pattern (catching the problem at the earliest possible stage) is why Pod Security Admission replaced the older, admin-only PodSecurityPolicy: it's simple enough that any team can turn it on for their own namespace without needing cluster-admin help.
+> **🌍 Real-world example.** A bank's platform team enforces `restricted` Pod Security on every namespace by default. A developer who forgets `runAsNonRoot` gets an immediate `kubectl apply` failure instead of discovering the problem in a security audit. This "shift left" pattern (catching mistakes at the earliest stage) is why PSA replaced the older, admin-only PodSecurityPolicy.
 
 ---
 
@@ -1508,6 +1526,8 @@ metadata:
   namespace: restricted-demo
 spec:
   securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
     runAsNonRoot: true
     seccompProfile:
       type: RuntimeDefault
@@ -1531,11 +1551,11 @@ kubectl get namespace restricted-demo --show-labels
 
 </details>
 
-## 1.9 CRDs and Operators 🟢 NICE TO KNOW
+## 1.9 CRDs and Operators 🟡 SHOULD KNOW
 
 **What it is.** A `CustomResourceDefinition` (CRD) extends the Kubernetes API with a new kind. An Operator is a controller that watches custom resources and reconciles cluster state to match them.
 
-**Why CKAD tests it.** You're expected to *discover and use* existing CRDs/Operators — not write or install one from scratch. This is the shallowest competency in the domain.
+**Why CKAD tests it.** The current CKAD curriculum explicitly includes discovering and using existing custom resources. You're expected to *discover and use* existing CRDs/Operators — not write an Operator or develop a CRD from scratch. CKAD expects you to recognize when a task involves a custom resource, look up its schema, and interact with it the same way you would a built-in kind.
 
 **Real-world why.** Databases, message queues, and cert managers are frequently deployed and managed via an Operator + custom resource instead of raw Deployments.
 
@@ -1546,19 +1566,20 @@ kubectl explain <custom-kind>
 kubectl get <custom-kind>              # once you know a CRD exists, it's a normal-looking resource
 kubectl describe <custom-kind> <name>
 kubectl api-resources | grep <group>
+kubectl api-resources --api-group=<group-name>
 ```
 
 🟡 **Exam tip:** if a task references an unfamiliar kind, run `kubectl get crd` and `kubectl explain <kind>` first — treat any custom resource exactly like a built-in one once you can see its schema.
 
-> **🌍 Real-world example.** Deploying PostgreSQL "properly" on Kubernetes — with automated failover, backups, and replica promotion — is complex enough that most teams don't hand-roll it with raw StatefulSets. Instead they install an Operator like Zalando's `postgres-operator` or CloudNativePG, which registers a `Postgresql` CRD. A developer then just writes `kind: Postgresql` with a desired version and replica count, and the Operator's controller loop handles the intricate StatefulSet, Service, Secret, and failover logic behind the scenes — the same way `Deployment`'s controller hides ReplicaSet management from you. This is precisely why CKAD only expects you to *discover and use* a CRD, not build the controller behind it: that controller is often a small distributed system in its own right.
+> **🌍 Real-world example.** Deploying PostgreSQL "properly" — with automated failover, backups, and replica promotion — is complex enough that most teams use an Operator instead of hand-rolling StatefulSets. A developer writes `kind: Postgresql` with version and replica count; the Operator's controller handles the intricate StatefulSet, Service, and failover logic. This exemplifies why CKAD expects you to *discover and use* CRDs, not build the controllers behind them.
 
 **Exam Tips — Chapter 1**
 - This domain is 25% of the exam — if you're short on time, over-index your practice here relative to any other single chapter.
 - `runAsNonRoot`, `allowPrivilegeEscalation`, and capability `add`/`drop` field names are graded exactly as written — don't approximate them.
 - Always verify RBAC changes with `kubectl auth can-i --as=system:serviceaccount:<ns>:<sa>` rather than assuming a Role/RoleBinding worked.
-- For ConfigMap/Secret changes to a running Pod: remember env-var values need a restart; only mounted files eventually sync on their own.
+- For ConfigMap/Secret changes: env-var consumption needs a restart; normal volume mounts can update after propagation delay; `subPath` mounts do not receive subsequent updates.
 - Use `stringData` for Secrets when you need plain text — skip the base64 round-trip entirely and save time.
-- Setting `requests == limits` on every container is the entire trick behind "make this Guaranteed QoS" tasks.
+- For standard container-resource tasks, setting CPU and memory `requests == limits` on every container is the key step behind "make this Guaranteed QoS" tasks.
 - A Pod rejected by name-checking "PodSecurity" is a namespace-label issue, not a typo in your own YAML — go fix `securityContext` to satisfy the namespace's enforced level.
 
 ---
@@ -1622,7 +1643,7 @@ If the cluster has no suitable CRD installed, this exercise is discovery-only an
 | Secrets (1.2) | Same mechanics as ConfigMaps, base64-*encoded* not encrypted — use `stringData` to skip manual encoding |
 | Downward API (1.3) | Free, RBAC-free access to a Pod's own metadata — no API calls needed |
 | Requests/Limits/Quotas (1.4) | Requests = scheduling promise; limits = hard ceiling; CPU throttles, memory OOM-kills |
-| ServiceAccounts (1.5) | Every Pod has an identity — scope it, don't leave it as `default` |
+| ServiceAccounts (1.5) | Every Pod uses a ServiceAccount; choose the identity intentionally and disable token automount when Kubernetes API access is unnecessary |
 | RBAC/Admission (1.6) | Role/RoleBinding = namespace scope; ClusterRole/ClusterRoleBinding = cluster scope; verify with `kubectl auth can-i` |
 | SecurityContext (1.7) | `runAsNonRoot: true` and `allowPrivilegeEscalation: false` are graded literally — know them by heart |
 | Pod Security Admission (1.8) | Namespace-level enforcement of the securityContext baseline — a rejection here means fix the Pod, not the namespace |

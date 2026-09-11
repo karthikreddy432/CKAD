@@ -17,7 +17,7 @@ By the end of this chapter, you should be able to:
 - Build a multi-stage Dockerfile and explain why a smaller final image matters for real deployments.
 - Pull an image from a private registry by wiring up `imagePullSecrets` correctly.
 - Choose the correct workload resource (Pod, Deployment, StatefulSet, DaemonSet, Job, CronJob) for a given requirement, and justify why the others don't fit.
-- Explain why a StatefulSet requires a headless Service, and read/predict its per-Pod DNS names.
+- Explain how a StatefulSet gets stable Pod identity through its governing `serviceName`/Service pattern, and read/predict its per-Pod DNS names.
 - Set a PodDisruptionBudget to protect availability during voluntary disruptions like node drains.
 - Recognize and implement the four multi-container Pod patterns: init container, sidecar, ambassador, and adapter.
 - Choose the right volume type (`emptyDir`, `hostPath`, PVC-backed) based on the durability an application actually needs.
@@ -36,7 +36,7 @@ finishes?"}
     Q1 -->|No, long-running| Q2{"Needs stable identity
 or per-replica storage?"}
     Q2 -->|Yes| SS["StatefulSet
-+ headless Service"]
++ governing Service (typically headless)"]
     Q2 -->|No| Q3{"Needs exactly one
 Pod per node?"}
     Q3 -->|Yes| DS["DaemonSet"]
@@ -44,13 +44,13 @@ Pod per node?"}
 (the default choice)"]
 ```
 
-## 2.1 Container Images 🟡 SHOULD KNOW
+## 2.1 Container Images 🔴 MUST KNOW
 
 **What it is.** The packaged filesystem + metadata a container runs from. CKAD expects you to build, modify, and tag images — not deeply optimize them.
 
 **Why CKAD tests it.** Application developers own their Dockerfiles; you're expected to know the basic build loop even though most exam time goes to the Kubernetes objects around the image.
 
-**Real-world why.** A broken or oversized image is the most common root cause of slow deployments and exam-task failures that have nothing to do with your YAML.
+**Real-world why.** A broken or oversized image can cause slow deployments and image-related failures that have nothing to do with your YAML.
 
 **Commands:**
 ```bash
@@ -92,17 +92,18 @@ docker history myapp:1.0
 
 **The two failure modes:**
 
-| Status | Meaning | Cause | Fix |
+| Status | Meaning | Common Causes | Diagnosis |
 |---|---|---|---|
-| `ImagePullBackOff` | Kubernetes is retrying the pull | Bad registry credentials, network timeout, rate limit | Add/fix `imagePullSecrets`, verify registry URL and credentials |
-| `ErrImagePull` | Immediate permanent failure | Image tag doesn't exist in registry, or registry is unreachable | Verify tag exists, check registry URL spelling, fix credentials |
+| `ErrImagePull` | Image-pull attempt failed immediately | Wrong image name/tag, registry unreachable, authentication failed, network/TLS issue, registry rate limiting | `kubectl describe pod` → look at "Events" for specific error message |
+| `ImagePullBackOff` | Kubernetes is backing off and retrying the pull | Same root causes as `ErrImagePull`, but the first attempt didn't immediately reveal the issue | `kubectl describe pod` → check how many retries; wait and check again or fix the root cause |
 
 **Create a Secret for registry credentials:**
+
 ```bash
-
----
-
----
+kubectl create secret docker-registry regcred \
+  --docker-server=registry.example.com \
+  --docker-username=user \
+  --docker-password=pass
 ```
 
 ## 🧪 Practice — Build and Inspect a Multi-Stage Image
@@ -243,6 +244,7 @@ kubectl create secret docker-registry myregistry \
 
 # Or create a generic secret if the registry format is non-standard
 kubectl create secret generic myregistry \
+  --type=kubernetes.io/dockerconfigjson \
   --from-file=.dockerconfigjson=<path-to-.docker/config.json>
 ```
 
@@ -267,9 +269,9 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: myregistry
-type: kubernetes.io/dockercfg
+type: kubernetes.io/dockerconfigjson
 data:
-  .dockercfg: <base64-encoded ~/.docker/config.json>
+  .dockerconfigjson: <base64-encoded Docker config JSON>
 ```
 
 **Verify imagePullSecrets:**
@@ -287,17 +289,20 @@ kubectl logs private-app                     # won't work if pull is still faili
 kubectl rollout history deployment/app       # check if image was pulled successfully before
 ```
 
-🔴 **Exam tip:** If a task says "pull an image from a private registry," you *must* create an `imagePullSecret` and add it to the Pod spec. Without it, the Pod will be stuck in `ImagePullBackOff` forever.
+🔴 **Exam tip:** If registry credentials must be supplied through the Pod specification, create an `imagePullSecret` and reference it in the Pod or ServiceAccount. Other registry credential mechanisms may also be configured at the cluster/node level.
 
 > **🌍 Real-world example.** A developer once spent 30 minutes debugging "why does my app work locally but the Kubernetes Pod can't pull the image" — they'd built and run the image locally using `docker login` (credentials stored in `~/.docker/config.json`), then pushed to a private registry. They assumed the Kubernetes cluster could "just" pull it, but the kubelet running on each node has no access to the developer's personal Docker credentials. The fix was simple: create an `imagePullSecret` from a registry token/password and reference it in the Pod. Now the kubelet has explicit credentials for that private registry and can pull the image.
 
-> **📚 Theory.** Kubernetes doesn't have built-in registry credentials — it relies on the kubelet (running on each node) to execute the actual `docker pull` or equivalent. The kubelet has no default access to any developer's `~/.docker/config.json`. So every Pod that needs a private image must declare an `imagePullSecret` pointing to a Secret object that contains the registry credentials. This is a security best-practice: credentials are never hardcoded in YAML or Dockerfiles, they're stored in Secrets and referenced by Pods that need them.
+> **📚 Theory.** Kubernetes doesn't have built-in registry credentials — it relies on the kubelet (running on each node) to execute the actual `docker pull` or equivalent. The kubelet has no default access to any developer's `~/.docker/config.json`. When registry credentials are supplied through the Pod specification, the Pod (or its ServiceAccount) references an `imagePullSecret` that contains the registry credentials. This is a security best-practice: credentials are never hardcoded in YAML or Dockerfiles, they're stored in Secrets and referenced by Pods that need them.
 
 ---
 
 ## 2.2 Choosing the Right Workload Resource 🔴 MUST KNOW
 
 **What it is.** Kubernetes offers several controllers for running Pods; picking the right one for the job is graded directly.
+
+**Storage troubleshooting note:** If a StorageClass uses `volumeBindingMode: WaitForFirstConsumer`, a PVC may remain `Pending` until a Pod that uses it is being scheduled. This is intentional: binding/provisioning is delayed so scheduling constraints can be considered.
+
 
 | Resource | Use when |
 |---|---|
@@ -374,14 +379,14 @@ spec:
         image: node-agent:1.0
 ```
 
-**StatefulSet — requires a headless Service:**
+**StatefulSet with a headless Service (the standard pattern):**
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: db
 spec:
-  clusterIP: None       # headless
+  clusterIP: None       # headless Service provides stable per-Pod DNS names
   selector:
     app: db
   ports:
@@ -392,7 +397,7 @@ kind: StatefulSet
 metadata:
   name: db
 spec:
-  serviceName: db
+  serviceName: db       # identifies the governing Service
   replicas: 3
   selector:
     matchLabels:
@@ -415,15 +420,15 @@ spec:
           storage: 5Gi
 ```
 
-Each StatefulSet Pod gets a stable name (`db-0`, `db-1`, `db-2`) and stable DNS (`db-0.db.<namespace>.svc.cluster.local`) — this is *why* it needs the headless Service; a normal Service load-balances and hides individual Pod identity.
+Each StatefulSet Pod gets a stable ordinal name (`db-0`, `db-1`, `db-2`) that survives rescheduling, and the standard headless-Service pattern gives it stable DNS (`db-0.db.<namespace>.svc.cluster.local`). With `clusterIP: None`, DNS can return individual Pod IPs instead of a single virtual Service IP, allowing clients that need a specific replica identity to address that Pod.
 
 ### 2.2A Headless Services and StatefulSet DNS 🔴 MUST KNOW
 
 *(Renumbered from the original heading "4.1B" — this content covers a StatefulSet's own required Service, so it belongs in this chapter's workload-resource numbering, not Chapter 4's networking numbering. Nothing about the content itself has changed.)*
 
-**What it is.** A Service with `clusterIP: None` doesn't get a single stable IP — instead, DNS resolves directly to the individual Pod IPs. This is mandatory for StatefulSets, where Pods need to know each other's exact identity, not go through a load-balancer.
+**What it is.** A Service with `clusterIP: None` doesn't get a single stable IP — instead, DNS resolves directly to the individual Pod IPs. StatefulSets commonly use a headless Service to make per-Pod DNS names discoverable.
 
-**Why CKAD tests it.** StatefulSets can't work without a headless Service; the connection between the two is a direct exam question.
+**Why CKAD tests it.** The StatefulSet pattern for stable identity depends on a headless Service; understanding how they connect is a direct exam question.
 
 **The difference:**
 
@@ -445,7 +450,7 @@ clusterIP: None"| SVC["Service: db"]
     DNS -.resolves directly to.-> P1
 ```
 
-Unlike a normal Service, DNS doesn't stop at a single load-balanced IP — it resolves straight through to the specific Pod's own IP, which is what lets `db-1` reliably always mean the same replica.
+Unlike a normal load-balancing Service, a headless Service can return the individual Pod IPs. The StatefulSet's ordinal Pod name (`db-1`) provides the stable identity; the IP may change after rescheduling.
 
 ## 🧪 Practice — Choose the Correct Workload
 
@@ -591,7 +596,7 @@ web-1.web.default.svc.cluster.local
 
 </details>
 
-**Real exam pattern — headless Service for StatefulSet discovery:**
+**High-value CKAD-style pattern — headless Service for StatefulSet discovery:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -605,7 +610,7 @@ spec:
   - port: 5432
     targetPort: 5432
 ---
-# StatefulSet requiring the headless Service
+# StatefulSet using its governing Service for stable network identity
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -655,8 +660,9 @@ kubectl run -it debug --image=busybox --restart=Never -- nslookup db-0.db.defaul
 | StatefulSet Pods can't reach db-0, db-1, db-2 by hostname | Service missing or not headless (has a clusterIP) | Verify `clusterIP: None` exists; StatefulSet's `serviceName` matches Service name |
 | Pods resolve DNS but connection times out | Pod isn't actually listening on the port | Check container startup, logs, and port binding |
 | DNS query works, but StatefulSet Pod still starts before cluster is ready | Pods may boot before others are DNS-resolvable | Use init containers to wait for peer DNS resolution |
+| Newly created StatefulSet Pod DNS doesn't resolve immediately | DNS negative caching delays propagation of new DNS entries | Wait a few seconds and retry; DNS resolution eventually catches up |
 
-🔴 **Exam tip:** If a StatefulSet task mentions "Pods should reach each other by name" or "Pods need stable DNS names," the answer requires a `clusterIP: None` Service with `serviceName: <service-name>` in the StatefulSet.
+🔴 **Exam tip:** If a StatefulSet task requires stable per-Pod DNS names, use the standard headless-Service pattern (`clusterIP: None`) and make the StatefulSet `serviceName` match that Service.
 
 > **🌍 Real-world example.** An etcd cluster (3 nodes) requires members to discover and communicate with *specific* peers by hostname, not through a load-balancer — `etcd-0` talks to `etcd-1` and `etcd-2` directly to maintain quorum, and it must talk to the *same* `etcd-1` every time, not be randomly load-balanced to different instances. Without a headless Service pointing to a stable DNS name for each Pod, etcd's Raft consensus breaks. The same is true for Kafka clusters, RabbitMQ clusters, and any stateful system where individual node identity matters — the headless Service makes that identity DNS-discoverable rather than requiring hardcoded IPs or service discovery hacks.
 
@@ -733,13 +739,13 @@ kubectl get pods --selector=job-name=report
 
 ---
 
-## 2.2B Pod Disruption Budgets 🔴 MUST KNOW
+## 2.2B Pod Disruption Budgets 🟢 NICE TO KNOW
 
-**What it is.** A guarantee that specifies the minimum number (or percentage) of Pods that must remain available during voluntary disruptions — maintenance, node drain, eviction.
+**What it is.** A policy that specifies the minimum number (or percentage) of Pods that should remain available during voluntary disruptions — operations like `kubectl drain`, planned node maintenance, or cluster autoscaling that initiate eviction through Kubernetes APIs.
 
-**Why CKAD tests it.** Drain and eviction are part of cluster operations; PDB is how you ensure graceful rolling updates and maintenance without service degradation.
+**Why CKAD tests it.** PDB is essential for operators ensuring availability during maintenance windows. It's supporting knowledge for understanding workload resilience and graceful maintenance operations.
 
-**Real-world why.** Without a PDB, `kubectl drain` or a cloud provider's planned node shutdown can evict your entire Deployment at once, causing an outage. With a PDB, the cluster respects your availability requirements and evicts Pods one-by-one.
+**Real-world why.** Without a PDB, `kubectl drain` or a cloud provider's planned node shutdown can evict your entire Deployment at once, causing an outage. With a PDB, the cluster respects your availability requirements during voluntary disruption operations.
 
 **PDB declarative:**
 ```yaml
@@ -753,8 +759,6 @@ spec:
     matchLabels:
       app: web
 ---
-
----
 ```
 
 ## 🧪 Practice — Protect Replicas During Voluntary Disruption
@@ -763,7 +767,7 @@ spec:
 
 A Deployment named `payments` in namespace `production` has 4 replicas, labeled `app=payments`.
 
-Create a PodDisruptionBudget named `payments-pdb` that guarantees at least 3 matching Pods remain available during voluntary disruptions.
+Create a PodDisruptionBudget named `payments-pdb` that requires the eviction API to keep at least 3 matching Pods available during voluntary disruptions.
 
 ### Requirements
 
@@ -829,14 +833,15 @@ spec:
 ```bash
 kubectl get pdb                           # list all PDBs in the namespace
 kubectl describe pdb web-pdb              # see current disruptions allowed/remaining
-kubectl drain node-1 --dry-run=client     # see what drain would do, respecting PDB
+kubectl get nodes                            # identify the node before an optional drain test
+# kubectl drain <actual-node-name> ...       # optional, when a cluster-maintenance lab calls for it
 ```
 
-🔴 **Exam tip:** `minAvailable` is what most tasks test. If the task says "ensure at least 2 Pods stay running during updates," use `minAvailable: 2`. If it says "no more than 1 Pod can be evicted," use `maxUnavailable: 1`.
+🔴 **Exam tip:** PDB protects availability during voluntary disruptions (like `kubectl drain`), not during Deployment rolling updates (which are controlled independently). `minAvailable` is what most tasks test. If the task says "ensure at least 2 Pods stay running during a drain operation," use `minAvailable: 2`. If it says "no more than 1 Pod can be disrupted," use `maxUnavailable: 1`. Remember: direct Pod or Deployment deletion (`kubectl delete pod`/`kubectl delete deployment`) can bypass PDB — PDB only applies to eviction-aware operations.
 
-> **🌍 Real-world example.** A payment processing service runs a Deployment with 5 replicas. During a routine node maintenance window, the operator runs `kubectl drain` on one node. Without a PodDisruptionBudget, all Pods on that node are evicted at once, causing a brief but significant spike in latency as the remaining nodes are saturated. With `minAvailable: 3`, the drain process ensures at least 3 replicas remain running at all times, evicting Pods one at a time and waiting for new ones to become Ready before evicting the next. This is the practical insurance behind graceful maintenance: the cluster respects the "minimum availability" guarantee rather than blindly optimizing for speed. Even better: a PDB on your database StatefulSet prevents that production db from being rebooted while its replicas are syncing.
+> **🌍 Real-world example.** A payment processing service runs a Deployment with 5 replicas. During a routine node maintenance window, the operator runs `kubectl drain` on a node. Without a PodDisruptionBudget, all Pods on that node are evicted at once, causing a brief but significant spike in latency as the remaining nodes are saturated. With `minAvailable: 3`, an eviction-aware drain operation must respect the PDB's disruption budget; this is the practical value of PDB: it limits voluntary evictions during maintenance. Note: A PDB on a database StatefulSet does *not* control rolling updates triggered by `kubectl set image` or new StatefulSet revisions; it only applies to voluntary disruptions like drain operations.
 
-> **📚 Theory.** PDB doesn't prevent *forced* terminations (e.g., `kubectl delete pod --grace-period=0` or node reboot), only *voluntary* disruptions (drain, planned node maintenance via a cloud provider, cluster autoscaling, API-driven evictions). This is the important distinction: a Pod with a healthy PDB is still vulnerable to hard shutdowns and cluster failures, but the vast majority of real maintenance windows are voluntary and PDB-aware.
+> **📚 Theory.** PDB doesn't prevent *involuntary* terminations (e.g., `kubectl delete pod --grace-period=0`, node failure, node reboot), only *voluntary* disruptions (drain, planned node maintenance via a cloud provider, cluster autoscaling, API-driven evictions). This is the key distinction: a Pod with a healthy PDB is still vulnerable to hard shutdowns and cluster failures, but the vast majority of real maintenance windows are voluntary and PDB-aware. Also, Deployment rolling updates are managed independently of PDB — a rolling update can proceed regardless of a PDB's constraints, and PDB doesn't control how Deployments replace Pods.
 
 ---
 
@@ -917,7 +922,7 @@ App never starts"]
 App never starts"]
 ```
 
-**Real exam pattern:**
+**High-value CKAD-style pattern:**
 
 | Scenario | What happens |
 |---|---|
@@ -944,7 +949,7 @@ spec:
     image: myapp
 ```
 
-This waits for `db.default.svc.cluster.local` to be DNS-resolvable (i.e., the database Service exists and has at least one endpoint) before starting the app.
+This waits for `db.default.svc.cluster.local` to resolve in cluster DNS before starting the app. DNS resolution confirms the Service/DNS record is available; it does not by itself prove that the database is healthy or that the Service has ready endpoints.
 
 🔴 **Exam tip:** If a task says "the app must wait for the database to be ready before starting," that's an init container, not a readiness probe. The distinction: init containers block Pod startup; probes just determine traffic routing.
 
@@ -1146,7 +1151,7 @@ volumeMounts.mountPath"] --> VOL["Pod spec.volumes
 (cloud disk, NFS, etc.)"]
 ```
 
-The PVC is the only piece an application developer usually writes by hand — in most clusters (including the exam environment) a default `StorageClass` watches for new PVCs and dynamically creates a matching PV automatically.
+In a cluster with a suitable default `StorageClass`, a PVC can usually be dynamically provisioned without manually creating a PersistentVolume; if no suitable default exists, you may need to specify a `storageClassName` or use a pre-created PV.
 
 ### emptyDir — ephemeral, shared between containers in one Pod
 
@@ -1166,7 +1171,7 @@ volumes:
     path: /var/log/app
     type: DirectoryOrCreate
 ```
-🟢 Ties the Pod to whatever is on that specific node — rarely appropriate outside DaemonSets or single-node dev/test.
+🟢 **Warning:** `hostPath` binds a Pod to a specific node's filesystem — the data is not portable and not replicated. If the Pod is deleted and rescheduled to a different node, it loses access to that data. Use only in exceptional cases: DaemonSets (which must run on specific nodes anyway), single-node dev/test clusters, or when you deliberately need node-local access for logging/monitoring. Never use for application data that needs to survive Pod rescheduling.
 
 ### PersistentVolume and PersistentVolumeClaim
 
@@ -1214,13 +1219,13 @@ spec:
       claimName: pvc-data
 ```
 
-In most clusters (including the exam environment) a default `StorageClass` exists and dynamically provisions the PV for you — you typically only write the PVC.
+If the cluster has a suitable default `StorageClass`, it can dynamically provision the PV for you; otherwise, specify an appropriate `storageClassName` or bind to a matching pre-created PV.
 
 ### Access modes
 
 | Mode | Meaning |
 |---|---|
-| `ReadWriteOnce` (RWO) | Mounted read-write by a single node |
+| `ReadWriteOnce` (RWO) | Mounted read-write by a single node; multiple Pods on that node may be able to use it, depending on the storage implementation |
 | `ReadOnlyMany` (ROX) | Mounted read-only by many nodes |
 | `ReadWriteMany` (RWX) | Mounted read-write by many nodes |
 | `ReadWriteOncePod` | Mounted read-write by a single Pod (stricter than RWO) |
@@ -1231,7 +1236,7 @@ Covered fully in Chapter 1 — the same `volumes`/`volumeMounts` mechanism, sour
 
 ### subPath — mounting one file without hiding the rest of a directory
 
-By default, mounting a volume at a path replaces everything already there. `subPath` mounts just one key/file from the volume, leaving the rest of the target directory untouched — essential when you need to drop a single config file into a directory that already has other files (e.g., an image's existing `/etc/nginx/conf.d/`).
+By default, mounting a volume at a path replaces everything already there. `subPath` mounts just one key/file from the volume, leaving the rest of the target directory untouched — useful when you need to place one config file into a directory that already contains other files.
 
 ```yaml
 volumeMounts:
@@ -1244,7 +1249,7 @@ volumes:
     name: nginx-config
 ```
 
-🟡 **Trade-off:** a `subPath` mount does **not** receive live updates when the source ConfigMap/Secret changes (unlike a normal whole-directory mount) — the file is copied in at Pod start, not symlinked.
+🟡 **Trade-off:** a `subPath` mount does **not** receive subsequent updates when the source ConfigMap/Secret changes, unlike a normal whole-directory mount.
 
 ### Projected volumes — combining multiple sources into one mount
 
@@ -1291,9 +1296,9 @@ kubectl exec db -- df -h /var/lib/postgresql/data
 > **🌍 Real-world example.** A media-processing pipeline needed multiple worker Pods to read and write to the *same* directory of uploaded video files simultaneously — a classic ReadWriteMany requirement. On a cloud provider whose default block-storage StorageClass only supports `ReadWriteOnce` (the storage is physically attached to one node at a time), the team's PVC sat `Pending` forever until they switched to an RWX-capable backend like an NFS server or a managed file service (e.g., AWS EFS, Azure Files). This is a common real production gotcha: not every StorageClass supports every access mode, and the failure looks identical to a simple typo unless you check `kubectl describe storageclass` and the provider's documentation for what that class actually supports.
 
 **Exam Tips — Chapter 2**
-- "One Pod per node" -> DaemonSet. "Run once" -> Job. "Run on a schedule" -> CronJob. "Stable identity per replica" -> StatefulSet. Everything else -> Deployment.
+- "One Pod per node" -> DaemonSet. "Run once" -> Job. "Run on a schedule" -> CronJob. "Stable identity per replica" -> StatefulSet. For a long-running stateless workload with interchangeable replicas, Deployment is usually the default.
 - If a task says containers must "share files," check whether it needs to survive Pod restart — that decides `emptyDir` vs PVC.
-- A PVC stuck `Pending` is almost always a StorageClass or accessMode mismatch — check both before anything else.
+- A PVC stuck `Pending` usually means the claim cannot find or dynamically provision matching storage; inspect the PVC events and StorageClass.
 - Multi-container Pod tasks are graded on the *shared volume wiring*, not the containers' business logic — get the `volumeMounts` name-matching right first.
 - Need to drop one file into a directory without wiping out what's already there? That's `subPath` — and remember it won't hot-update if the source changes.
 - Task mentions combining a ConfigMap, a Secret, and Pod metadata into one mount point? That's a `projected` volume, not three separate `volumeMounts`.
@@ -1396,7 +1401,7 @@ kubectl exec -n storage-demo storage-demo -- cat /data/value.txt
 | Topic | One-line takeaway |
 |---|---|
 | Container images (2.1) | Multi-stage builds = smaller, faster-pulling, lower-attack-surface images |
-| Private registries (2.1B) | `ImagePullBackOff` on a private image almost always means a missing/wrong `imagePullSecrets` |
+| Private registries (2.1B) | `ImagePullBackOff` means Kubernetes is backing off while retrying an image pull; inspect Pod events to distinguish credentials, image/tag, registry, network, TLS, and rate-limit problems |
 | Workload resource choice (2.2) | Deployment is the default; StatefulSet/DaemonSet/Job/CronJob each solve one specific need the others don't |
 | Headless Services (2.2A) | `clusterIP: None` is what lets StatefulSet Pods resolve each other by stable, individual DNS names |
 | Pod Disruption Budgets (2.2B) | Protects *voluntary* disruptions only (drain, autoscaling) — not hard crashes or forced deletes |

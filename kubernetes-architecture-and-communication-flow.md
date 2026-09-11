@@ -557,9 +557,19 @@ Think:
 >
 > **Pod = ephemeral workload**
 
-### EndpointSlices
+### EndpointSlices and node-level Service routing
 
-EndpointSlices represent current endpoints associated with a Service.
+EndpointSlices represent the current endpoints associated with a Service. The EndpointSlice controller keeps that backend information up to date; the API server stores and serves the state, but does not proxy application traffic.
+
+On nodes, the actual Service data-plane routing is implemented by the cluster networking stack—commonly `kube-proxy` using iptables/IPVS, or an eBPF-based implementation such as Cilium. The exact mechanism varies by cluster. The important CKAD mental model is:
+
+```text
+Service ClusterIP + port
+        ↓
+node-level Service routing
+        ↓
+selected/ready backend Pod
+```
 
 The relationship is:
 
