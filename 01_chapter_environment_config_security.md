@@ -38,12 +38,12 @@ Several topics in this chapter solve a similar-sounding problem ("get informatio
 | Expose a Pod's *own* name/namespace/IP/resources to itself | Downward API | 1.3 |
 | Control how much CPU/memory a container can use | `resources.requests` / `resources.limits` | 1.4 |
 | Cap total resource usage across a namespace | ResourceQuota | 1.4 |
-| Set per-container min/max/default resource values | LimitRange | 1.4 |
+| Set per-container, per-Pod, or per-PVC min/max/default resource values | LimitRange | 1.4 |
 | Give a Pod an identity to call the Kubernetes API | ServiceAccount | 1.5 |
 | Scope what that identity is allowed to do | Role / RoleBinding (RBAC) | 1.6 |
 | Control root access, capabilities, filesystem permissions | `securityContext` | 1.7 |
 | Enforce a security baseline for every Pod in a namespace | Pod Security Admission | 1.8 |
-| Use a database/queue/cert-manager style resource | CRD + Operator | 1.9 |
+| Discover and interact with a database/queue/cert-manager style custom resource | CRD + Operator | 1.9 |
 
 ## 1.1 ConfigMaps 🔴 MUST KNOW
 
@@ -249,7 +249,7 @@ kubectl describe pod mypod       # check "Mounts" and "Environment" sections
 
 - **Consumed via `envFrom.configMapRef` (all keys as env vars):** Same as single env var — environment is set at startup and does not auto-update. A restart is required.
 
-- **Consumed as a normal `volumes.configMap` mount:** Mounted files on the Pod can eventually sync after the kubelet's sync period (default 60 seconds). The update is not immediate, but the files will eventually reflect the ConfigMap's new content without requiring a restart.
+- **Consumed as a normal `volumes.configMap` mount:** Mounted files on the Pod are updated asynchronously. The delay can be as long as the kubelet sync period plus cache propagation delay, depending on the kubelet's change-detection strategy. The update is not immediate, but the files can reflect the ConfigMap's new content without requiring a restart.
 
 - **Consumed via `subPath` volume mount:** Files mounted with `subPath` do NOT receive updates — the mounted file is static for the lifetime of the mount. A restart is required to see changes.
 
@@ -357,7 +357,7 @@ stringData:
   password: S3cr3t
 ```
 
-> **🌍 Real-world example.** A team initially committed a Secret manifest into GitHub, assuming the "Secret" object name provided protection. Six months later an audit found the base64-encoded password visible in Git history — base64 is encoding, not encryption. The defensive practice: Secrets are never committed to Git; instead they're created at deploy time from a secrets manager or encrypted with tools like `sealed-secrets` before committing.
+> **🌍 Real-world example.** A team initially committed a Secret manifest into GitHub, assuming the "Secret" object name provided protection. Six months later an audit found the base64-encoded password visible in Git history — base64 is encoding, not encryption. The defensive practice: never commit plaintext or merely base64-encoded Secret data to Git; create Secrets at deploy time from a secrets manager, or use an encrypted/sealed mechanism when Git storage is required.
 
 > **📚 Theory.** By default, Secret data is stored in etcd as base64 — readable by anyone with etcd access or sufficient RBAC to `get` the Secret object. Real confidentiality requires layering on: encryption at rest for etcd (a cluster-admin concern, not developer-facing on the exam), RBAC restricting who can read Secret objects (Ch. 1.6), and often an external secrets backend. Understanding that "Secret" describes an API *shape*, not a security *guarantee*, is what separates surface-level and production-grade Kubernetes knowledge.
 
@@ -518,7 +518,7 @@ kubectl exec mypod -- cat /etc/podinfo/labels
 
 | Problem | Cause | Fix |
 |---|---|---|
-| `fieldPath` rejected at apply time | Not every field is valid via `fieldRef` — only a fixed allow-list (name, namespace, labels, annotations, podIP, nodeName, serviceAccountName, status.hostIP etc.) | Check the field is on the supported list; use `resourceFieldRef` for resource fields instead |
+| `fieldPath` rejected at apply time | Not every field is valid via `fieldRef` — only documented Downward API fields are supported; `metadata.labels`/`metadata.annotations` as full maps are available through a Downward API volume, while individual label/annotation keys can be exposed with `fieldRef` | Check the field is supported; use `resourceFieldRef` for resource fields and a Downward API volume when you need full labels/annotations |
 | Value is stale after a label update | Env-var form is set once at container start, like any other env var | Mounted-file form updates live; use it if the value must track changes without a restart |
 
 🟡 **Exam tip:** if a task says "the Pod must know its own name/namespace/IP without calling the API," that's Downward API, not a ServiceAccount token.
@@ -637,6 +637,7 @@ apiVersion: v1
 kind: LimitRange
 metadata:
   name: cpu-limit-range
+  namespace: dev
 spec:
   limits:
   - default:
@@ -658,6 +659,7 @@ apiVersion: v1
 kind: ResourceQuota
 metadata:
   name: dev-quota
+  namespace: dev
 spec:
   hard:
     requests.cpu: "4"
@@ -686,7 +688,7 @@ kubectl describe limitrange cpu-limit-range -n dev
 | Pod rejected outright, "exceeded quota" | `ResourceQuota` in namespace hit | `kubectl describe resourcequota` | Reduce request or ask for higher quota |
 | Pod created with unexpected resources | `LimitRange` default applied because Pod spec had none | `kubectl describe limitrange` | Set the desired values explicitly |
 
-**ResourceQuota workload behavior:** A quota violation may reject a directly-created Pod at admission time. However, a higher-level workload such as a Deployment may be created successfully (no quota violation for the Deployment itself), but then be unable to create the Pods it needs — the Pods are continually rejected when the controller tries to reconcile them, leaving the Deployment with 0 ready replicas and a "quota exceeded" error visible only in the Pod events, not in the Deployment status. This distinction matters during troubleshooting: a stuck Deployment might not show a quota error in `kubectl describe deployment`, but each Pod attempt will.
+**ResourceQuota workload behavior:** A quota violation may reject a directly-created Pod at admission time. However, a higher-level workload such as a Deployment may be created successfully while the Pods it needs are rejected when the controller reconciles them, leaving the Deployment with fewer than the desired ready replicas. In that case, inspect the Pod events and the Deployment's conditions/events to locate the quota failure. This distinction matters during troubleshooting: the workload object can exist even though its Pod creation is being denied by quota.
 
 🟡 **CPU vs memory failure modes — a high-value exam-style distinction:** CPU is *compressible* (throttled when limit hit); memory is *incompressible* (process is OOMKilled when limit hit). Know which symptom points to which resource.
 
@@ -704,7 +706,7 @@ Every Pod is automatically assigned a Quality of Service class based on how its 
 kubectl get pod mypod -o jsonpath='{.status.qosClass}'
 ```
 
-🟡 **Exam tip:** "make this workload evict last under memory pressure" or "make this Pod Guaranteed QoS" means setting `requests` exactly equal to `limits` on every container — nothing more exotic than that.
+🟡 **Exam tip:** "make this workload evict last under memory pressure" or "make this Pod Guaranteed QoS" means setting `requests` exactly equal to `limits` on every container. That gives the Pod Guaranteed QoS and generally makes it less likely to be selected for node-pressure eviction; Pod Priority and actual usage still matter.
 
 > **🌍 Real-world example.** A streaming service was repeatedly OOM-killed because its memory limit was copied from a lighter workload. The fix was to measure realistic usage before setting the limit rather than guessing.
 
@@ -936,9 +938,9 @@ kubectl get pod worker -n resource-demo -o jsonpath='{.spec.containers[0].resour
 
 ## 1.5 ServiceAccounts 🔴 MUST KNOW
 
-> **Modern token behavior:** Since Kubernetes 1.24, creating a ServiceAccount does not automatically create a long-lived token Secret. Pods normally receive short-lived projected ServiceAccount tokens. Only create a long-lived `kubernetes.io/service-account-token` Secret when a task explicitly requires a persisted token; prefer the TokenRequest mechanism otherwise.
+> **Modern token behavior:** Since Kubernetes 1.22, Pods normally receive short-lived, projected ServiceAccount tokens. Since Kubernetes 1.24, creating a ServiceAccount no longer automatically creates a long-lived token Secret. Only create a long-lived `kubernetes.io/service-account-token` Secret when a task explicitly requires a persisted token; prefer the TokenRequest mechanism otherwise.
 
-**What it is.** An identity Pods use to authenticate to the Kubernetes API. Every Pod runs as some ServiceAccount — `default` if none is specified. Since Kubernetes 1.24+, ServiceAccount tokens are time-bound and projected into the Pod via a service-account-token volume, governed by the `automountServiceAccountToken` setting.
+**What it is.** An identity Pods use to authenticate to the Kubernetes API. Every Pod runs as some ServiceAccount — `default` if none is specified. Since Kubernetes 1.22, Pods normally receive short-lived, projected ServiceAccount tokens; since Kubernetes 1.24, automatic creation of long-lived ServiceAccount token Secrets is no longer the default. Token mounting is governed by the `automountServiceAccountToken` setting.
 
 **Why CKAD tests it.** Correctly scoping API access from application code (or explicitly disabling it when the app doesn't need API access) is now core to Environment/Config/Security.
 
@@ -1027,7 +1029,9 @@ These checks must produce:
 
 - `get pods`: allowed
 - `list pods`: allowed
+- `watch pods`: allowed
 - `delete pods`: denied
+- `get deployments`: denied
 
 ### Suggested Time
 
@@ -1087,12 +1091,20 @@ kubectl auth can-i list pods \
   --as=system:serviceaccount:rbac-demo:pod-reader \
   -n rbac-demo
 
+kubectl auth can-i watch pods \
+  --as=system:serviceaccount:rbac-demo:pod-reader \
+  -n rbac-demo
+
 kubectl auth can-i delete pods \
+  --as=system:serviceaccount:rbac-demo:pod-reader \
+  -n rbac-demo
+
+kubectl auth can-i get deployments \
   --as=system:serviceaccount:rbac-demo:pod-reader \
   -n rbac-demo
 ```
 
-The expected results are `yes`, `yes`, and `no`.
+The expected results are `yes`, `yes`, `yes`, `no`, and `no` for get/list/watch/delete/get-deployments respectively.
 
 </details>
 
@@ -1363,7 +1375,7 @@ spec:
         type: RuntimeDefault
 ```
 
-Pod-level `securityContext` provides default security settings for every container in the Pod; a container-level `securityContext` can override applicable container-level settings for just that one container:
+Pod-level `securityContext` provides default security settings for every container in the Pod; a container-level `securityContext` can override applicable Pod-level settings for just that one container:
 
 ```mermaid
 flowchart TD
@@ -1396,7 +1408,7 @@ kubectl get pod secure-pod -o jsonpath='{.spec.containers[0].securityContext}'
 
 🔴 **CKAD-style tasks:** Expect to see "ensure this Pod cannot run as root" or "the container must not be able to escalate privileges" — the exact fields are `runAsNonRoot: true` and `allowPrivilegeEscalation: false`. These field names are graded literally.
 
-> **🌍 Real-world example.** Container escapes like runc CVE-2019-5736 allow root containers to gain node access. Every mitigation in this section narrows that attack surface: `runAsNonRoot` blocks root entry; `allowPrivilegeEscalation: false` blocks setuid escalation; `readOnlyRootFilesystem: true` prevents malicious binary persistence; dropping capabilities removes kernel privileges needed for breakout exploits.
+> **🌍 Real-world example.** Container escapes such as runc CVE-2019-5736 illustrate why reducing privileges matters. These settings narrow the attack surface: `runAsNonRoot` blocks starting the workload as UID 0; `allowPrivilegeEscalation: false` prevents gaining additional Linux privileges through mechanisms such as setuid; `readOnlyRootFilesystem: true` reduces the ability to modify the container image filesystem; dropping capabilities removes unnecessary kernel privileges.
 
 ---
 
@@ -1481,11 +1493,11 @@ kubectl get pod secure-demo -n security-demo -o yaml
 
 </details>
 
-## 1.8 Pod Security Admission 🟢 NICE TO KNOW
+## 1.8 Pod Security Admission 🟡 SHOULD KNOW
 
 **What it is.** A built-in admission controller that enforces one of three Pod Security Standards — `privileged`, `baseline`, `restricted` — at the **namespace** level via labels, rejecting or warning on Pods that don't comply. It replaced the older, more complex PodSecurityPolicy.
 
-**Why CKAD tests it.** PSA is supporting knowledge for the core SecurityContext skill from 1.7 — you're expected to recognize why a Pod gets rejected by a namespace's policy and how to satisfy it. The core CKAD skill is hardening a Pod's own `securityContext`; PSA is the namespace-level enforcement mechanism that makes per-Pod security settings mandatory.
+**Why CKAD tests it.** PSA is the namespace-level admission mechanism that enforces Pod Security Standards. You should be able to recognize why a Pod was rejected, read the policy violation, and adjust the workload to comply; hands-on cluster administration of admission controllers is outside the scope here.
 
 **Real-world why.** Individual developers can forget to set `runAsNonRoot`; a `restricted` namespace label enforces it automatically for every Pod created there, so hardening isn't optional per-team.
 
@@ -1502,7 +1514,7 @@ metadata:
   name: dev
   labels:
     pod-security.kubernetes.io/enforce: restricted
-    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/enforce-version: v1.35
 ```
 
 | Mode | Effect on a non-compliant Pod |
@@ -1528,8 +1540,8 @@ This is what makes Pod Security Admission "shift left" security: the mistake is 
 | Level | Roughly means |
 |---|---|
 | `privileged` | No restrictions |
-| `baseline` | Blocks known privilege escalations (host namespaces, privileged containers) |
-| `restricted` | Baseline + requires `runAsNonRoot`, blocks privilege escalation, requires dropping `ALL` capabilities, requires a seccomp profile |
+| `baseline` | Prevents common privilege-escalation patterns, such as privileged containers and certain host namespace usage |
+| `restricted` | Baseline plus stronger restrictions on privilege escalation, root execution, capabilities, seccomp, host namespaces, and other Pod settings |
 
 **Verify:**
 ```bash
@@ -1541,10 +1553,10 @@ kubectl run test --image=nginx -n dev     # observe the rejection message if non
 
 | Problem | Cause | Fix |
 |---|---|---|
-| Pod rejected: "violates PodSecurity 'restricted'" | Namespace enforces `restricted` but Pod lacks `runAsNonRoot`, drops no capabilities, etc. | Add the missing `securityContext` fields from 1.7 until the Pod satisfies the level |
+| Pod rejected: "violates PodSecurity 'restricted'" | Namespace enforces `restricted` but the Pod violates one or more restricted requirements | Read the exact admission message and fix the specific non-compliant Pod field; SecurityContext is common, but Restricted also constrains other Pod settings such as host namespaces, privileged mode, and volume types |
 | Pod creation succeeds but with a warning | Namespace has `warn` set, not `enforce` | Expected behavior — fix the Pod spec anyway if the intent is real compliance |
 
-🟡 **Exam tip:** if a Pod is rejected with a message naming "PodSecurity" rather than a normal scheduling/image error, the fix lives in `securityContext` (1.7), not in the workload logic — read the rejection message, it names the exact missing field.
+🟡 **Exam tip:** if a Pod is rejected with a message naming "PodSecurity" rather than a normal scheduling/image error, inspect the admission message for the specific violation and fix the non-compliant Pod field. `securityContext` is common, but it is not the only possible cause.
 
 > **🌍 Real-world example.** A bank's platform team enforces `restricted` Pod Security on every namespace by default. A developer who forgets `runAsNonRoot` gets an immediate `kubectl apply` failure instead of discovering the problem in a security audit. This "shift left" pattern (catching mistakes at the earliest stage) is why PSA replaced the older, admin-only PodSecurityPolicy.
 
@@ -1656,21 +1668,22 @@ kubectl get namespace restricted-demo --show-labels
 
 **What it is.** A `CustomResourceDefinition` (CRD) extends the Kubernetes API with a new kind. An Operator is a controller that watches custom resources and reconciles cluster state to match them.
 
-**Why CKAD tests it.** The current CKAD curriculum explicitly includes discovering and using existing custom resources. You're expected to *discover and use* existing CRDs/Operators — not write an Operator or develop a CRD from scratch. CKAD expects you to recognize when a task involves a custom resource, look up its schema, and interact with it the same way you would a built-in kind.
+**Why CKAD tests it.** The current CKAD curriculum includes discovering and using existing custom resources. You're expected to recognize when a task involves a CRD/Operator, discover the resource, inspect its schema, and interact with an existing custom resource — not write an Operator or develop a CRD from scratch.
 
 **Real-world why.** Databases, message queues, and cert managers are frequently deployed and managed via an Operator + custom resource instead of raw Deployments.
 
 **Commands:**
 ```bash
 kubectl get crd
-kubectl explain <custom-kind>
-kubectl get <custom-kind>              # once you know a CRD exists, it's a normal-looking resource
-kubectl describe <custom-kind> <name>
+kubectl api-resources
+kubectl explain <resource>
+kubectl get <resource>
+kubectl describe <resource> <name>
 kubectl api-resources | grep <group>
 kubectl api-resources --api-group=<group-name>
 ```
 
-🟡 **Exam tip:** if a task references an unfamiliar kind, run `kubectl get crd` and `kubectl explain <kind>` first — treat any custom resource exactly like a built-in one once you can see its schema.
+🟡 **Exam tip:** if a task references an unfamiliar kind, run `kubectl get crd` and `kubectl api-resources` to discover the resource, then use `kubectl explain <resource>` to inspect its schema. Once discovered, interact with the custom resource through the normal Kubernetes API patterns.
 
 > **🌍 Real-world example.** Deploying PostgreSQL "properly" — with automated failover, backups, and replica promotion — is complex enough that most teams use an Operator instead of hand-rolling StatefulSets. A developer writes `kind: Postgresql` with version and replica count; the Operator's controller handles the intricate StatefulSet, Service, and failover logic. This exemplifies why CKAD expects you to *discover and use* CRDs, not build the controllers behind them.
 
@@ -1681,7 +1694,7 @@ kubectl api-resources --api-group=<group-name>
 - For ConfigMap/Secret changes: env-var consumption needs a restart; normal volume mounts can update after propagation delay; `subPath` mounts do not receive subsequent updates.
 - Use `stringData` for Secrets when you need plain text — skip the base64 round-trip entirely and save time.
 - For standard container-resource tasks, setting CPU and memory `requests == limits` on every container is the key step behind "make this Guaranteed QoS" tasks.
-- A Pod rejected by name-checking "PodSecurity" is a namespace-label issue, not a typo in your own YAML — go fix `securityContext` to satisfy the namespace's enforced level.
+- A Pod rejected with a message naming "PodSecurity" indicates an admission-policy violation — inspect the exact requirement and fix the non-compliant Pod field rather than changing unrelated workload behavior.
 
 ---
 
@@ -1689,11 +1702,11 @@ kubectl api-resources --api-group=<group-name>
 
 ### Task
 
-A cluster administrator has installed an Operator that provides a custom resource. You do not know the resource's exact kind or schema.
+A practice cluster has at least one installed Operator/CRD that provides a custom resource. You do not know the resource's exact kind or schema.
 
 Without installing anything, discover the available CRDs and inspect the schema of one CRD using `kubectl explain`.
 
-Do not create or modify any custom resource.
+Do not install, create, or modify any custom resource in this exercise. This is a discovery-focused practice task; hands-on custom-resource creation is covered later in the guide.
 
 ### Requirements
 
@@ -1714,7 +1727,7 @@ You can identify at least one installed CRD and use the Kubernetes API schema ex
 <details>
 <summary>💡 Hint</summary>
 
-Start with `kubectl get crd`. Once you know the resource's kind, use `kubectl explain <kind>` just as you would for a built-in Kubernetes resource.
+Start with `kubectl get crd` and `kubectl api-resources`. Once you identify the resource name, use `kubectl explain <resource>` just as you would for a built-in Kubernetes resource.
 
 </details>
 
@@ -1725,14 +1738,15 @@ Start with `kubectl get crd`. Once you know the resource's kind, use `kubectl ex
 kubectl get crd
 ```
 
-Choose an available CRD, then inspect it:
+Choose an available CRD, identify its resource name with `kubectl api-resources`, then inspect it:
 
 ```bash
-kubectl explain <kind>
-kubectl explain <kind> --recursive
+kubectl api-resources
+kubectl explain <resource>
+kubectl explain <resource> --recursive
 ```
 
-If the cluster has no suitable CRD installed, this exercise is discovery-only and should be skipped rather than inventing a CRD that is not present.
+If the practice cluster does not actually contain a usable CRD, do not invent one for this exercise; treat the prerequisite as unavailable and skip the task.
 
 </details>
 
@@ -1747,8 +1761,8 @@ If the cluster has no suitable CRD installed, this exercise is discovery-only an
 | ServiceAccounts (1.5) | Every Pod uses a ServiceAccount; choose the identity intentionally, disable token automount when API access is unnecessary, and attach registry pull Secrets at the ServiceAccount level to avoid repeating them per Pod |
 | RBAC/Admission (1.6) | Role/RoleBinding = namespace scope; ClusterRole/ClusterRoleBinding = cluster scope; verify with `kubectl auth can-i` |
 | SecurityContext (1.7) | `runAsNonRoot: true` and `allowPrivilegeEscalation: false` are graded literally — know them by heart |
-| Pod Security Admission (1.8) | Namespace-level enforcement of the securityContext baseline — a rejection here means fix the Pod, not the namespace |
-| CRDs/Operators (1.9) | Discover and use, don't build — `kubectl get crd` + `kubectl explain` treats any custom kind like a built-in one |
+| Pod Security Admission (1.8) | Namespace-level enforcement of Pod Security Standards — inspect the exact violation and fix the non-compliant Pod field unless the task explicitly calls for a namespace-policy change |
+| CRDs/Operators (1.9) | Discover existing custom resources and inspect their schemas — use `kubectl get crd`, `kubectl api-resources`, and `kubectl explain`; custom-resource creation is practiced later in the guide |
 
 **Next:** Chapter 2 — Application Design and Build (20%) shifts from *securing and configuring* a single Pod to *choosing the right workload resource* (Deployment, StatefulSet, DaemonSet, Job) and composing multi-container Pods.
 \newpage

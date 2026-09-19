@@ -36,8 +36,8 @@ Use this decision rule:
 | Situation | Use |
 |---|---|
 | Simple object, all needed fields covered by an imperative flag | Pure imperative command, no YAML file at all |
-| Object needs fields no imperative flag covers (probes, volumes, securityContext, resources) | Generate with `--dry-run=client -o yaml`, then edit the file |
-| Modifying one field on an existing object | `kubectl edit`, `kubectl patch`, `kubectl set`, `kubectl label`/`annotate`/`scale` — don't regenerate the whole object |
+| Object needs fields no imperative flag conveniently covers (probes, volumes, securityContext, resources) | Generate with `--dry-run=client -o yaml`, then edit the file |
+| Modifying one field on an existing object | `kubectl patch`, `kubectl set`, `kubectl label`/`annotate`/`scale`; `kubectl edit` for broader interactive changes — don't regenerate the whole object |
 | Object you'll want to reuse or that's part of a multi-object manifest | Write/edit YAML, `kubectl apply -f` |
 
 The same decision, as a quick visual:
@@ -56,7 +56,7 @@ flowchart TD
     REUSE -->|No, one-off| CREATEF["kubectl create -f\n(fine for a single use)"]
 ```
 
-🔴 **The four-way decision above (imperative / generate-and-edit / targeted-patch / apply-from-file) is the single highest-leverage habit in this whole guide** — internalizing it is what actually determines your exam pace, more than knowing any individual command's flags.
+🔴 **The four-way decision above (imperative / generate-and-edit / targeted-patch / apply-from-file) is the single highest-leverage exam-speed habit in this whole guide** — internalizing it is what actually determines your exam pace, more than knowing any individual command's flags.
 
 ---
 
@@ -130,10 +130,12 @@ kubectl create configmap app-config --from-literal=key=value
 kubectl create secret generic app-secret --from-literal=key=value
 kubectl create serviceaccount app-sa
 kubectl create namespace dev
-kubectl create role pod-reader --verb=get,list --resource=pods
-kubectl create rolebinding rb --role=pod-reader --serviceaccount=dev:app-sa
+kubectl create role pod-reader --verb=get,list --resource=pods -n dev
+kubectl create rolebinding rb --role=pod-reader --serviceaccount=dev:app-sa -n dev
 kubectl expose deployment web --port=80 --target-port=8080
-kubectl create ingress web-ing --rule="host.com/*=web:80"
+kubectl create ingress web-ing --class=<ingress-class> --rule="host.com/*=web:80"
+# Replace <ingress-class> with the IngressClass installed in the cluster.
+# If a default IngressClass is configured, --class may be omitted.
 ```
 
 🟡 **Common mistake:** `kubectl run` creates a bare Pod by default (not a Deployment) — use `kubectl create deployment` when you actually need replicas, rollouts, or self-healing.
@@ -209,7 +211,7 @@ export do="--dry-run=client -o yaml"
 kubectl create deployment web --image=nginx $do > deploy.yaml
 ```
 
-🔴 **Never hand-write a manifest from a blank file if an imperative command can generate 90% of it.** Generate, then open in your editor and add only the fields the imperative command can't set (probes, volumes, resources, security context).
+🔴 **For CKAD speed, avoid hand-writing a manifest from a blank file when an imperative command can generate most of it.** Generate, then open in your editor and add only the fields the imperative command can't set (probes, volumes, resources, security context).
 
 ---
 
@@ -219,8 +221,8 @@ kubectl create deployment web --image=nginx $do > deploy.yaml
 
 Create Deployment `web` in namespace `practice` using `nginx:1.27` with 2 replicas.
 
-Generate the initial YAML using `--dry-run=client -o yaml`, then edit it to add:
-- Pod template label `app=web`;
+Generate the initial YAML using `--dry-run=client -o yaml`, then edit it to add or verify:
+- Pod template label `app=web` (the generated Deployment may already include this label; verify before editing);
 - container port `80`;
 - readiness probe `/` on port `80`;
 - memory request `64Mi`;
@@ -251,16 +253,16 @@ Generate the skeleton first; add only fields that the imperative command does no
 <summary>✅ Solution</summary>
 
 ```bash
-kubectl create deployment web --image=nginx:1.27 --replicas=2 --dry-run=client -o yaml > web.yaml
+kubectl create deployment web --image=nginx:1.27 --replicas=2 -n practice --dry-run=client -o yaml > web.yaml
 ```
 
 Edit `web.yaml`, then:
 
 ```bash
-kubectl apply -f web.yaml
-kubectl get deployment web
-kubectl get pods --show-labels
-kubectl describe deployment web
+kubectl apply -f web.yaml -n practice
+kubectl get deployment web -n practice
+kubectl get pods -n practice --show-labels
+kubectl describe deployment web -n practice
 ```
 
 </details>
@@ -281,19 +283,19 @@ kubectl annotate pod mypod description="checkout service"
 kubectl scale deployment web --replicas=5
 ```
 
-🔴 **`kubectl edit` opens a full YAML editor on the live object** — often the single fastest way to add a field (a probe, a volume) that has no dedicated flag, without regenerating the whole manifest from scratch.
+🔴 **`kubectl edit` opens a full YAML editor on the live object** — useful for several related interactive changes when no concise targeted command exists. For one-field changes, a targeted command or patch is usually faster and more precise.
 
 **Picking the right patch strategy:**
 
 | Patch type | Flag | Behavior | Use when |
 |---|---|---|---|
-| Strategic merge (default) | *(none)* | Understands Kubernetes list semantics — merges list items by key (e.g. container `name`) instead of index | Most field updates, including updating one container in a list |
+| Strategic merge (default for supported built-in resources) | *(none)* | Uses Kubernetes schema-defined merge semantics; some lists merge by a key such as container `name`, while others are replaced | Many built-in Kubernetes resources; not supported for Custom Resources |
 | JSON merge patch | `--type=merge` | Simpler merge, but replaces whole arrays if you touch them at all | Rare — only when you intentionally want to overwrite a full array |
 | JSON patch | `--type=json` | Surgical control via `op`/`path`/`value`, addressing exact array indices | You need to target a specific array position, like `/spec/containers/0/image` |
 
-> **📚 Theory — why `patch` has a `--type` flag.** Kubernetes supports three patch strategies, and picking the wrong one is a real source of confusion: a **strategic merge patch** (the default) understands Kubernetes list semantics — e.g., patching `containers` by matching on the `name` key rather than array index, so you can update one container in a list without restating the others. A **JSON merge patch** is simpler but replaces whole arrays wholesale if you touch them at all. A **JSON patch** (`--type=json`, used with the `op`/`path`/`value` array syntax) gives surgical control over array indices, which is why the example above targeting `/spec/containers/0/image` uses it — you're addressing a specific array position, not merging by key.
+> **📚 Theory — why `patch` has a `--type` flag.** Kubernetes supports three patch strategies. **Strategic merge** is Kubernetes-aware for supported built-in resources and can merge some lists by schema-defined keys such as container `name`; it is **not supported for Custom Resources**. **JSON merge patch** treats arrays as whole values, so changing an array can replace the entire array. **JSON patch** (`--type=json`) gives surgical control through `op`/`path`/`value` operations, which is useful when you need to target an exact array position.
 
-> **🌍 Real-world example.** GitOps tools like Argo CD and Flux are, under the hood, running a continuous loop of exactly the `kubectl diff` / `kubectl apply` pattern from 6.5 — reading the desired state from a Git repository, comparing it against the live cluster, and applying a patch to reconcile any drift. Understanding `apply` as "converge live state toward this declared state" rather than "overwrite the object" is what makes GitOps possible: two people can independently patch different fields of the same object with `apply` and neither one clobbers the other's unrelated change, because `apply` merges rather than replaces.
+> **🌍 Real-world example.** GitOps tools such as Argo CD and Flux continuously compare desired state from version control with live cluster state and reconcile drift. This is conceptually similar to the `diff`/`apply` workflow here, but their controllers use their own field-management and reconciliation mechanisms. With `kubectl apply`, the client calculates a patch from the configuration file, the live object, and the last-applied configuration; maps are merged and list behavior depends on the field schema, while fields previously managed by that configuration can be cleared when they are removed from the file.
 
 ---
 
@@ -309,7 +311,7 @@ Perform these changes using the fastest targeted command:
 3. Add label `team=platform`.
 4. Add annotation `owner=platform`.
 5. Set container environment variable `MODE=prod`.
-6. Perform one targeted patch.
+6. Add annotation `change-ticket=ckad-6.4` using a targeted patch.
 
 ### Requirements
 
@@ -319,7 +321,7 @@ Perform these changes using the fastest targeted command:
 
 ### Success Criteria
 
-All requested changes are present without regenerating the whole object.
+All requested changes are present without regenerating the whole object, including the `change-ticket=ckad-6.4` annotation.
 
 ### Suggested Time
 
@@ -341,7 +343,7 @@ kubectl set image deployment/web <container-name>=nginx:1.28
 kubectl label deployment web team=platform
 kubectl annotate deployment web owner=platform
 kubectl set env deployment web MODE=prod
-kubectl patch deployment web --type='json' -p='[{"op":"replace","path":"/spec/replicas","value":5}]'
+kubectl patch deployment web --type='merge' -p='{"metadata":{"annotations":{"change-ticket":"ckad-6.4"}}}'
 kubectl get deployment web -o yaml
 ```
 
@@ -351,16 +353,18 @@ kubectl get deployment web -o yaml
 
 ## 6.5 Declarative Management 🔴 MUST KNOW
 
+> **Exam vs. production management:** For CKAD speed, targeted imperative commands are often the fastest solution. In production, choose a management model for a given object and use it consistently. Mixing `kubectl apply` with imperative changes on the same resource requires care because client-side and server-side field-management behavior differs.
+
 ```bash
 kubectl apply -f deploy.yaml
 kubectl apply -f manifests/                 # every file in a directory
 kubectl apply -k overlays/prod/             # Kustomize
-kubectl diff -f deploy.yaml                 # preview changes before applying
+kubectl diff -f deploy.yaml                 # preview the server-side change before applying
 kubectl delete -f deploy.yaml
 kubectl replace -f deploy.yaml --force      # destructive delete + recreate; use only when deliberately replacing an object
 ```
 
-🟡 **Common mistake:** reaching for `kubectl replace --force` out of habit. It deletes and recreates the object (briefly removing it from the cluster), so do not reach for it as a normal edit mechanism. For immutable Pod fields, prefer updating the owning controller or deliberately recreating the standalone Pod.
+🟡 **Common mistake:** reaching for `kubectl replace --force` out of habit. It deliberately deletes and recreates the object, briefly removing it from the cluster. Do not use it as a normal edit mechanism; reserve it for cases where destructive replacement is explicitly appropriate, including some immutable-field situations.
 
 ---
 
@@ -368,7 +372,7 @@ kubectl replace -f deploy.yaml --force      # destructive delete + recreate; use
 
 ### Task
 
-A file `web.yaml` defines Deployment `web` (2 replicas, `nginx:1.27`) in namespace `practice`. Apply it. Then change the file to 4 replicas and image `nginx:1.28`, preview the change before applying it, apply it, verify the live object matches the file, and finally remove everything the file created.
+A file `web.yaml` defines Deployment `web` (2 replicas, `nginx:1.27`) in namespace `practice`. Apply it. Then change the file to 4 replicas and image `nginx:1.28`, preview the change before applying it, apply it, verify the requested declarative fields on the live object, and finally remove everything the file created.
 
 ### Requirements
 
@@ -380,7 +384,7 @@ A file `web.yaml` defines Deployment `web` (2 replicas, `nginx:1.27`) in namespa
 
 ### Success Criteria
 
-`kubectl diff` shows the pending replica/image change before it's applied; after applying, the live object matches the file exactly; after the final delete, the Deployment no longer exists.
+`kubectl diff` shows the pending replica/image change before it's applied; after applying, the live Deployment has the requested 4 replicas and `nginx:1.28`; after the final delete, the Deployment no longer exists.
 
 ### Suggested Time
 
@@ -543,9 +547,9 @@ kubectl config view --minify --output 'jsonpath={..namespace}{"\n"}'
 ---
 
 **Exam Tips — Chapter 6**
-- Never write full YAML from a blank file when an imperative command generates 90% of it correctly.
-- For a one-field change on a live object, `patch`/`set`/`label`/`scale` beats `edit`, and `edit` beats regenerating and re-applying a whole file.
-- `kubectl diff -f file.yaml` before `apply` catches mistakes for free when you're unsure what a change will actually do.
+- For CKAD speed, avoid writing full YAML from a blank file when an imperative command can generate most of the needed skeleton.
+- For a one-field change on a live object, `patch`/`set`/`label`/`scale` is usually faster than `edit`; for repeatable declarative state, prefer a manifest and `apply`.
+- `kubectl diff -f file.yaml` before `apply` previews the server-side change; it requires the permissions needed for the dry-run.
 - Bookmark this chapter mentally — during the actual exam you won't have it, but the muscle memory built from typing these hundreds of times during practice is the actual product.
 
 ---
@@ -617,7 +621,7 @@ kubectl get pods --show-labels -o wide
 | Fast creation (6.2) | Imperative commands cover most "create a `<kind>`" tasks without ever opening an editor |
 | Generate then edit (6.3) | `--dry-run=client -o yaml` builds the skeleton; you only hand-write the fields with no flag |
 | Modifying live objects (6.4) | `patch`/`set`/`label`/`scale` for one field, `edit` for several — never regenerate the whole object |
-| Declarative management (6.5) | `apply` converges state and merges; `replace --force` is for immutable-field changes only |
+| Declarative management (6.5) | `apply` updates declared fields; `replace --force` deliberately deletes and recreates an object and should be used only when destructive replacement is appropriate |
 | Inspection (6.6) | JSONPath and custom columns extract exact values fast, without hand-parsing YAML |
 | Namespace shortcuts (6.7) | Set the namespace once per task with `set-context --current --namespace=<ns>` |
 

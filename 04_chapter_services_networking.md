@@ -22,7 +22,7 @@ By the end of this chapter, you should be able to:
 
 ## 4.1 Services 🔴 MUST KNOW
 
-**What it is.** A stable virtual IP/DNS name that load-balances to a dynamic set of Pods matched by a label selector.
+**What it is.** A stable virtual IP and/or DNS identity that routes traffic to a dynamic set of Pods selected by labels (for selector-based Services).
 
 **Why CKAD tests it.** SN-02: "provide and troubleshoot access to applications via services" — one of the most heavily tested single competencies on the whole exam.
 
@@ -36,7 +36,7 @@ Client
 Service
   ↓  forwards to targetPort on a matching Pod
 Pod
-  ↓  container listening on that same port
+  ↓  container listening on that port
 Container process
 ```
 
@@ -49,8 +49,8 @@ flowchart LR
 
 | Field             | Meaning                                                                                               |
 | ----------------- | ----------------------------------------------------------------------------------------------------- |
-| `port`          | Port the * Service * exposes to clients                                                                |
-| `targetPort`    | Port on the * Pod * traffic is forwarded to; it may be a number or named port and should match the application's listening port |
+| `port`          | Port the Service exposes to clients                                                                     |
+| `targetPort`    | Port on the Pod traffic is forwarded to; it may be a number or named port and must resolve to the application's listening port |
 | `containerPort` | Documentation only, in the Pod spec — declares what the container listens on; not enforced by itself |
 
 **Named ports:** `targetPort` can also reference a port name declared on the selected container, e.g. `targetPort: http` matching `ports: [{name: http, containerPort: 8080}]`.
@@ -61,7 +61,7 @@ flowchart LR
 | ------------------------------ | -------------------------------------------------------------------------------------- |
 | `ClusterIP` (default)        | Internal-only virtual IP, cluster-reachable                                            |
 | `NodePort`                   | ClusterIP + a static port opened on every node (default range is commonly 30000–32767; clusters can configure the range) |
-| `LoadBalancer`               | Requests an external load-balancer implementation; behavior depends on the environment                                   |
+| `LoadBalancer`               | Requests an external load-balancer implementation; external reachability and IP allocation depend on the environment |
 | `ExternalName`               | DNS CNAME to an external name, no proxying                                             |
 | headless (`clusterIP: None`) | No virtual ClusterIP — DNS can return individual Pod IPs directly; commonly used for StatefulSet identities |
 
@@ -96,15 +96,15 @@ spec:
 ```
 
 ```bash
-kubectl run tmp --image=busybox --rm -it -- nslookup web.dev.svc.cluster.local
-kubectl run tmp --image=busybox --rm -it -- wget -qO- web.dev
+kubectl run tmp -n dev --image=busybox --rm -it -- nslookup web.dev.svc.cluster.local
+kubectl run tmp -n dev --image=busybox --rm -it -- wget -qO- web.dev
 ```
 
 **Verify:**
 
 ```bash
 kubectl get svc web
-kubectl get endpointslice -l kubernetes.io/service-name=web              # empty = selector matches nothing, THE key diagnostic
+kubectl get endpointslice -l kubernetes.io/service-name=web              # inspect EndpointSlices; use -o yaml to inspect Ready conditions
 kubectl describe svc web
 ```
 
@@ -112,19 +112,19 @@ kubectl describe svc web
 
 | Step | Command                                             | What you're checking                                                                                |
 | ---- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 1    | `kubectl get endpointslice -l kubernetes.io/service-name=web `                       | Empty/no Ready addresses = selector, Pod readiness, or Service publishing issue                                                                       |
+| 1    | `kubectl get endpointslice -l kubernetes.io/service-name=web -o yaml`                 | Inspect endpoint addresses and `.conditions.ready`; no Ready addresses means selector, Pod readiness, or publishing issue                            |
 | 2    | `kubectl get svc web -o yaml `                     | Confirm ` spec.selector `                                                                            |
 | 3    | `kubectl get pods --show-labels `                  | Confirm Pods actually carry those exact label key/values                                            |
 | 4    | `kubectl get pods -o wide `                        | Confirm Pods are ` Running ` and ` Ready ` — a Pod failing readiness is excluded from endpoints too |
 | 5    | `kubectl get svc web -o yaml ` again               | Confirm `targetPort` matches the container's actual listening port                                 |
 | 6    | `kubectl exec <pod> -- netstat -tlnp ` or app logs | Confirm the app is actually listening on the expected port inside the container                     |
 
-The same six steps, as a decision tree — follow it top to bottom and stop at the first "no":
+The same six steps, as a decision tree — follow it top to bottom and stop at the first "no". Start by checking for **Ready** endpoint addresses rather than treating an empty EndpointSlice object by itself as proof of a selector mismatch:
 
 ```mermaid
 flowchart TD
-    START["Service X unreachable"] --> Q1{"kubectl get endpointslice -l kubernetes.io/service-name=X
-shows any Pod IPs?"}
+    START["Service X unreachable"] --> Q1{"EndpointSlices show any
+Ready endpoint addresses?"}
     Q1 -->|Empty| FIX1["Fix: selector doesn't match
 Pod labels — align them"]
     Q1 -->|Has IPs| Q2{"Are those Pods
@@ -147,9 +147,9 @@ need NodePort/LoadBalancer"]
 | Problem                               | Likely cause                                                       | Fix                                                                                                                |
 | ------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | No endpoints                          | Selector doesn't match Pod labels (typo, wrong value)              | Align ` spec.selector ` to Pod's actual labels                                                                      |
-| EndpointSlices exist, still unreachable | Wrong `targetPort` (Service forwards to the wrong Pod port) | Fix `targetPort` to match the application's actual listening port |
+| EndpointSlices exist, still unreachable | `targetPort` or application listener is wrong | Check the Service port mapping and verify what port the application actually listens on |
 | Reachable inside cluster, not outside | Used `ClusterIP` where `NodePort`/`LoadBalancer` was needed   | Change ` spec.type `                                                                                                |
-| Intermittent connection refused       | Some Pods behind the Service are not actually ready                | `kubectl get pods `, check readiness probe                                                                        |
+| Intermittent connection refused       | A selected endpoint is unhealthy despite reporting Ready, or readiness is flapping | Inspect EndpointSlice conditions, Pod readiness, logs, and the application's listener |
 | DNS lookup fails entirely             | Wrong namespace in the FQDN, or CoreDNS issue                      | Recheck the `<svc>.<namespace>.svc.cluster.local ` string; `kubectl get pods -n kube-system -l k8s-app=kube-dns ` |
 
 🔴 **CKAD-style pattern:** "Service X isn't reachable" tasks commonly reduce to selector mismatch, wrong `targetPort`, or backend Pods not Ready. Check `kubectl get endpointslice` first to see whether ready backend addresses are being published.
@@ -158,7 +158,7 @@ need NodePort/LoadBalancer"]
 
 > **📚 Theory.** A Service has no idea which Pods exist when you create it — the `EndpointSlice` objects are populated continuously by a controller that watches for Pods matching the Service selector. Ready status is reflected in endpoint conditions, so unhealthy backends can be excluded from normal traffic. This loose coupling (Service and Pods never reference each other by name or UID, only by label match) is exactly what lets Pods be replaced, rescheduled, and scaled without reconfiguring the Service.
 
-> **Current API note.**The legacy `Endpoints` API is deprecated in modern Kubernetes; use `EndpointSlice` for current inspection. `kubectl get endpoints` may still exist for compatibility, but it should not be the primary troubleshooting command in a v1.35-focused guide.
+> **Current API note.** The legacy `Endpoints` API is deprecated in modern Kubernetes; use `EndpointSlice` for current inspection. `kubectl get endpoints` may still exist for compatibility, but it should not be the primary troubleshooting command in a v1.35-focused guide.
 
 ---
 
@@ -223,7 +223,7 @@ If endpoints exist but the request fails, continue with `targetPort` and the app
 
 **Why CKAD tests it.** SN-03: exposing applications via host- and path-based routing rather than one Service/LoadBalancer per app.
 
-**Real-world why.**Running one cloud load balancer per microservice gets expensive and hard to manage; Ingress lets one entry point route to many backend Services by hostname or path.
+**Real-world why.** Running one cloud load balancer per microservice gets expensive and hard to manage; Ingress lets one entry point route to many backend Services by hostname or path.
 
 **Declarative:**
 
@@ -232,10 +232,8 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: web-ingress
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
-  ingressClassName: nginx
+  ingressClassName: nginx   # substitute the installed IngressClass name if different
   rules:
   - host: shop.example.com
     http:
@@ -273,7 +271,7 @@ path: /api"| SVC2["Service: api"]
     SVC2 --> POD2["api Pods"]
 ```
 
-One external IP, one TLS certificate, and the routing rules alone decide which backend Service handles a given request — this is the whole cost-and-complexity argument for Ingress over one `LoadBalancer` Service per microservice.
+A shared Ingress Controller can expose many backend Services through one externally reachable entry point, depending on the controller and environment; the routing rules determine which backend Service handles a request.
 
 **Imperative (basic rule only — most real Ingress needs the YAML above):**
 
@@ -311,9 +309,9 @@ curl -H "Host: shop.example.com" http://<ingress-controller-ip>/
 
 ### Task
 
-Create two backend Services in namespace ` web `, then expose them through one Ingress.
+Namespace `web` already contains ready frontend Pods labeled `app=frontend` listening on port `80` and API Pods labeled `app=api` listening on port `8080`. Create two Services in namespace `web` for those backends, then expose them through one Ingress.
 
-` shop.example.com/` must route to Service ` frontend ` on port ` 80 `. ` shop.example.com/api ` must route to Service ` api ` on port ` 8080 `.
+`shop.example.com/` must route to Service `frontend` on port `80`. `shop.example.com/api` must route to Service `api` on port `8080`.
 
 Use the cluster's installed Ingress class and verify the routing configuration.
 
@@ -330,7 +328,7 @@ Use the cluster's installed Ingress class and verify the routing configuration.
 
 ### Success Criteria
 
-`kubectl describe ingress shop-ingress ` shows both rules and the correct backend Services/ports.
+The two Services have the intended backend endpoints, and `kubectl describe ingress shop-ingress` shows both rules and the correct backend Services/ports.
 
 ### Suggested Time
 
@@ -345,6 +343,36 @@ Check `kubectl get ingressclass ` first. The Ingress resource defines routing; t
 
 <details>
 <summary>✅ Solution</summary>
+
+Create the two backend Services first and save them as `services.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: web
+spec:
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: web
+spec:
+  selector:
+    app: api
+  ports:
+  - port: 8080
+    targetPort: 8080
+```
+
+Then create the Ingress as `shop-ingress.yaml`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -377,12 +405,15 @@ spec:
 Apply and verify:
 
 ```bash
+kubectl apply -f services.yaml
+kubectl get endpointslice -n web -l kubernetes.io/service-name=frontend
+kubectl get endpointslice -n web -l kubernetes.io/service-name=api
 kubectl apply -f shop-ingress.yaml
 kubectl get ingress shop-ingress -n web
 kubectl describe ingress shop-ingress -n web
 ```
 
-If the environment uses a different installed IngressClass, use that class instead of ` nginx `.
+The example uses `nginx`. If the environment uses a different installed IngressClass, substitute that class name in the manifest before applying it.
 
 </details>
 
@@ -392,7 +423,7 @@ If the environment uses a different installed IngressClass, use that class inste
 
 **Why CKAD tests it.** SN-01, and a classic "default deny + explicit allow" pattern that's easy to get backwards under time pressure.
 
-**Real-world why.**By default every Pod can talk to every other Pod in the cluster — NetworkPolicy is how you enforce least-privilege network access between services.
+**Real-world why.** In a cluster without applicable NetworkPolicies (and with a CNI that permits the traffic), Pods can generally reach other Pods across namespaces; NetworkPolicy is how you enforce least-privilege network access between services.
 
 **Default deny all ingress in a namespace:**
 
@@ -468,6 +499,8 @@ spec:
     ports:
     - protocol: UDP
       port: 53
+    - protocol: TCP
+      port: 53
   - to:
     - ipBlock:
         cidr: 10.0.5.0/24
@@ -476,15 +509,17 @@ spec:
       port: 5432
 ```
 
-> **Note:**`namespaceSelector: {}` allows UDP/53 to Pods in any namespace. It is a simple CKAD pattern, not a strict 'only CoreDNS' rule. A production policy can narrow the DNS destination using the cluster's CoreDNS namespace/Pod labels — check the actual CoreDNS Service/Endpoints in the cluster (`kubectl get svc,ep -n kube-system -l k8s-app=kube-dns`) rather than hard-coding a namespace/IP assumption, since some clusters run DNS outside `kube-system` or under a different label.
+> **Note:** `namespaceSelector: {}` allows UDP and TCP port 53 to Pods in any namespace. It is a simple CKAD pattern, not a strict 'only CoreDNS' rule. A production policy can narrow the DNS destination using the cluster's CoreDNS namespace/Pod labels — check the actual CoreDNS Service/Endpoints in the cluster (`kubectl get svc,ep -n kube-system -l k8s-app=kube-dns`) rather than hard-coding a namespace/IP assumption, since some clusters run DNS outside `kube-system` or under a different label.
+
+**IPBlock note:** `ipBlock` is intended for IP/CIDR-based policy, commonly cluster-external destinations or sources. Pod IPs are ephemeral, so use `podSelector`/`namespaceSelector` when the requirement is specifically about Kubernetes Pods or namespaces.
 
 **Verify:**
 
 ```bash
 kubectl get networkpolicy -n dev
 kubectl describe networkpolicy allow-web-to-api -n dev
-kubectl exec web-pod -- curl -sS -m3 api:8080          # test allowed path
-kubectl exec other-pod -- curl -sS -m3 api:8080        # test blocked path (should time out)
+kubectl run net-test -n dev --image=busybox:1.36 --rm -it -- wget -qO- -T3 http://api:8080   # test allowed path
+kubectl run other-test -n dev --image=busybox:1.36 --rm -it -- wget -qO- -T3 http://api:8080 # should time out
 ```
 
 **Troubleshoot:**
@@ -599,10 +634,11 @@ That is false. A NetworkPolicy is namespace-scoped and its `podSelector` selects
 ```text
 Policy namespace
       ↓
-podSelector → selects destination Pods in that namespace
+top-level podSelector → selects the Pods protected by this policy
 
 namespaceSelector → selects peer namespace(s)
-podSelector       → selects peer Pod(s) when combined with a namespaceSelector
+peer podSelector    → selects peer Pod(s); by itself it means Pods in the policy namespace,
+                       or, when combined with namespaceSelector, Pods in those namespaces
 ```
 
 When `namespaceSelector` and `podSelector` appear in the **same `from` or `to` item**, they are ANDed:
@@ -662,13 +698,15 @@ This policy denies ingress * within namespace A * only. A policy in namespace A 
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: deny-egress-to-ns-a
+  name: default-deny-egress
   namespace: b
 spec:
   podSelector: {}           # all Pods in namespace B
   policyTypes: [Egress]
   # No 'egress' block = deny all egress
 ```
+
+This example denies **all** egress from namespace B, not just traffic to namespace A. Narrow it further with an explicit `egress` allow-list when B still needs DNS or other outbound traffic.
 
 2. **In the destination namespace (A)**— restrict ingress from namespace B:
 
@@ -707,13 +745,13 @@ spec:
       port: 5432
 ```
 
-A connection is permitted only when the applicable egress rules on the source and ingress rules on the destination both allow it. To block a specific connection, a policy at either enforced boundary can be sufficient; using controls at both ends is a defense-in-depth choice, not a requirement.
+A connection is allowed when neither side imposes a policy that blocks it. If the source is isolated for egress, its egress policy must allow the connection; if the destination is isolated for ingress, its ingress policy must allow the connection. A destination ingress rule alone can therefore block a connection even when source egress is unrestricted. Using controls at both ends is a defense-in-depth choice.
 
 ```mermaid
 flowchart LR
     subgraph NSB["Namespace: b"]
         PB["Pod in b"]
-        EGRESS["deny-egress-to-ns-a
+        EGRESS["default-deny-egress
 (must exist here)"]
     end
     subgraph NSA["Namespace: a"]
@@ -738,17 +776,17 @@ kubectl label namespace b name=b
 
 🔴 **Exam tip:** If a task says "block traffic from namespace A to namespace B," determine which side the task requires you to control. A destination ingress rule can block the connection by itself; add source egress controls when the requirement calls for defense in depth.
 
-> **🌍 Real-world example.**A multi-tenant cluster has ` tenant-a ` and ` tenant-b ` namespaces running in the same cluster. Without NetworkPolicy, tenant-b's Pods can query tenant-a's database — a security disaster. The platform team writes NetworkPolicies in both namespaces: ` tenant-a ` denies ingress from ` tenant-b ` (or explicitly allows only internal traffic), and ` tenant-b ` denies egress to ` tenant-a `'s CIDR. Even if one is misconfigured, the other catches it. This defense-in-depth (deny at both boundaries) is the real-world standard.
+> **🌍 Real-world example.** A multi-tenant cluster has `tenant-a` and `tenant-b` namespaces running in the same cluster. Without NetworkPolicy, tenant-b's Pods can query tenant-a's database. The platform team restricts ingress into the database namespace and, when required, also restricts egress from tenant-b using namespace/pod selectors. Even if one boundary is misconfigured, the other can provide an additional control. This is defense in depth rather than a requirement to duplicate every policy on both sides.
 
-> **📚 Theory.**By default Kubernetes networking is a flat, fully-open mesh — every Pod can reach every other Pod's IP directly, cluster-wide, regardless of namespace. This is a deliberate simplicity choice (it makes basic networking "just work" without configuration), but it means production clusters running multiple teams' workloads need NetworkPolicy to reconstruct the network segmentation that a traditional multi-VLAN data center would have had by default. The "default allow, must opt into deny" starting point is why the "default-deny-ingress" pattern is a common first hardening step. For cross-namespace traffic, reason about both source and destination boundaries when the requirement explicitly constrains both.
+> **📚 Theory.** In a cluster without applicable NetworkPolicies, Kubernetes networking is generally open between Pods across namespaces. This default-allow starting point makes basic networking work without additional policy configuration, but production clusters can use NetworkPolicy to reconstruct explicit network segmentation. For cross-namespace traffic, reason about both source and destination boundaries when the requirement explicitly constrains both.
 
 ## 🧪 Practice — Allow One Cross-Namespace Database Connection
 
 ### Task
 
-Namespace ` app ` contains ` app=frontend ` Pods. Namespace ` data ` contains ` app=db ` Pods listening on TCP ` 5432 `.
+Namespace `app` contains `app=frontend` Pods. Namespace `data` contains `app=db` Pods listening on TCP `5432`. Assume no other NetworkPolicy selects the database Pods.
 
-Configure NetworkPolicy so only frontend Pods in namespace ` app ` can reach database Pods in namespace ` data ` on TCP ` 5432 `. Other namespaces must not be allowed by this rule.
+Configure NetworkPolicy so only frontend Pods in namespace `app` can reach database Pods in namespace `data` on TCP `5432`. Other namespaces must not be allowed by this rule.
 
 ### Requirements
 
@@ -823,7 +861,7 @@ kubectl get ns app --show-labels
 
 **Exam Tips — Chapter 4**
 
-- `kubectl get endpointslice -l kubernetes.io/service-name=<service>` is the current EndpointSlice-based triage step for any "can't reach my app" task — empty means fix the Pod/selector side, populated-but-unreachable means fix the port/network side.
+- `kubectl get endpointslice -l kubernetes.io/service-name=<service>` is the current EndpointSlice-based triage step for any "can't reach my app" task — no Ready addresses means investigate selector, readiness, or EndpointSlice publishing; populated-but-unreachable means continue with ports/networking.
 - Know `port` vs `targetPort` vs `containerPort` cold — this three-way mix-up is one of the most common exam traps.
 - For NetworkPolicy tasks, write the deny-all first mentally, then figure out exactly what narrow rule needs to exist on top — don't try to write one clever policy that does both.
 - Ingress requires a running controller in the cluster — if `kubectl get ingress ` shows no address, check ` ingressclass ` and controller Pods before touching your own YAML.
@@ -832,13 +870,10 @@ kubectl get ns app --show-labels
 
 | Topic                          | One-line takeaway                                                                                                                        |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Services (4.1)                 | Inspect the Service's EndpointSlices first — empty means fix selector/readiness, populated-but-unreachable means continue with ports/networking |
+| Services (4.1)                 | Inspect the Service's EndpointSlices first — no Ready addresses means investigate selector/readiness/publishing; populated-but-unreachable means continue with ports/networking |
 | Ingress (4.2)                  | One entry point, host/path-based routing to many backend Services — requires a running Ingress controller to do anything                |
 | NetworkPolicies (4.3)          | Default-deny first, then layer narrow allow rules — policies combine additively, never subtractively                                    |
 | Cross-namespace scoping (4.3B) | A policy is namespace-scoped; a destination ingress or source egress boundary can enforce the required block, while both sides can be used for defense in depth |
-
-**Next:**Chapter 5 — Application Observability and Maintenance (15%) is the smallest domain by weight but the highest-leverage — the debugging skills there are what let you finish tasks in every other chapter when something doesn't work the first time.
-\newpage
 
 ---
 
@@ -848,7 +883,7 @@ kubectl get ns app --show-labels
 
 In namespace ` shop `, a frontend and API are already running.
 
-Expose both internally with Services, expose them through one Ingress using host/path routing, apply default-deny ingress, and allow only frontend → API on TCP ` 8080 `. Verify each layer and prove that unrelated direct API traffic is denied.
+Expose both internally with Services, expose them through one Ingress using host/path routing, apply default-deny ingress, then allow the required Ingress Controller → backend traffic and frontend → API on TCP `8080`. Verify each layer and prove that unrelated direct API traffic is denied.
 
 ### Requirements
 
@@ -858,15 +893,17 @@ Expose both internally with Services, expose them through one Ingress using host
 - Frontend Service: ` frontend:80 `.
 - API Service: ` api:8080 `.
 - Ingress host: ` shop.example.com `.
-- Assume the cluster has an Ingress controller with an `nginx` IngressClass.
+- Assume the cluster has an `nginx` IngressClass whose controller Pods run in namespace `ingress-nginx` and carry label `app.kubernetes.io/component=controller`.
 - `/` → ` frontend:80 `.
 - `/api ` → ` api:8080 `.
 - Default deny ingress.
-- Allow only ` app=frontend ` → ` app=api ` on TCP ` 8080 `.
+- Allow the Ingress Controller to reach the frontend and API backends on their Service target ports.
+- Allow ` app=frontend ` → ` app=api ` on TCP ` 8080 `.
+- Do not permit unrelated application Pods to reach the API.
 
 ### Success Criteria
 
-Services have endpoints, the Ingress contains both routes, frontend-to-API traffic is permitted, and unrelated direct API traffic is denied.
+Services have endpoints, the Ingress contains both routes, the Ingress Controller can reach both backends, frontend-to-API traffic is permitted, and unrelated direct API traffic is denied.
 
 ### Suggested Time
 
@@ -952,10 +989,34 @@ spec:
   podSelector: {}
   policyTypes: [Ingress]
 ---
+# Allow the Ingress Controller to reach both backends.
+# Assumption from the task: ingress-nginx namespace + controller label.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-frontend-api
+  name: allow-ingress-controller
+  namespace: shop
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: controller
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller-to-api
   namespace: shop
 spec:
   podSelector:
@@ -964,6 +1025,12 @@ spec:
   policyTypes: [Ingress]
   ingress:
   - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: controller
     - podSelector:
         matchLabels:
           app: frontend
@@ -972,6 +1039,7 @@ spec:
       port: 8080
 ```
 
+
 Verify:
 
 ```bash
@@ -979,7 +1047,15 @@ kubectl get endpointslice -l kubernetes.io/service-name=frontend -n shop
 kubectl get endpointslice -l kubernetes.io/service-name=api -n shop
 kubectl get ingress shop -n shop
 kubectl get networkpolicy -n shop
-kubectl describe networkpolicy allow-frontend-api -n shop
+kubectl describe networkpolicy allow-ingress-controller -n shop
+kubectl describe networkpolicy allow-ingress-controller-to-api -n shop
+kubectl run unrelated-test -n shop --image=busybox:1.36 --rm -it -- wget -qO- -T3 http://api:8080
+kubectl run frontend-test -n shop --image=busybox:1.36 --labels=app=frontend --rm -it -- wget -qO- -T3 http://api:8080
 ```
 
+The `unrelated-test` command should time out or otherwise fail because it has no allowed source label; the `frontend-test` command should succeed because it carries `app=frontend`. When the Ingress Controller has a reachable address, also send a request with `Host: shop.example.com` and verify that `/` and `/api` route to the expected Services.
+
 </details>
+
+**Next:**Chapter 5 — Application Observability and Maintenance (15%) is the smallest domain by weight but the highest-leverage — the debugging skills there are what let you finish tasks in every other chapter when something doesn't work the first time.
+\newpage

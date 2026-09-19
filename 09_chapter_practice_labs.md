@@ -2,24 +2,36 @@
 chapter: 9
 title: CKAD Practice & Labs
 weight: 9
-estimated_time: 6-9 hours across all six levels
+estimated_time: 11-14 hours across all six levels
 label: Practice
 ---
 # Chapter 9 — CKAD Practice & Labs
 
 Everything above this point was reference. Everything from here on is hands-on. **Attempt every task yourself in a real cluster (`kind`, `minikube`, or any sandbox) before reading the solution** — reading a solution without typing the commands yourself builds false confidence.
 
-**⏱ Estimated time:** 6–9 hours total, spread across multiple sessions — this is the largest time investment in the guide, and deliberately so. Roughly: Level 1 (45–60 min), Level 2 (1–1.5 hrs), Level 3 (1–1.5 hrs), Level 4 (1.5–2 hrs), Level 5 (1–1.5 hrs), Level 6 (2 x ~2 hrs for the two mock exams).
+**⏱ Estimated time:** 11–14 hours total, spread across multiple sessions — this is the largest time investment in the guide, and deliberately so. Roughly: Level 1 (45–60 min), Level 2 (1–1.5 hrs), Level 3 (1–1.5 hrs), Level 4 (1.5–2 hrs), Level 5 (1–1.5 hrs), Level 6 (3 x 2 hrs — Mock Exams A, B, and C, ideally on three separate days rather than back to back). That total assumes focused solo attempts; add time on top for reviewing mistakes, re-attempting labs you got wrong, and any environment setup.
+
+## Practice Environment Prerequisites
+
+Before starting the labs, use a cluster that supports the features these exercises depend on:
+
+- **NetworkPolicy labs:** a CNI/network plugin that actually enforces `NetworkPolicy`.
+- **Ingress labs:** an installed Ingress controller and an appropriate `IngressClass`.
+- **PVC/StatefulSet labs:** a usable `StorageClass` matching the task (the labs that require dynamic provisioning explicitly call this out).
+- **Image-building labs:** a way to make locally built images available to the cluster (`kind load docker-image`, `minikube image load`, or a reachable registry).
+- **Version target:** Kubernetes **1.35** is recommended so the command behavior and native-sidecar examples match this guide's target version.
+
+Some labs intentionally assume pre-created resources; those prerequisites are stated in the individual task.
 
 ## Learning Objectives
 
 By the end of this chapter, you should be able to:
 
 - Complete Level 1–2 fundamentals tasks from memory, without consulting Chapter 8.
-- Diagnose and fix every Level 3 failure category using only `describe`/`logs`/`get EndpointSlices` — no starting hint beyond the symptom.
+- Diagnose and fix every Level 3 failure category using the failure-appropriate inspection commands (`describe`, `logs`, EndpointSlices, StorageClasses, NetworkPolicies, and related state) — no starting hint beyond the symptom.
 - Decide, unprompted, which Kubernetes objects a Level 4 outcome-based task requires, the way the real exam expects.
 - Finish Level 5 timed tasks at or under their stated time targets.
-- Self-grade a full Level 6 mock exam at or above the 66% pass-proxy threshold.
+- Self-grade each of the three full Level 6 mock exams (A, B, and C) against a **12/17 (70.6%) practice benchmark** — a personal readiness signal, not a prediction of your real CKAD score. The real CKAD passing score is 66%, but its scoring model is not equivalent to 17 equal-weight tasks.
 
 **Progression:** Level 1 (Fundamentals) -> Level 2 (Configuration & Design) -> Level 3 (Troubleshooting) -> Level 4 (Combined) -> Level 5 (Timed) -> Level 6 (Full Mock Exams). Difficulty and ambiguity increase as you go — later levels intentionally withhold which resource or command to use, in the style of a performance-based exam.
 
@@ -59,6 +71,7 @@ Each level removes a little more scaffolding: Level 1 tells you exactly which ob
 
 ```bash
 kubectl run test-pod --image=nginx:1.27 --labels=env=test
+kubectl wait --for=condition=Ready pod/test-pod --timeout=60s
 kubectl get pod test-pod --show-labels
 ```
 
@@ -85,6 +98,8 @@ kubectl get pod test-pod --show-labels
 kubectl create namespace billing
 kubectl config set-context --current --namespace=billing
 kubectl config view --minify | grep namespace:
+# Restore the default namespace so the following Level 1 tasks are not accidentally run in billing.
+kubectl config set-context --current --namespace=default
 ```
 
 **Common Mistakes:** Passing `-n billing` on every future command instead of switching the default — works, but wastes time across a whole exam.
@@ -130,7 +145,7 @@ kubectl get pods -l tier=frontend
 
 ```bash
 kubectl create configmap app-settings --from-literal=THEME=dark --from-literal=TIMEOUT=30
-kubectl run settings-pod --image=busybox --command -- sleep 3600 --dry-run=client -o yaml > pod.yaml
+kubectl run settings-pod --image=busybox --command --dry-run=client -o yaml -- sleep 3600 > pod.yaml
 ```
 
 Edit `pod.yaml` to add:
@@ -143,6 +158,7 @@ Edit `pod.yaml` to add:
 
 ```bash
 kubectl apply -f pod.yaml
+kubectl wait --for=condition=Ready pod/settings-pod --timeout=60s
 kubectl exec settings-pod -- env | grep -E 'THEME|TIMEOUT'
 ```
 
@@ -167,12 +183,17 @@ kubectl exec settings-pod -- env | grep -E 'THEME|TIMEOUT'
 
 ```bash
 kubectl create secret generic db-secret --from-literal=password=hunter2
-kubectl run secret-pod --image=busybox --command -- sleep 3600 --dry-run=client -o yaml > pod.yaml
+kubectl run secret-pod --image=busybox --command --dry-run=client -o yaml -- sleep 3600 > pod.yaml
 ```
 
-Add to `pod.yaml`:
+Edit `pod.yaml` so the generated container contains the mount, and the Pod `spec` contains the volume:
 
 ```yaml
+spec:
+  containers:
+  - name: secret-pod
+    image: busybox
+    command: ["sleep", "3600"]
     volumeMounts:
     - name: secret-vol
       mountPath: /etc/secret
@@ -184,6 +205,7 @@ Add to `pod.yaml`:
 
 ```bash
 kubectl apply -f pod.yaml
+kubectl wait --for=condition=Ready pod/secret-pod --timeout=60s
 kubectl exec secret-pod -- cat /etc/secret/password
 ```
 
@@ -210,6 +232,7 @@ kubectl exec secret-pod -- cat /etc/secret/password
 ```bash
 kubectl create deployment hello --image=nginx:1.27 --replicas=2
 kubectl expose deployment hello --port=80 --target-port=80
+kubectl rollout status deployment/hello --timeout=60s
 kubectl get endpointslice -l kubernetes.io/service-name=hello
 ```
 
@@ -232,7 +255,7 @@ kubectl explain pod.spec.dnsPolicy
 kubectl explain pod.spec.restartPolicy
 ```
 
-**Explanation:** `kubectl explain` returns the field's type and a description straight from the API schema — always available even with only official docs open, and often faster than searching them.
+**Explanation:** `kubectl explain` returns the field's type and a description straight from the API schema — available from the cluster's API schema when the API server is reachable, and often faster than searching external documentation.
 
 </details>
 
@@ -345,17 +368,20 @@ kubectl create configmap db-config --from-literal=DB_HOST=postgres --from-litera
 kubectl create secret generic db-auth --from-literal=DB_USER=app --from-literal=DB_PASS=s3cret -n dev
 ```
 
+Pod spec fragment:
+
 ```yaml
-containers:
-- name: db-client
-  image: busybox
-  command: ["sleep", "3600"]
-  envFrom:
-  - configMapRef: {name: db-config}
-  env:
-  - name: DB_PASS
-    valueFrom:
-      secretKeyRef: {name: db-auth, key: DB_PASS}
+spec:
+  containers:
+  - name: db-client
+    image: busybox
+    command: ["sleep", "3600"]
+    envFrom:
+    - configMapRef: {name: db-config}
+    env:
+    - name: DB_PASS
+      valueFrom:
+        secretKeyRef: {name: db-auth, key: DB_PASS}
 ```
 
 **Common Mistakes:** Trying to selectively pull one ConfigMap key via `envFrom` (it always pulls all keys) — use `env`/`valueFrom` for a single key from either source.
@@ -405,7 +431,7 @@ spec:
 - **Time Target:** 7 minutes
 - **Skills Tested:** Native sidecar pattern, shared volume, per-container logs
 
-**Task:** Pod `app-with-sidecar` has a main container `app` (busybox, writes a timestamp to `/var/log/app/out.log` every 2 seconds in a loop) and a native sidecar `tailer` (busybox, runs `tail -f /var/log/app/out.log`) sharing the log directory via `emptyDir`.
+**Task:** Pod `app-with-sidecar` has a main container `app` (busybox, writes a timestamp to `/var/log/app/out.log` every 2 seconds in a loop) and a native sidecar `tailer` (busybox, runs `tail -f /var/log/app/out.log`) sharing the log directory via `emptyDir`. *(Native sidecars — an init container with `restartPolicy: Always` — require Kubernetes 1.28+ and are stable by 1.33; this guide's target version of 1.35 supports them fully.)*
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -416,7 +442,7 @@ spec:
   - name: tailer
     image: busybox
     restartPolicy: Always
-    command: ["sh", "-c", "tail -f /var/log/app/out.log"]
+    command: ["sh", "-c", "touch /var/log/app/out.log && tail -f /var/log/app/out.log"]
     volumeMounts:
     - {name: logs, mountPath: /var/log/app}
   containers:
@@ -441,6 +467,8 @@ spec:
 - **Namespace:** `dev`
 - **Time Target:** 6 minutes
 - **Skills Tested:** PVC creation and mounting
+
+**Prerequisite:** the cluster has a usable default `StorageClass`.
 
 **Task:** Create a PVC `pg-data` requesting `2Gi`, `ReadWriteOnce`, using the cluster's default StorageClass. Mount it at `/var/lib/postgresql/data` in a Pod `pg` (image `postgres:16`, env `POSTGRES_PASSWORD=test`).
 
@@ -604,7 +632,7 @@ spec:
   containers:
   - name: app
     image: busybox
-    command: ["sh", "-c", "ech Hello"]
+    command: ["sh", "-c", "ech Hello; sleep 3600"]
 ```
 
 <details>
@@ -620,7 +648,7 @@ kubectl logs crasher -n dev --previous
 <details>
 <summary>✅ Fix — reveal after attempting the lab</summary>
 
-Typo in the command — `ech` -> `echo`. Also add `sleep 3600` after, or the container will still exit immediately after a correct echo (exit 0, not a crash, but the Pod won't stay `Running` — clarify against the task's actual intent before assuming a long-running Pod is required).
+The command contains a typo: `ech` should be `echo`. The corrected command also keeps the container running so the lab ends in a stable `Running` state:
 
 **Common Mistakes:** Reading fresh `kubectl logs` (post-restart) instead of `--previous`, and seeing nothing useful because the container hasn't crashed yet on the new attempt.
 
@@ -678,7 +706,10 @@ Pod stays `0/1 Ready` forever; the app actually listens on port `80` and its hea
 
 ```bash
 kubectl describe pod <pod> -n dev | grep -A5 Events
-kubectl exec <pod> -n dev -- wget -qO- localhost:80/healthz
+
+# Use a throwaway BusyBox Pod if the application image does not contain wget.
+POD_IP=$(kubectl get pod <pod> -n dev -o jsonpath='{.status.podIP}')
+kubectl run probe-test -n dev --image=busybox:1.36 --rm -it --restart=Never --   wget -qO- "http://$POD_IP:80/healthz"
 ```
 
 </details>
@@ -794,7 +825,7 @@ Correct the key case to `MODE` in the Pod spec (Kubernetes keys are case-sensiti
 - **Namespace:** `dev`
 - **Time Target:** 5 minutes
 
-**Starting State:** `kubectl set image deployment/web nginx=nginx:1.999` was run (tag doesn't exist).
+**Starting State:** `kubectl set image deployment/web nginx=nginx:1.999` was run (tag doesn't exist). The Deployment's application container is named `nginx` and the workload has a known-good previous revision.
 
 <details>
 <summary>🔎 Diagnostic — reveal if needed</summary>
@@ -848,7 +879,13 @@ kubectl get storageclass
 <details>
 <summary>✅ Fix — reveal after attempting the lab</summary>
 
-Use an existing StorageClass name (or omit `storageClassName` to use the cluster default) and drop to an accessMode the class actually supports:
+Because `storageClassName` and access-mode changes are not a good in-place repair pattern for this lab, recreate the Pending claim with the correct storage settings. The task does not require preserving its contents:
+
+```bash
+kubectl delete pvc <name> -n dev
+```
+
+Then recreate it with an existing/default StorageClass and a supported access mode:
 
 ```yaml
 spec:
@@ -909,27 +946,28 @@ spec:
 ### Task 4.1 — Externalize configuration for a running app
 
 - **Namespace:** `shop`
-- **Starting State:** A Deployment `catalog` (image `nginx:1.27`, 3 replicas) is already running and serving traffic through an existing Service `catalog` on port 80.
+- **Starting State:** A Deployment `catalog` (image `nginx:1.27`, 3 replicas, single container named `catalog`) is already running and serving traffic through an existing Service `catalog` on port 80.
 - **Time Target:** 10 minutes
-- **Skills Tested:** ConfigMap, resource limits, Service verification, rollout
+- **Skills Tested:** ConfigMap creation/consumption, resource limits, Service verification, rollout
 
-**Task:** The `catalog` app needs an environment variable `FEATURE_FLAGS=beta` sourced from configuration (not hardcoded in the Pod spec), and every container should have a CPU limit of `300m` and a memory limit of `256Mi`. After your change, confirm the application is still reachable through its existing Service with zero Pods ever fully down at once.
+**Task:** Create a ConfigMap `catalog-config` containing `FEATURE_FLAGS=beta`, expose that value to the `catalog` application from configuration rather than hardcoding it in the Pod spec, and set the application container's CPU limit to `300m` and memory limit to `256Mi`. Configure a rolling-update strategy that maintains the desired number of available replicas during a normal rollout. Verify the Service remains reachable after the change.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
 
 ```bash
 kubectl create configmap catalog-config --from-literal=FEATURE_FLAGS=beta -n shop
-kubectl set resources deployment/catalog -n shop -c=nginx --limits=cpu=300m,memory=256Mi
+# Set the rollout policy before making the Pod-template changes that trigger the rollout.
+kubectl patch deployment catalog -n shop -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxSurge":1,"maxUnavailable":0}}}}'
+kubectl set resources deployment/catalog -n shop -c=catalog --limits=cpu=300m,memory=256Mi
 kubectl set env deployment/catalog -n shop --from=configmap/catalog-config
-kubectl patch deployment catalog -n shop -p '{"spec":{"strategy":{"rollingUpdate":{"maxUnavailable":0}}}}'
 kubectl rollout status deployment/catalog -n shop
 kubectl get endpointslice -l kubernetes.io/service-name=catalog -n shop
 ```
 
-**Explanation:** `maxUnavailable: 0` guarantees the Service always has at least the full replica count available during the rollout (relies on `maxSurge` to add capacity instead of removing it first).
+**Explanation:** `maxUnavailable: 0` prevents the Deployment controller from intentionally reducing the number of available replicas below the desired count during a normal rolling update. With a positive `maxSurge`, new Pods can be created first; readiness determines when old Pods can be removed. This is not protection against unrelated failures such as node loss or application failure.
 
-**Common Mistakes:** Editing the ConfigMap but forgetting a rollout is required for env-var changes to reach running Pods (Chapter 1.1); setting `maxSurge: 0` and `maxUnavailable: 0` together, which makes a rollout impossible (nothing can be added or removed).
+**Common Mistakes:** Editing the ConfigMap but forgetting a rollout is required for env-var changes to reach running Pods (Chapter 1.1); setting both `maxSurge: 0` and `maxUnavailable: 0`, which leaves the controller with no permitted capacity change during a rollout.
 
 </details>
 
@@ -941,7 +979,7 @@ kubectl get endpointslice -l kubernetes.io/service-name=catalog -n shop
 - **Time Target:** 10 minutes
 - **Skills Tested:** Multi-container patterns, volumes, logs
 
-**Task:** Create a Pod where a main container continuously appends the current timestamp to a log file, and a second container makes that log's content available for inspection via `kubectl logs` on the second container, without the main container's image needing any log-shipping logic itself.
+**Task:** Create a Pod where a main container continuously appends the current timestamp to a log file, and a second container makes that log's content available for inspection via `kubectl logs` on the second container, without the main container's image needing any log-shipping logic itself. The logging sidecar must tolerate the file not existing yet because it starts before the main container.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -957,7 +995,7 @@ spec:
   - name: sidecar
     image: busybox
     restartPolicy: Always
-    command: ["sh", "-c", "tail -f /logs/app.log"]
+    command: ["sh", "-c", "touch /logs/app.log && tail -F /logs/app.log"]
     volumeMounts: [{name: logs, mountPath: /logs}]
   containers:
   - name: main
@@ -978,7 +1016,7 @@ spec:
 ### Task 4.3 — Restrict and verify network access
 
 - **Namespace:** `shop`
-- **Starting State:** Pods labeled `app=payments` and `app=web` exist; currently any Pod can reach `payments` on port `9000`.
+- **Starting State:** Pods labeled `app=payments` and `app=web` exist, and Service `payments` selects `app=payments` Pods on port `9000`; currently any Pod can reach it.
 - **Time Target:** 10 minutes
 - **Skills Tested:** NetworkPolicy design, verification
 
@@ -1002,11 +1040,11 @@ spec:
 ```
 
 ```bash
-kubectl run web-test --image=busybox -l app=web -n shop --rm -it -- wget -qO- -T3 payments:9000    # should succeed
-kubectl run other-test --image=busybox -n shop --rm -it -- wget -qO- -T3 payments:9000              # should time out
+kubectl run web-test --image=busybox -l app=web -n shop --rm -it --restart=Never -- wget -qO- -T3 payments:9000    # should succeed
+kubectl run other-test --image=busybox -n shop --rm -it --restart=Never -- wget -qO- -T3 payments:9000              # should time out
 ```
 
-**Common Mistakes:** Writing a policy scoped to `app=web` (the source) with `policyTypes: [Egress]` instead of scoping it to `app=payments` (the destination) with `Ingress` — NetworkPolicies attach to the Pods they protect, not the Pods initiating traffic.
+**Common Mistakes:** Writing a policy scoped to `app=web` (the source) with `policyTypes: [Egress]` instead of scoping it to `app=payments` (the destination) with `Ingress` — NetworkPolicies attach to the Pods they protect, not the Pods initiating traffic. Also note: a bare `podSelector` under `from` (with no `namespaceSelector` alongside it) only ever matches Pods in the *same namespace* as the NetworkPolicy itself — this policy already blocks every other namespace by construction, not just unlabeled Pods in `shop`. That implicit same-namespace scoping is one of the more commonly misunderstood NetworkPolicy behaviors on the real exam.
 
 </details>
 
@@ -1015,11 +1053,11 @@ kubectl run other-test --image=busybox -n shop --rm -it -- wget -qO- -T3 payment
 ### Task 4.4 — Canary rollout of a new version
 
 - **Namespace:** `shop`
-- **Starting State:** `checkout` is running as a stable Deployment (5 replicas, image `myapp:1.0`) behind Service `checkout`.
+- **Starting State:** `checkout` is running as a stable Deployment (5 replicas, image `myapp:1.0`) behind Service `checkout`. The Service selector is `app=checkout` only, so a new canary with `app=checkout,track=canary` will also match.
 - **Time Target:** 12 minutes
 - **Skills Tested:** Canary pattern, Service selector design
 
-**Task:** Introduce version `myapp:2.0` so it receives an approximate minority share of `checkout`'s traffic (aim for roughly 20% based on ready endpoint counts), without touching the existing stable Deployment's rollout strategy and without downtime. Kubernetes Service routing does not guarantee an exact percentage split.
+**Task:** Introduce version `myapp:2.0` as a small minority of `checkout`'s traffic, without touching the existing stable Deployment's rollout strategy and without downtime. Kubernetes Service routing splits traffic in proportion to ready endpoint count, not by a configured percentage — with 5 stable replicas, adding 1 canary replica gives the canary roughly 1-in-6 of requests (~17%), not a round number you dial in directly.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -1031,18 +1069,23 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: {name: checkout-canary, namespace: shop}
 spec:
-  replicas: 1                       # 1 of 6 ready endpoints; only an approximate share
+  replicas: 1                       # 1 of 6 ready endpoints ≈ 17%, not a configured percentage
   selector: {matchLabels: {app: checkout, track: canary}}
   template:
     metadata: {labels: {app: checkout, track: canary}}
     spec: {containers: [{name: app, image: myapp:2.0}]}
 ```
 
-Confirm the existing Service selects only `app: checkout` (no `track:` key) so it load-balances across both.
+Apply it, wait for the canary Pod to become Ready, and confirm the existing Service selects only `app: checkout` (no `track:` key) so both tracks are eligible:
 
 ```bash
+kubectl apply -f checkout-canary.yaml
+kubectl rollout status deployment/checkout-canary -n shop
 kubectl get svc checkout -n shop -o jsonpath='{.spec.selector}'
+kubectl get endpointslice -l kubernetes.io/service-name=checkout -n shop -o wide
 ```
+
+The EndpointSlice should contain the existing stable endpoints plus the Ready canary endpoint. The exact request percentage is only approximate.
 
 **Common Mistakes:** Adding `track: stable` as a required selector key on the Service — that would exclude the canary Pods entirely instead of including them.
 
@@ -1081,7 +1124,7 @@ spec:
           restartPolicy: Never
           containers:
           - name: lister
-            image: bitnami/kubectl
+            image: registry.k8s.io/kubectl:v1.35.0
             command: ["kubectl", "get", "pods", "-n", "shop"]
 ```
 
@@ -1102,7 +1145,7 @@ kubectl auth can-i delete pods --as=system:serviceaccount:shop:pod-lister -n sho
 - **Time Target:** 8 minutes
 - **Skills Tested:** SecurityContext, resource limits, probes together
 
-**Task:** Deploy `worker` (image `myapp:1.0`) so that it cannot run as root, cannot escalate privileges, has all Linux capabilities dropped, runs with a read-only root filesystem (mount an `emptyDir` at `/tmp` for anything it needs to write), and reports unhealthy via a liveness probe on `/healthz` port `8080` if it locks up.
+**Task:** Deploy `worker` (image `myapp:1.0`) so that it cannot run as root, cannot escalate privileges, has all Linux capabilities dropped, runs with a read-only root filesystem (mount an `emptyDir` at `/tmp` for anything it needs to write), reports unhealthy via a liveness probe on `/healthz` port `8080` if it locks up, and has a CPU limit of `200m` and a memory limit of `256Mi`.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -1122,9 +1165,14 @@ spec:
         image: myapp:1.0
         securityContext:
           runAsNonRoot: true
+          runAsUser: 10001
+          runAsGroup: 10001
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities: {drop: ["ALL"]}
+        resources:
+          requests: {cpu: "100m", memory: "128Mi"}
+          limits: {cpu: "200m", memory: "256Mi"}
         livenessProbe:
           httpGet: {path: /healthz, port: 8080}
           periodSeconds: 10
@@ -1141,7 +1189,7 @@ spec:
 
 ## Level 5 — Timed CKAD Tasks
 
-Set a real timer. Stop at the target time whether finished or not, then review what slowed you down.
+**⏱ Level time budget:** 1–1.5 hours for all 8 tasks. Set a real timer. Stop at the target time whether finished or not, then review what slowed you down.
 
 ### Task 5.1 (3 min) — Scale a Deployment
 
@@ -1152,6 +1200,7 @@ Scale Deployment `web` in namespace `dev` to 6 replicas and confirm all are `Run
 
 ```bash
 kubectl scale deployment web -n dev --replicas=6
+kubectl rollout status deployment/web -n dev
 kubectl get pods -n dev -l app=web
 ```
 
@@ -1172,7 +1221,7 @@ kubectl label pods -l app=web tier=frontend -n dev
 
 > **Standalone Pod immutability reminder:** For a bare Pod, many `spec` fields—including container probes and container configuration—cannot be edited in place. If a task asks you to change such a field, modify the source manifest and recreate the Pod. If the Pod is managed by a Deployment/StatefulSet/etc., update the controller's Pod template instead.
 
-### Task 5.3 (5 min) — Create a Secret and inject one key
+### Task 5.3 (5 min) — Recreate a standalone Pod with a Secret
 
 Create Secret `api-key` (`KEY=abc123`) in namespace `dev`, then patch existing Pod `worker` (assume it can be recreated) to expose it as env var `API_KEY`.
 
@@ -1182,17 +1231,21 @@ Create Secret `api-key` (`KEY=abc123`) in namespace `dev`, then patch existing P
 ```bash
 kubectl create secret generic api-key --from-literal=KEY=abc123 -n dev
 kubectl get pod worker -n dev -o yaml > worker.yaml
-# Add the API_KEY env entry to the clean replacement manifest while preserving the required Pod spec.
-# Remove server-generated metadata/status before recreating the standalone Pod.
-kubectl delete pod worker -n dev
-kubectl create -f worker.yaml
 ```
+
+Edit `worker.yaml`: add the `API_KEY` env entry (`secretKeyRef` to `api-key`/`KEY`), and strip the server-set fields the API rejects on create — `metadata.resourceVersion`, `metadata.uid`, `metadata.creationTimestamp`, the `status:` block, and the `kubectl.kubernetes.io/last-applied-configuration` annotation if present.
+
+```bash
+kubectl replace --force -f worker.yaml
+```
+
+**Why `replace --force` instead of `delete` then `create`:** it is one command that performs a delete followed by a recreate, which is convenient under exam time pressure. It is **not atomic**; there is still a deletion/recreation window, so use it deliberately for a standalone Pod recreation rather than as a normal update mechanism.
 
 </details>
 
-### Task 5.4 (5 min) — Fix a failing readiness probe
+### Task 5.4 (5 min) — Recreate a standalone Pod with a corrected readiness probe
 
-Pod `flaky` in `dev` has `readinessProbe.httpGet.port: 9999`; the app listens on `8080`. Fix it.
+Standalone Pod `flaky` in `dev` has `readinessProbe.httpGet.port: 9999`; the app listens on `8080`. Fix it.
 
 <details>
 <summary>✅ Solution — reveal after attempting the task</summary>
@@ -1200,9 +1253,12 @@ Pod `flaky` in `dev` has `readinessProbe.httpGet.port: 9999`; the app listens on
 ```bash
 # Probe configuration on an existing Pod is immutable. Update the source manifest, then recreate the standalone Pod.
 kubectl get pod flaky -n dev -o yaml > flaky.yaml
-# Change readinessProbe.httpGet.port to 8080 and remove server-generated metadata/status.
-kubectl delete pod flaky -n dev
-kubectl create -f flaky.yaml
+```
+
+Edit `flaky.yaml`: change `readinessProbe.httpGet.port` to `8080`, and strip `metadata.resourceVersion`, `metadata.uid`, `metadata.creationTimestamp`, and the `status:` block (same cleanup as Task 5.3).
+
+```bash
+kubectl replace --force -f flaky.yaml
 kubectl get pod flaky -n dev
 ```
 
@@ -1250,6 +1306,8 @@ kubectl create ingress store-ing -n dev --class=nginx --rule="store.local/*=stor
 kubectl get ingress store-ing -n dev
 ```
 
+**Note:** the `/*` here is Ingress path syntax meaning a `Prefix`-type path match (equivalent to `pathType: Prefix, path: /`) — it's interpreted by the Ingress controller, not expanded by your shell as a wildcard.
+
 </details>
 
 ### Task 5.8 (10 min) — Diagnose and fix from a cold start
@@ -1259,12 +1317,30 @@ Given only "`checkout` in namespace `shop` is unreachable," find and fix the roo
 
 ## Level 6 — Full Mock Exams
 
+**⏱ Level time budget:** ~6 hours total — three independent 120-minute mock exams (A, B, C). Take them on three separate days, not back to back; same-day fatigue makes the third mock an unreliable signal.
+
 > **Self-scoring note:** Each mock contains 17 tasks, but these are course-created practice tasks. For a simple internal score, treat each fully verified task as 1 point: **12/17 = 70.6%**. This is a study heuristic only, not a prediction of the real CKAD score, because the real exam uses subtask-based scoring and different tasks can contribute different amounts.
+
+> **🌍 Real-world example.** Pilots train on full-motion simulators for exactly the failure mode Level 6 targets here: knowing a procedure in isolation (Level 1–4) is a different skill from executing it correctly at hour two of a high-stakes session, with the clock visible and no instructor to confirm you're on the right track. Timed board exams for medicine and the bar exam use the same principle — the content is mostly familiar by the time you sit them, but simulating the *conditions* (time pressure, no feedback until the end, unfamiliar-shaped questions on familiar material) is what the practice run is actually training. That's why Mock A/B/C intentionally give you no solutions: the real exam won't either.
+
+**How to self-verify a task without a solution key.** Since Mocks A, B, and C deliberately withhold solutions (see Rules, below), use this checklist for every task instead of guessing whether you're "probably right":
+
+1. Re-read the task's stated requirements as a literal checklist — did you satisfy every bullet, not just the main one?
+2. Run the task's own "Verify" instruction exactly as worded, and read the actual output — don't assume success because a command didn't error.
+3. For anything involving traffic or connectivity, prove both directions the task implies: the allowed path *and* that the disallowed path is actually blocked (a policy that doesn't block anything is a common silent failure).
+4. For anything involving a rollout or restart, confirm `kubectl rollout status` reports complete, not just that you ran the command.
+5. Re-read the task once more looking specifically for a constraint phrased as a negative ("do not modify the image", "without changing its strategy") — these are graded and easy to violate while fixing the main ask.
+
+If a task fails step 1–5, that's a genuine incomplete — mark it as such in your score rather than rounding up. The whole value of self-grading honestly is that it tells you where to spend the time you have left before the real exam, per the Final Readiness Self-Check in Chapter 10.
+
+**One framing note:** each mock packs in 17 tasks spanning nearly every topic in this guide by design — that's a comprehensive coverage drill, deliberately denser and broader than any single real CKAD attempt is likely to be. Treat "Treat this as a real CKAD attempt" (below) as instructions for *how* to sit it — cold, timed, no solutions — not as a claim that the real exam's specific task count or topic mix will match this one.
 
 
 # CKAD Mock Exam A
 
 **17 tasks · 120 minutes · Kubernetes 1.35**
+
+**Mock environment prerequisites:** Use a Kubernetes 1.35 practice cluster with a working CNI that enforces NetworkPolicy, an installed IngressClass for Ingress tasks, a usable default StorageClass for PVC tasks, and the namespaces/resources/images explicitly described by each task. Any `myapp:*` image mentioned by a task is assumed pullable or supplied by the mock fixture; image-building tasks explicitly provide their own build context.
 
 **Rules**
 
@@ -1293,7 +1369,7 @@ Configure the cluster so that:
 
 * `/` reaches Service `web` on port `80`.
 * TLS terminates at the Ingress.
-* The supplied certificate and key are used.
+* Create a TLS Secret from the supplied `tls.crt` and `tls.key` files and use that Secret from the Ingress.
 * The cluster's installed Ingress class is used.
 
 Verify the resulting Ingress configuration.
@@ -1311,7 +1387,7 @@ Requirements:
 * 3 Redis replicas using `redis:7`
 * Stable network identity for replicas
 * Each replica requires its own `1Gi` persistent volume
-* Use the cluster's default StorageClass (if one is available in the practice cluster)
+* The practice cluster has a usable default StorageClass; use it
 * Data must survive an individual Pod restart
 
 Expose the workload using the appropriate Service configuration.
@@ -1328,7 +1404,8 @@ Namespace `mock-a` contains:
 
 * Deployment `api-stable`
 * 3 ready Pods running `myapp:1.0`
-* Service `api` selecting the application's Pods
+* Service `api` selecting `app=api` only
+* Stable Pods use label `track=stable`
 
 Deploy version `1.1` as a canary while keeping the existing application available throughout the change.
 
@@ -1420,9 +1497,9 @@ Verify the dependency behavior.
 
 Namespace `mock-a` already contains:
 
-* Stable API Pods running `myapp:1.0`
-* A failed canary workload running `myapp:1.1`
-* Service `api`
+* Stable API Pods running `myapp:1.0` with labels `app=api,track=stable`
+* A failed canary workload running `myapp:1.1` with labels `app=api,track=canary`
+* Service `api` selecting `app=api`
 
 Restore the application so that:
 
@@ -1577,7 +1654,7 @@ Do not change the resource specification.
 
 **Environment, Configuration & Security**
 
-The cluster contains a CustomResourceDefinition.
+The cluster contains a **CustomResourceDefinition for a namespaced custom resource**.
 
 Discover the available custom resource and determine:
 
@@ -1616,12 +1693,13 @@ Verify the resulting Pod security configuration.
 
 A directory containing a small application and Dockerfile is provided.
 
-Build the application into a container image and deploy it to namespace `mock-a`.
+Build the application into an image named `mock-a-app:1.0` and deploy it to namespace `mock-a`.
 
 Requirements:
 
-* Build the supplied image.
+* Build the supplied image as `mock-a-app:1.0`.
 * Do not modify application source code.
+* Make the image available to the practice cluster (`kind load docker-image`, `minikube image load`, or the cluster's supplied local registry mechanism).
 * Deploy it using a Kubernetes workload.
 * Expose it internally through a Service.
 * Verify that the application responds successfully.
@@ -1705,7 +1783,7 @@ Verify the sidecar output independently.
 
 **Application Deployment**
 
-Service `web` currently sends traffic to three ready blue Pods running:
+Service `web` currently selects `app=web,version=blue` and sends traffic to three ready blue Pods running:
 
 ```text
 myapp:v1
@@ -1745,26 +1823,26 @@ Verify that it reaches `Running`.
 
 **Services & Networking**
 
-Namespace `mock-b` contains:
+Namespace `mock-b` contains Pods labeled:
 
 ```text
 app=frontend
 ```
 
-Pods and:
+and:
 
 ```text
 app=backend
 ```
 
-Pods.
+No NetworkPolicy currently restricts this traffic.
 
 Frontend Pods must:
 
 * Reach backend Pods on TCP `8080`
 * Continue to resolve DNS
-
-Other application-to-application traffic should remain restricted.
+* Have other application-to-application egress restricted
+* Backend Pods should accept application traffic only from the frontend Pods on TCP `8080`
 
 Configure the networking rules appropriately.
 
@@ -1914,14 +1992,14 @@ Inspect the namespace policy.
 
 PVC `data` in `mock-b` remains `Pending`.
 
-The workload does not require preservation of the current claim contents.
+The workload does not require preservation of the current claim contents, so recreating the PVC is allowed if the fields that need correction are not safely mutable in place.
 
 Investigate:
 
 * Available StorageClasses
 * PVC configuration
 
-Correct the storage configuration so the claim binds successfully.
+Correct the storage configuration so the claim binds successfully. Because the task explicitly says its contents do not need to be preserved, you may delete and recreate the Pending PVC when the required fields cannot be repaired safely in place.
 
 Verify the final PVC status.
 
@@ -2124,11 +2202,11 @@ Verify the Pod can be scheduled appropriately.
 
 **Environment, Configuration & Security**
 
-Pod `config-app` in `mock-c` uses ConfigMap `app-config`.
+Deployment `config-app` in `mock-c` consumes ConfigMap `app-config` as environment variables.
 
 The ConfigMap has been updated, but the application is still seeing the previous configuration.
 
-Investigate how the configuration is consumed by the Pod.
+Investigate how the configuration is consumed by the Deployment.
 
 Restore the expected configuration without changing the ConfigMap's current values.
 
@@ -2167,7 +2245,7 @@ Verify the Pod starts successfully.
 
 Deployment `worker` in `mock-c` has Pods that remain `Pending`.
 
-The cluster has available CPU, but the scheduler refuses to place the Pods.
+The cluster has available CPU overall, but no other scheduling constraint is intentionally responsible for the failure; the Pod's CPU request is too large for any single eligible node.
 
 Inspect the Pod events and resource requests.
 
@@ -2206,11 +2284,11 @@ Verify the resulting security and volume configuration.
 Pod `processor` in `mock-c` has:
 
 * An application container
-* A helper/setup requirement
+* A setup operation that must create `/work/ready` containing the text `ready`
 
-The application must not start until the setup operation has successfully completed.
+The application must not start until that setup operation has successfully completed.
 
-The setup operation should run once before the main application starts.
+The setup operation should run once before the main application starts, and both containers must be able to access `/work`.
 
 Implement the correct container structure.
 
@@ -2240,17 +2318,17 @@ Do not manually recreate the Deployment.
 
 ---
 
-## 11. CronJob missed executions
+## 11. CronJob concurrency and history
 
 **Application Deployment**
 
-CronJob `report` in `mock-c` currently has overlapping executions.
+CronJob `report` in `mock-c` currently allows overlapping executions and retains more history than required.
 
 The requirement is:
 
 * Only one Job may run at a time.
-* A failed Job should be retained for troubleshooting.
-* Successful Jobs should not accumulate indefinitely.
+* Retain the last **1 failed Job** history record.
+* Retain the last **2 successful Job** history records.
 
 Modify the CronJob to satisfy these operational requirements.
 
@@ -2262,7 +2340,7 @@ Verify the resulting Job-history and concurrency behavior.
 
 **Application Design & Build**
 
-Pod `storage-app` in `mock-c` has a bound PVC named `data`.
+Standalone Pod `storage-app` in `mock-c` has a bound PVC named `data`.
 
 The application expects persistent data at:
 
@@ -2274,9 +2352,7 @@ The Pod starts successfully, but application data is being written somewhere els
 
 Inspect the PVC and Pod volume configuration.
 
-Correct the Pod so the existing PVC is mounted at the required path.
-
-Do not recreate the PVC.
+Correct the Pod so the existing PVC is mounted at the required path. The Pod may be recreated; do not recreate the PVC.
 
 Verify the volume mount.
 
@@ -2292,16 +2368,16 @@ Namespace `mock-c` contains database Pods labeled:
 app=db
 ```
 
-Only application Pods from namespace `frontend-prod` should be allowed to connect to the database on TCP `5432`.
+Namespace `frontend-prod` exists and contains application Pods labeled `app=frontend`. No other NetworkPolicy currently grants ingress to the database Pods. Only those application Pods from `frontend-prod` should be allowed to connect to the database on TCP `5432`.
 
 Other namespaces must not be able to access the database.
 
-Configure the required network policy.
+Configure the required network policy. Use the namespace's standard `kubernetes.io/metadata.name=frontend-prod` label for namespace selection and the `app=frontend` Pod label in the same peer rule.
 
 Verify:
 
-* An allowed connection from `frontend-prod`
-* A blocked connection from another namespace
+* An allowed connection from an `app=frontend` Pod in `frontend-prod`
+* A blocked connection from an `app=frontend` Pod in another namespace
 
 ---
 
@@ -2387,7 +2463,7 @@ Render the final manifests and verify the changes before applying.
 
 **Environment, Configuration & Security**
 
-A CustomResourceDefinition is installed in `mock-c`, but a supplied custom resource cannot be created.
+A CustomResourceDefinition defining a **namespaced custom resource** is installed for the cluster, and a supplied custom resource for namespace `mock-c` cannot be created.
 
 The manifest contains an invalid field.
 
@@ -2438,7 +2514,7 @@ Do not modify or delete the CRD.
 | Namespace selector       | —     | —     | ✅     |
 | Service troubleshooting  | ✅     | ✅     | ✅     |
 | Ingress                  | ✅     | ✅     | —     |
-| Node affinity            | —     | —     | ✅     |
+| Node placement           | —     | —     | ✅     |
 | Taints/tolerations       | —     | —     | ✅     |
 | ConfigMap                | —     | ✅     | ✅     |
 | Secrets                  | ✅     | ✅     | ✅     |
@@ -2462,7 +2538,7 @@ The goal should be to eventually complete each 17-task mock within **120 minutes
 
 - Always attempt a task cold before reading its solution — the struggle itself is what builds exam-day recall (see the productive-failure note above).
 - In Level 3 and beyond, run the Chapter 5 diagnostic sequence (`get` → `describe` → `logs`) before forming a hypothesis, even when the symptom looks familiar — the exact cause still varies lab to lab.
-- Track which category (Config/Security, Design/Build, Deployment, Observability, Networking) you consistently run over-time on across Level 5 and the two mocks — that's your signal for where to spend final revision time, not just your overall score.
+- Track which category (Config/Security, Design/Build, Deployment, Observability, Networking) you consistently run over-time on across Level 5 and all three mocks — that's your signal for where to spend final revision time, not just your overall score.
 
 ## Chapter Summary
 
@@ -2470,10 +2546,10 @@ The goal should be to eventually complete each 17-task mock within **120 minutes
 | --------------------------- | ----------------------- | ------------------------------------------------------------------------- |
 | 1 — Fundamentals           | Single-skill tasks      | Completed without referencing Chapter 8                                   |
 | 2 — Configuration & Design | Multi-field tasks       | Probes, Config/Secrets, and multi-container patterns combined confidently |
-| 3 — Troubleshooting        | Diagnose from a symptom | Root cause found using`describe`/`logs` alone, no guessing            |
+| 3 — Troubleshooting        | Diagnose from a symptom | Root cause found using failure-appropriate diagnostics, no guessing            |
 | 4 — Combined               | Outcome-only tasks      | You chose the right objects yourself, unprompted                          |
 | 5 — Timed                  | Real clock pressure     | Consistently at or under each task's time target                          |
-| 6 — Mock Exams             | Full 2-hour simulation  | Self-graded ≥66% on both Mock A and Mock B                               |
+| 6 — Mock Exams             | Full 2-hour simulation  | ≥12/17 self-graded on Mock A, Mock B, and Mock C (70.6% practice benchmark, not a real-exam score prediction) |
 
 **Next:** Chapter 10 — CKAD Study & Exam Plan ties every chapter in this guide into one weight-proportional study schedule and a final exam-day checklist.
 \newpage

@@ -67,7 +67,7 @@ WORKDIR /src
 COPY . .
 RUN go build -o app .
 
-FROM gcr.io/distroless/base
+FROM gcr.io/distroless/base-debian13:nonroot
 COPY --from=build /src/app /app
 ENTRYPOINT ["/app"]
 ```
@@ -137,7 +137,7 @@ WORKDIR /src
 COPY main.go .
 RUN go build -o app main.go
 
-FROM gcr.io/distroless/base
+FROM gcr.io/distroless/base-debian13:nonroot
 COPY --from=build /src/app /app
 ENTRYPOINT ["/app"]
 ```
@@ -162,8 +162,8 @@ docker history ckad-go:1.0
 
 | Status | Meaning | Common Causes | Diagnosis |
 |---|---|---|---|
-| `ErrImagePull` | Image-pull attempt failed immediately | Wrong image name/tag, registry unreachable, authentication failed, network/TLS issue, registry rate limiting | `kubectl describe pod` → look at "Events" for specific error message |
-| `ImagePullBackOff` | Kubernetes is backing off and retrying the pull | Same root causes as `ErrImagePull`, but the first attempt didn't immediately reveal the issue | `kubectl describe pod` → check how many retries; wait and check again or fix the root cause |
+| `ErrImagePull` | The latest image-pull attempt failed | Wrong image name/tag, registry unreachable, authentication failed, network/TLS issue, registry rate limiting | `kubectl describe pod` → inspect "Events" for the specific error |
+| `ImagePullBackOff` | Kubernetes is backing off before retrying a failed image pull | Same underlying causes as `ErrImagePull`; the pull remains unsuccessful while kubelet retries with backoff | `kubectl describe pod` → inspect "Events" for the specific error, then fix that root cause |
 
 **Create a Secret for registry credentials (standard way):**
 
@@ -192,7 +192,6 @@ spec:
   containers:
   - name: app
     image: registry.example.com/myapp:1.0   # private registry URL
-    imagePullPolicy: Always    # pull on every container start
 ```
 
 **Declarative Secret (base64 encoded):**
@@ -217,8 +216,8 @@ kubectl get pod private-app -o jsonpath='{.spec.imagePullSecrets}'
 ```bash
 kubectl describe pod private-app | grep -A 10 Events
 # should show the specific error: "authentication required" or "image not found"
-kubectl logs private-app                     # won't work if pull is still failing
-kubectl rollout history deployment/app       # check if image was pulled successfully before
+kubectl logs private-app                     # won't work if the image never started
+# If this Pod is managed by a Deployment, inspect its ReplicaSets/rollout separately if needed.
 ```
 
 🔴 **Exam tip:** If registry credentials must be supplied through the Pod specification, create an `imagePullSecret` and reference it in the Pod or ServiceAccount. Other registry credential mechanisms may also be configured at the cluster/node level.
@@ -233,7 +232,11 @@ kubectl rollout history deployment/app       # check if image was pulled success
 
 In namespace `registry-demo`, configure a Pod named `private-app` to pull `registry.example.com/team/app:1.0` from a private registry.
 
-The registry credentials are username `student` and password `CKAD-pass-1`. Create the required Secret named `registry-creds` and configure the Pod to reference it.
+**Starting state:** A starter Pod manifest for `private-app` is provided and currently references the private image but has no `imagePullSecrets` entry.
+
+**Prerequisite:** This exercise assumes a reachable practice registry at `registry.example.com` already contains `team/app:1.0` and accepts the credentials below. If your lab uses a different private registry, substitute its hostname/image while preserving the same Secret and `imagePullSecrets` mechanics.
+
+The registry credentials are username `student` and password `CKAD-pass-1`. Create the required Secret named `registry-creds` and update the Pod specification to reference it.
 
 ### Requirements
 
@@ -267,7 +270,7 @@ kubectl create namespace registry-demo
 kubectl create secret docker-registry registry-creds   --docker-server=registry.example.com   --docker-username=student   --docker-password='CKAD-pass-1'   -n registry-demo
 ```
 
-The Pod specification should contain:
+Update the starter Pod specification to contain:
 
 ```yaml
 spec:
@@ -276,6 +279,12 @@ spec:
   containers:
   - name: app
     image: registry.example.com/team/app:1.0
+```
+
+Recreate the starter Pod if necessary (Pod image-pull settings are part of the Pod specification):
+
+```bash
+kubectl apply -f private-app.yaml
 ```
 
 Verify:
@@ -636,9 +645,9 @@ db.default.svc.cluster.local       → resolves to all Pod IPs (or single IP for
 **Verify DNS and connectivity:**
 ```bash
 kubectl get svc db                 # should show CLUSTER-IP as None
-kubectl run -it debug --image=busybox --restart=Never -- nslookup db.default.svc.cluster.local
-# output should show all three Pod IPs, not a single service IP
-kubectl run -it debug --image=busybox --restart=Never -- nslookup db-0.db.default.svc.cluster.local
+kubectl run -it --rm dns-test --image=busybox --restart=Never -- nslookup db.default.svc.cluster.local
+# output should show the headless Service's Pod IPs, not a single virtual Service IP
+kubectl run -it --rm pod-dns-test --image=busybox --restart=Never -- nslookup db-0.db.default.svc.cluster.local
 # output should show db-0's specific IP
 ```
 
@@ -724,7 +733,7 @@ kubectl get pods --selector=job-name=report
 
 > **🌍 Real-world example.** A logistics company runs Elasticsearch as a StatefulSet (each node needs stable identity and its own disk — `es-0`, `es-1`, `es-2` always mean the same shard data), Fluent Bit as a DaemonSet (exactly one log-shipping agent per node, automatically scheduled onto every new node added to the cluster with zero extra configuration), a nightly inventory-reconciliation Job as a CronJob (`0 3 * * *`, `concurrencyPolicy: Forbid` so a slow run never overlaps with the next night's), and their actual customer-facing API as a Deployment (stateless, horizontally scaled, rolling-updated on every release). Each workload type in this chapter maps to a real, distinct operational need — none of them are interchangeable in production even though all four ultimately just run Pods.
 
-> **📚 Theory.** Every controller in this table (Deployment, StatefulSet, DaemonSet, Job) follows the same reconciliation-loop pattern: it watches the actual cluster state, compares it to the desired state you declared, and takes action to close the gap — repeatedly, forever. A Deployment doesn't "create three Pods once"; it continuously ensures three Pods matching its selector exist, which is *why* deleting a Pod managed by a Deployment just causes a replacement to appear instantly. Understanding this loop is what makes Kubernetes's declarative model click, instead of feeling like a pile of special-cased commands.
+> **📚 Theory.** Controllers use reconciliation loops: they observe actual cluster state, compare it with desired state, and take action to close the gap. Long-running controllers such as Deployments, StatefulSets, and DaemonSets continuously maintain their desired state; a Job reconciles until its specified work completes rather than continuing forever. A Deployment doesn't "create three Pods once"; it continuously ensures the desired replicas matching its selector exist, which is *why* deleting a Deployment-managed Pod causes a replacement to appear. Understanding reconciliation is what makes Kubernetes's declarative model click instead of feeling like a pile of special-cased commands.
 
 ---
 
@@ -734,7 +743,7 @@ kubectl get pods --selector=job-name=report
 
 **Why CKAD tests it.** PDB is essential for operators ensuring availability during maintenance windows. It's supporting knowledge for understanding workload resilience and graceful maintenance operations.
 
-**Real-world why.** Without a PDB, `kubectl drain` or a cloud provider's planned node shutdown can evict your entire Deployment at once, causing an outage. With a PDB, the cluster respects your availability requirements during voluntary disruption operations.
+**Real-world why.** Without a PDB, an eviction-aware maintenance operation such as `kubectl drain` can evict enough replicas to make an application unavailable because there is no declared availability budget to respect. With a PDB, supported voluntary evictions are constrained by the application's availability requirement.
 
 **PDB declarative:**
 ```yaml
@@ -896,9 +905,9 @@ spec:
 
 **Critical init container behavior:**
 - Init containers **run sequentially** (one at a time, in order).
-- **If any init container fails, the Pod never starts** — the app container is never begun.
+- **If an init container fails, app containers do not start until that init container succeeds**; the failing init container is retried according to the Pod's restart behavior.
 - **The Pod is not considered "Ready" until all init containers succeed**.
-- Restart behavior on init failure: controlled by `restartPolicy` at the Pod level.
+- Restart behavior on regular init-container failure is controlled by the Pod-level `restartPolicy`.
 
 ```mermaid
 flowchart LR
@@ -918,7 +927,7 @@ App never starts"]
 | Init container succeeds, app starts and runs | Normal flow |
 | Init container fails | Pod stuck in `Init:0/2` or `Init:Error` — does not start app container |
 | Init container hangs (infinite loop, deadlock) | Pod waits forever in `Init:0/2` — app never starts |
-| App container crashes, init already succeeded | App restarts (controlled by liveness); init is skipped on restart |
+| App container exits after init already succeeded | The app container is restarted according to the Pod's restart policy; a failing liveness probe can also trigger a restart. Regular init containers do not rerun for an ordinary app-container restart. |
 
 **Verify init container progress:**
 ```bash
@@ -948,7 +957,7 @@ This waits for `db.default.svc.cluster.local` to resolve in cluster DNS before s
 
 ### Sidecar pattern
 
-Runs alongside the main container for the Pod's whole lifetime, extending it (log shipping, TLS termination, metric scraping). Since Kubernetes 1.29+, sidecars can be declared natively as `initContainers` with `restartPolicy: Always`, so they start before the main container and the Pod is considered ready only once both are ready.
+Runs alongside the main container for the Pod's whole lifetime, extending it (log shipping, TLS termination, metric scraping). Native sidecar containers were introduced in Kubernetes 1.28 and became stable in 1.33; the feature was enabled by default starting in 1.29. They are declared under `initContainers` with `restartPolicy: Always`, start before the main application container, and continue running for the Pod's lifetime. If a sidecar has a `readinessProbe`, that probe also contributes to the Pod's readiness state.
 
 ```yaml
 spec:
@@ -974,6 +983,8 @@ spec:
 
 A sidecar that proxies network traffic on behalf of the main container — the app talks to `localhost`, the ambassador forwards it (and can handle retries, TLS, service discovery).
 
+> **Pattern skeleton:** the example below is conceptual; the proxy image's configuration/command is intentionally omitted because the CKAD skill being tested is the Pod/container relationship, not implementation of a proxy product.
+
 ```yaml
 containers:
 - name: app
@@ -987,6 +998,8 @@ containers:
 ### Adapter pattern
 
 A sidecar that transforms the main container's output into a standard format for external consumption (e.g., converting a custom log/metrics format into Prometheus format).
+
+> **Pattern skeleton:** the example below is conceptual; the adapter image's command/configuration is intentionally omitted because the CKAD skill being tested is the shared-volume/container pattern.
 
 ```yaml
 containers:
@@ -1149,7 +1162,7 @@ volumes:
 - name: scratch
   emptyDir: {}
 ```
-Deleted when the Pod is removed. Perfect for scratch space or sharing files between containers in the same Pod (see 2.3).
+Persists for the lifetime of the Pod and is deleted when the Pod is removed. Perfect for scratch space or sharing files between containers in the same Pod (see 2.3). A container restart does **not** remove the `emptyDir` contents.
 
 ### hostPath — node-local storage
 
@@ -1160,7 +1173,7 @@ volumes:
     path: /var/log/app
     type: DirectoryOrCreate
 ```
-🟢 **Warning:** `hostPath` binds a Pod to a specific node's filesystem — the data is not portable and not replicated. If the Pod is deleted and rescheduled to a different node, it loses access to that data. Use only in exceptional cases: DaemonSets (which must run on specific nodes anyway), single-node dev/test clusters, or when you deliberately need node-local access for logging/monitoring. Never use for application data that needs to survive Pod rescheduling.
+🟢 **Warning:** `hostPath` exposes a node's local filesystem to the Pod — the data is not portable or replicated by Kubernetes. If the Pod is deleted and later scheduled on another node, it sees that other node's local path, which may contain different data or nothing at all. Use only in exceptional cases: DaemonSets, single-node dev/test clusters, or workloads that deliberately need node-local access for logging/monitoring. Avoid it for application data that must survive Pod rescheduling.
 
 ### PersistentVolume and PersistentVolumeClaim
 
@@ -1218,6 +1231,8 @@ If the cluster has a suitable default `StorageClass`, it can dynamically provisi
 | `ReadOnlyMany` (ROX) | Mounted read-only by many nodes |
 | `ReadWriteMany` (RWX) | Mounted read-write by many nodes |
 | `ReadWriteOncePod` | Mounted read-write by a single Pod (stricter than RWO) |
+
+> **Access-mode caveat:** `ReadWriteOnce` limits the volume to a single node, so multiple Pods on that node may still use it. `ReadWriteOncePod` is the stricter single-Pod mode and requires CSI support. Access modes are used for PV/PVC matching; except for `ReadWriteOncePod`, they do not by themselves guarantee application-level read/write enforcement after a volume is mounted.
 
 ### ConfigMap/Secret as volumes
 
@@ -1280,7 +1295,7 @@ kubectl exec db -- df -h /var/lib/postgresql/data
 | PVC stuck `Pending` | No PV matches size/accessMode/storageClass, or no default StorageClass and none specified | `kubectl describe pvc` -> Events | Create a matching PV, or set correct `storageClassName` |
 | PVC stuck `Pending`, but nothing looks wrong | StorageClass uses `volumeBindingMode: WaitForFirstConsumer` | `kubectl describe storageclass <name>` | This is expected — binding is delayed on purpose until a Pod using the PVC is scheduled; the PVC binds once that Pod is created |
 | Pod stuck `Pending`, "unbound PVC" | PVC itself isn't bound yet | `kubectl get pvc`, `kubectl describe pod` | Fix the PVC first |
-| Data lost after Pod restart | Used `emptyDir` for something that needed persistence | n/a | Switch to PVC-backed volume |
+| Data lost after Pod deletion/replacement | Used `emptyDir` for something that needed persistence | n/a | Switch to PVC-backed volume |
 | Multi-Pod write conflict | Used RWO where RWX was needed | `kubectl describe pvc` (accessMode) | Use an RWX-capable StorageClass or redesign as single-writer |
 
 > **🌍 Real-world example.** A media-processing pipeline needed multiple worker Pods to read and write to the *same* directory of uploaded video files simultaneously — a classic ReadWriteMany requirement. On a cloud provider whose default block-storage StorageClass only supports `ReadWriteOnce` (the storage is physically attached to one node at a time), the team's PVC sat `Pending` forever until they switched to an RWX-capable backend like an NFS server or a managed file service (e.g., AWS EFS, Azure Files). This is a common real production gotcha: not every StorageClass supports every access mode, and the failure looks identical to a simple typo unless you check `kubectl describe storageclass` and the provider's documentation for what that class actually supports.
@@ -1289,7 +1304,7 @@ kubectl exec db -- df -h /var/lib/postgresql/data
 
 **Exam Tips — Chapter 2**
 - "One Pod per node" -> DaemonSet. "Run once" -> Job. "Run on a schedule" -> CronJob. "Stable identity per replica" -> StatefulSet. For a long-running stateless workload with interchangeable replicas, Deployment is usually the default.
-- If a task says containers must "share files," check whether it needs to survive Pod restart — that decides `emptyDir` vs PVC.
+- If a task says containers must "share files," check whether the data must survive Pod deletion/replacement or rescheduling — that decides `emptyDir` vs PVC.
 - A PVC stuck `Pending` usually means the claim cannot find or dynamically provision matching storage; inspect the PVC events and StorageClass.
 - Multi-container Pod tasks are graded on the *shared volume wiring*, not the containers' business logic — get the `volumeMounts` name-matching right first.
 - Need to drop one file into a directory without wiping out what's already there? That's `subPath` — and remember it won't hot-update if the source changes.
@@ -1303,7 +1318,7 @@ kubectl exec db -- df -h /var/lib/postgresql/data
 
 Create a PersistentVolumeClaim named `app-data` in namespace `storage-demo`, requesting `1Gi` with `ReadWriteOnce`.
 
-Create Pod `storage-demo` using `busybox:1.36` and `sleep 3600`, mounting the PVC at `/data`. Write `persistent-data` to `/data/value.txt`, delete the Pod, recreate it with the same PVC, and verify the file remains.
+Create Pod `storage-demo` using `busybox:1.36` and `sleep 3600`, mounting the PVC at `/data`. Write `persistent-data` to `/data/value.txt`, delete the Pod, recreate it with the same PVC, and verify the file remains. The point is to distinguish Pod deletion/recreation from an ordinary container restart.
 
 ### Requirements
 
@@ -1398,7 +1413,7 @@ kubectl exec -n storage-demo storage-demo -- cat /data/value.txt
 | Headless Services (2.2A) | `clusterIP: None` is what lets StatefulSet Pods resolve each other by stable, individual DNS names |
 | Pod Disruption Budgets (2.2B) | Protects *voluntary* disruptions only (drain, autoscaling) — not hard crashes or forced deletes |
 | Multi-container patterns (2.3) | Init containers block startup; sidecar/ambassador/adapter all run alongside the app, sharing network + volumes |
-| Volumes (2.4) | Match volume durability to the data's actual durability need — `emptyDir` for scratch, PVC for anything that must survive a restart |
+| Volumes (2.4) | Match volume durability to the data's actual durability need — `emptyDir` for scratch, PVC for anything that must survive Pod deletion/replacement or rescheduling |
 
 **Next:** Chapter 3 — Application Deployment (20%) builds on the Deployment fundamentals from 2.2, going deeper into rolling updates, rollback, and blue/green and canary release strategies.
 \newpage

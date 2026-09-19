@@ -14,7 +14,7 @@ label: Core CKAD Skill
 
 By the end of this chapter, you should be able to:
 
-- Configure `maxSurge`/`maxUnavailable` to control exactly how much capacity a rolling update can sacrifice.
+- Configure `maxSurge`/`maxUnavailable` to control how much extra capacity may be created and how many desired replicas may be unavailable during a rolling update.
 - Explain when `Recreate` is the correct strategy instead of `RollingUpdate`, and why.
 - Use `kubectl rollout` (status, history, undo, pause, resume) to manage and recover a deployment.
 - Build a blue/green release using two Deployments and a Service selector switch.
@@ -26,9 +26,9 @@ By the end of this chapter, you should be able to:
 
 **What it is.** A Deployment manages a ReplicaSet, which manages Pods. Updating a Deployment's Pod template triggers a new ReplicaSet and a controlled rollover from old Pods to new.
 
-**Why CKAD tests it.** Shipping changes without downtime is the whole point of running on Kubernetes — this is directly tested with rollout status, history, and rollback tasks.
+**Why CKAD tests it.** Controlled application updates are a core Kubernetes workload skill — CKAD tests rollout status, history, rollback, and strategy behavior.
 
-**Real-world why.** A bad rollout that takes down 100% of replicas at once is an outage; rolling updates keep some capacity serving traffic throughout.
+**Real-world why.** A rolling update can maintain application capacity while a new version is introduced, but it is not an absolute zero-downtime guarantee: application failures, node failures, and readiness problems can still reduce availability.
 
 **Rolling update strategy:**
 ```yaml
@@ -41,8 +41,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 2          # up to 2 extra Pods above desired count during rollout
-      maxUnavailable: 1    # at most 1 Pod below desired count during rollout
+      maxSurge: 2          # up to 2 non-terminating surge Pods above desired count during rollout
+      maxUnavailable: 1    # at most 1 desired replica may be unavailable because of the rollout
   selector:
     matchLabels: {app: web}
   template:
@@ -68,9 +68,11 @@ kubectl rollout restart deployment/web
 
 **Rollback note:** `kubectl rollout undo` needs a previous revision. If the Deployment only has revision 1, there is nothing to roll back to and the command returns an error.
 
-With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, the *theoretical* bounds are a ceiling of 8 total Pods (6 + maxSurge) and a floor of 5 available Pods (6 − maxUnavailable). A real rollout doesn't have to touch either extreme at every step — the sequence below stays at 7 total throughout, which still satisfies both constraints without ever maxing out the surge:
+**Rollback scope:** a Deployment rollback restores the selected revision's **Pod template**. It does not roll back unrelated fields such as the current replica count, so treat scaling as a separate operation. Also note that changing only `spec.replicas` does not create a new Deployment revision.
 
-For stalled rollouts, `spec.progressDeadlineSeconds` controls how long Kubernetes waits for deployment progress before surfacing `ProgressDeadlineExceeded` in Deployment status. It reports the condition; it does not automatically roll the Deployment back.
+With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, the normal controller bounds are up to 8 non-terminating Pods and at least 5 available replicas during the update. These are controller constraints, not absolute cluster-wide guarantees: terminating Pods can temporarily remain on nodes and push the total number of Pods and resource consumption above `replicas + maxSurge` until termination completes. Percentage values are rounded differently: `maxSurge` rounds up, while `maxUnavailable` rounds down.
+
+For stalled rollouts, `spec.progressDeadlineSeconds` controls how long Kubernetes waits for deployment progress before surfacing `ProgressDeadlineExceeded` in Deployment status (600 seconds by default). It reports the condition; it does not automatically roll the Deployment back.
 
 ```mermaid
 flowchart LR
@@ -90,7 +92,7 @@ flowchart LR
 (6 total, done)"]
 ```
 
-Each step waits for new Pods to pass their readiness probe before removing the next old Pod — this is exactly why a broken readiness probe on the new version makes a rollout "hang" instead of failing fast (see the troubleshooting table below).
+The Deployment controller continuously reconciles the old and new ReplicaSets against the `maxSurge`/`maxUnavailable` constraints. New Pods need to become available before the controller can remove enough old capacity to cross the configured availability bound, so a broken readiness probe can leave a rollout stalled rather than producing a fast failure.
 
 ### The other strategy: Recreate
 
@@ -108,15 +110,16 @@ spec:
 
 | | RollingUpdate | Recreate |
 |---|---|---|
-| Downtime | None (if probes are correct) | Yes — a gap between old Pods dying and new ones being ready |
+| Downtime | Intended to maintain availability; not an absolute guarantee | Yes — a gap between old Pods being removed and new ones being ready |
 | Versions running simultaneously | Yes, briefly | Never |
 | Best for | Stateless apps, backward-compatible changes | Incompatible schema/version changes, single-writer workloads |
 | Rollback speed | Fast — old ReplicaSet already exists at scale 0 | Same rollback mechanism, but a fresh outage window either way |
 
-🟡 Add a change-cause annotation if you want `rollout history` to show a meaningful description:
+🟡 Add a change-cause annotation **before** changing the Pod template if you want the new revision in `rollout history` to show a meaningful description:
 ```bash
 kubectl annotate deployment/web kubernetes.io/change-cause="bump nginx to 1.28"
 ```
+The annotation is copied into the revision when that revision is created.
 
 **Verify:**
 ```bash
@@ -129,7 +132,7 @@ kubectl describe deployment web
 
 | Problem | Cause | Diagnostic | Fix |
 |---|---|---|---|
-| Rollout stuck | New Pods `CrashLoopBackOff`/`ImagePullBackOff`, `maxUnavailable` too restrictive | `kubectl rollout status`, `kubectl describe pod` (new RS) | Fix the underlying Pod issue or `rollout undo` |
+| Rollout stuck | New Pods `CrashLoopBackOff`/`ImagePullBackOff`, insufficient capacity, or a very conservative rollout configuration | `kubectl rollout status`, `kubectl describe pod` (new RS) | Fix the underlying Pod issue, adjust the strategy if appropriate, or `rollout undo` |
 | `rollout status` never finishes | Readiness probe on new Pods never succeeds | `kubectl describe pod`, `kubectl logs` | Fix probe or app startup |
 | Old and new Pods both serving, unexpected mix | Rollout is mid-flight — this is normal | `kubectl get rs` | Wait, or pause/investigate |
 
@@ -196,11 +199,11 @@ kubectl get deployment web -o jsonpath='{.spec.template.spec.containers[0].image
 
 **Why CKAD tests it.** Explicitly named as AD-01: "use Kubernetes primitives to implement common deployment strategies." You're expected to assemble the pattern from Deployments + Services, not use a special resource.
 
-**Real-world why.** RollingUpdate alone doesn't let you test a new version under real traffic before committing, or instantly cut traffic back on failure — blue/green and canary give you that control.
+**Real-world why.** RollingUpdate alone does not provide a separate stable/canary traffic-selection mechanism; blue/green and canary patterns let you stage or expose versions independently.
 
 ### Blue/Green
 
-Run two full Deployments (`web-blue`, `web-green`) simultaneously; the Service's selector decides which one receives traffic. Switch traffic instantly by changing the Service selector.
+Run two full Deployments (`web-blue`, `web-green`) simultaneously; once their Pods are Ready, the Service's selector decides which one receives traffic. Switch traffic by changing the Service selector; the EndpointSlice update is asynchronous, so verify the resulting endpoints after the change rather than treating the cutover as literally instantaneous.
 
 ```yaml
 apiVersion: apps/v1
@@ -255,11 +258,11 @@ fully deployed & tested"]
 to version=green.-> GREEN
 ```
 
-The cutover is a single selector change on an existing Service — both Deployments already exist at full scale beforehand, which is what makes rollback just as instant as the original cutover: patch the selector back to `blue`.
+The cutover is a single selector change on an existing Service — both Deployments already exist at full scale beforehand, which makes rollback rapid once the Service's EndpointSlices converge: patch the selector back to `blue`.
 
 ### Canary
 
-Run a small second Deployment with the same labels the Service already selects on, so the Service load-balances across both — the canary gets a proportional slice of traffic based on its replica count relative to the stable version.
+Run a small second Deployment whose Pods share the labels selected by the Service, so both versions are eligible endpoints. In a simple configuration, replica counts can influence the observed traffic share, but ordinary Services do not provide exact percentage weighting; session affinity, topology-aware traffic distribution, and the Service proxy implementation can change the distribution.
 
 ```yaml
 apiVersion: apps/v1
@@ -309,19 +312,20 @@ replicas: 9, image: myapp:1.0"]
 replicas: 1, image: myapp:2.0"]
 ```
 
-Unlike blue/green, both versions receive traffic simultaneously here — replica counts can influence approximate exposure because a Service routes across matching endpoints, but ordinary Kubernetes Service routing does not provide an exact percentage-weighting guarantee.
+Unlike blue/green, both versions can receive traffic simultaneously here when their Pods are Ready — replica counts can influence approximate exposure because a Service routes across matching endpoints, but ordinary Kubernetes Service routing does not provide an exact percentage-weighting guarantee.
 
 **Verify:**
 ```bash
-kubectl get endpointslice -l kubernetes.io/service-name=web -o wide  # inspect the Service's EndpointSlices
-kubectl run canary-test --rm -it --restart=Never --image=busybox:1.36 -- sh -c 'for i in $(seq 1 20); do wget -qO- http://web | grep version; done'  # observe approximate exposure from inside the cluster
+kubectl get pods -l app=web -L track -o wide
+kubectl get endpointslice -l kubernetes.io/service-name=web -o wide
 ```
+Compare Pod IPs with EndpointSlice addresses to verify that both `stable` and `canary` Pods are eligible endpoints. Do not treat a short request sample as proof of an exact traffic percentage.
 
 **Troubleshoot:**
 
 | Problem | Cause | Fix |
 |---|---|---|
-| Canary gets 0% of traffic | Service selector still includes a label the canary Pods don't share (e.g., `version:`) | Align selector to only the labels both share |
+| Canary gets 0% of traffic | Service selector excludes the canary Pods, or canary Pods are not Ready | Inspect selector and EndpointSlices; verify Pod readiness | Align the shared selector and fix readiness |
 | Blue/green cutover doesn't take effect | Wrong Service patched, or Service selector still pinned to old version label | `kubectl get svc -o yaml`, verify selector |
 | Rollback after bad canary | Simply scale canary Deployment to 0 or delete it | `kubectl scale deployment web-canary --replicas=0` |
 
@@ -329,7 +333,7 @@ kubectl run canary-test --rm -it --restart=Never --image=busybox:1.36 -- sh -c '
 
 > **🌍 Real-world example.** A social media company rolling out a new recommendation-ranking model doesn't trust a rolling update alone — a subtle ranking regression wouldn't crash any Pods or fail any probe, so a normal `RollingUpdate` would happily ship it to 100% of users. Instead they run it as a canary at 5% of traffic for an hour, watching business metrics (click-through rate, session length) rather than infrastructure metrics, before manually promoting it to 100%. This is the real reason canary and blue/green exist as *separate* concepts from rolling updates: rolling updates protect against infrastructure-level failure (crashes, failed health checks); canary and blue/green protect against business-logic regressions that Kubernetes itself has no way to detect.
 
-> **📚 Theory.** Neither pattern is a Kubernetes feature — both are emergent behavior of one simple fact: a Service has no idea which Deployment "owns" a Pod. It only maintains a live, continuously-updated list of endpoints matching its selector at this instant, built by watching Pod labels cluster-wide. Blue/green works because swapping the selector's `version` value atomically swaps which pre-existing, fully-warmed set of Pods qualifies. Canary works because *removing* a distinguishing label from the selector (matching only `app=web`, not `track`) makes two unrelated Deployments' Pods equally eligible at once. This is also exactly why exposure is approximate, not a guaranteed percentage: the Service is doing nothing more sophisticated than round-robin (or similar) across whatever list of endpoints currently matches — the "10%" in a 9-vs-1 replica split is just an emergent ratio of list membership, not a routing rule anyone configured. Chapter 4 covers exactly how that endpoint list gets built and kept in sync.
+> **📚 Theory.** Neither pattern is a dedicated Kubernetes resource — both are built from ordinary Deployments and Services. A Service selects Pods in **its own namespace** by labels; it does not care which Deployment owns a selected Pod. Blue/green works by changing the selector so a different pre-existing set of Pods becomes eligible. Canary works by selecting only labels shared by both versions. Replica counts can influence the number of eligible endpoints, but the observed traffic distribution is implementation/configuration dependent rather than an exact percentage rule; for example, session affinity or `trafficDistribution` can affect which endpoint receives a request. Chapter 4 covers how the EndpointSlice list is built and kept in sync.
 
 **Blue/Green vs Canary — the distinction the exam expects you to know cold:**
 
@@ -337,9 +341,9 @@ kubectl run canary-test --rm -it --restart=Never --image=busybox:1.36 -- sh -c '
 |---|---|---|
 | Traffic approach | All-or-nothing (Service selector switch) | Both versions selected simultaneously; exposure is approximate |
 | Both versions receive live traffic? | No — only whichever the selector currently matches | Yes — simultaneously |
-| Rollback speed | Instant (repoint the selector) | Instant (scale canary to 0) |
+| Rollback speed | Rapid after endpoint convergence | Rapid after endpoint convergence |
 | Resource cost | Double — both versions fully scaled | Low — canary usually runs 1-2 replicas |
-| Best for | Clean cutover, easy instant rollback | Gradual exposure, real-traffic validation before full rollout |
+| Best for | Clean cutover, rapid selector-based rollback | Gradual exposure, real-traffic validation before full rollout |
 
 ---
 
@@ -534,7 +538,7 @@ kubectl get endpointslice -l kubernetes.io/service-name=api -o wide
 
 **What it is.** A package manager for Kubernetes — a "chart" bundles templated manifests; `values.yaml` parameterizes them.
 
-**Why CKAD tests it.** AD-03, explicitly in scope: "use the Helm package manager to deploy existing packages." You are not expected to author complex charts — you're expected to install, upgrade, inspect, and roll back existing ones.
+**Why CKAD tests it.** AD-03, explicitly in scope: use the Helm package manager to deploy existing packages. You should know how to inspect, install, upgrade, and roll back existing charts; complex chart authoring is outside this chapter's focus.
 
 **Real-world why.** Most real-world applications (databases, ingress controllers, monitoring stacks) ship as Helm charts rather than raw manifests.
 
@@ -580,12 +584,12 @@ kubectl get all -l app.kubernetes.io/instance=my-release
 | Problem | Cause | Fix |
 |---|---|---|
 | `helm install` fails, "already exists" | Release name or a resource it creates already exists | `helm list`, `helm uninstall` old release or pick a new name |
-| Wrong values applied | `--set` and `-f` both used — later flag/file wins, order matters | `helm get values my-release` to confirm what actually took effect |
+| Wrong values applied | A values file, `--set`, or multiple overrides specify the same key; `--set` has higher precedence than `-f`, while repeated `-f`/`--set` flags use the right-most value | `helm get values my-release` to confirm what actually took effect |
 | Upgrade broke the release | Bad chart version or values change | `helm rollback my-release <previous-revision>` |
 
 > **🌍 Real-world example.** Installing a production-grade Prometheus + Grafana monitoring stack from raw YAML would mean hand-writing dozens of interdependent manifests (Deployments, RBAC, ConfigMaps for dashboards, ServiceMonitors, PVCs) and keeping them all in sync across every environment. Almost every team instead runs `helm install` against the community `kube-prometheus-stack` chart, overriding perhaps a dozen `values.yaml` fields (retention period, storage size, ingress hostname) for their specific needs. This is the mainstream real-world use of Helm on CKAD's radar: consuming a well-maintained chart someone else wrote, not authoring one from scratch.
 
-> **📚 Theory.** A Helm "release" isn't just a naming convention — it's a tracked object. Every `install`/`upgrade` stores the fully-rendered manifests and the exact values used for that revision in a Secret (by default) inside the cluster, one Secret per revision. This is *why* `helm rollback` works and works instantly: it isn't re-templating the chart from scratch and hoping for the same result, it's reapplying the exact previously-rendered manifests that are already sitting in that stored Secret. `helm history` is really just listing those stored revision Secrets. This is the same rollback-via-stored-prior-state principle as a Deployment's old ReplicaSet (3.1) — just implemented with a different storage mechanism.
+> **📚 Theory.** A Helm release stores its release state, including the rendered manifest and configuration used for each revision. With the default Secrets storage backend, that release history is stored in Kubernetes Secrets in the release namespace. `helm rollback` restores the selected earlier configuration by creating a **new release revision**; it does not make the current revision number move backward. This is analogous to Deployment rollback: prior state is retained so it can be restored without reconstructing it manually.
 
 ---
 
@@ -602,11 +606,11 @@ Use an existing Helm chart available in the practice environment. Inspect its va
 - Inspect default values before installation.
 - Supply a value override during installation.
 - Perform an upgrade that changes a value.
-- Verify release history and roll back to the earlier revision.
+- Verify release history and roll back so the earlier configuration is restored.
 
 ### Success Criteria
 
-`helm list` shows `ckad-web`; `helm history` shows multiple revisions; after rollback the release is at the earlier revision and its earlier configuration is restored.
+`helm list` shows `ckad-web`; `helm history` shows multiple revisions; after rollback the release has **a new revision** whose configuration matches the selected earlier revision.
 
 ### Suggested Time
 
@@ -631,6 +635,7 @@ helm get values ckad-web
 helm upgrade ckad-web <repo>/<chart> --set replicaCount=4
 helm history ckad-web
 helm rollback ckad-web 1
+helm history ckad-web
 helm status ckad-web
 helm get values ckad-web
 ```
@@ -679,6 +684,8 @@ This contrasts with JSON 6902 patches, which use explicit operations such as `re
 
 **Base `kustomization.yaml`:**
 ```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 resources:
 - deployment.yaml
 - service.yaml
@@ -687,6 +694,8 @@ resources:
 **Overlay (e.g., production):**
 ```yaml
 # overlays/prod/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 resources:
 - ../../base
 patches:
@@ -750,7 +759,7 @@ kubectl get deployment web -o jsonpath='{.spec.replicas}'
 
 ### Task
 
-Create a Kustomize base containing Deployment `web` and Service `web`. Create a `prod` overlay that changes the Deployment to 5 replicas, changes the application image tag to `2.0`, and generates a ConfigMap containing `MODE=prod`.
+Create a Kustomize base containing Deployment `web` (using image `myapp:1.0`) and Service `web`. Create a `prod` overlay that changes the Deployment to 5 replicas, changes the application image tag to `2.0`, and generates a ConfigMap containing `MODE=prod`.
 
 Render the overlay before applying it.
 
@@ -793,17 +802,60 @@ overlays/
     kustomization.yaml
 ```
 
-Base:
+Base `kustomization.yaml`:
 
 ```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 resources:
 - deployment.yaml
 - service.yaml
 ```
 
+Base `deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - name: web
+        image: myapp:1.0
+        ports:
+        - containerPort: 80
+```
+
+Base `service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
 Production overlay:
 
 ```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 resources:
 - ../../base
 
@@ -846,21 +898,16 @@ kubectl get configmap
 
 | Topic | One-line takeaway |
 |---|---|
-| Rolling updates (3.1) | `maxSurge`/`maxUnavailable` control the capacity trade-off; `Recreate` trades an outage window for "never two versions at once" |
-| Blue/Green & Canary (3.2) | Both are built from ordinary Deployments + Service selectors — no special Kubernetes object exists for either; a Service only ever sees a live list of matching endpoints, never which Deployment "owns" them |
-| Helm (3.3) | Package manager for *consuming* charts — CKAD expects install/upgrade/rollback, not authoring |
+| Rolling updates (3.1) | `maxSurge`/`maxUnavailable` bound rollout capacity and availability; `Recreate` trades an outage window for non-overlapping versions |
+| Blue/Green & Canary (3.2) | Both are built from ordinary Deployments + Service selectors — no special Kubernetes object exists for either; a Service selects eligible Pods by labels and does not care which Deployment owns them |
+| Helm (3.3) | Package manager for consuming charts — this chapter focuses on inspect/install/upgrade/rollback; complex chart authoring is outside scope |
 | Kustomize (3.4) | Template-free overlay patching, built into `kubectl apply -k` — one base, many thin per-environment diffs |
-
-**Next:** Chapter 4 — Services and Networking (20%) covers how traffic actually reaches the Pods these deployment strategies manage — Services, Ingress, and NetworkPolicy.
-\newpage
-
----
 
 ## 🧪 Practice — Chapter Challenge — Release a New Version Safely
 
 ### Task
 
-A Deployment named `shop` currently runs 4 replicas of `nginx:1.27`. Introduce `nginx:1.28` using a canary first, then perform a controlled full release.
+A stable Deployment named `shop-stable` currently runs 4 replicas of `nginx:1.27`. Introduce `nginx:1.28` using a canary first, then perform a controlled full release.
 
 Use ordinary Deployments and a Service to keep the stable version serving while the canary is tested, verify the endpoints, promote the new version, and demonstrate rollback.
 
@@ -877,7 +924,7 @@ Use ordinary Deployments and a Service to keep the stable version serving while 
 
 ### Success Criteria
 
-Before promotion, both stable and canary Pods are selected by the Service. After promotion, only the new version is serving. You can explain why this differs from blue/green.
+Before promotion, both stable and canary Pods are selected by the Service. After the new version is Ready and the stable Deployment is scaled to zero, only the new version is serving. You can explain why this differs from blue/green.
 
 ### Suggested Time
 
@@ -886,7 +933,7 @@ Before promotion, both stable and canary Pods are selected by the Service. After
 <details>
 <summary>💡 Hint</summary>
 
-Use a common `app=shop` selector and separate `track` labels. A normal Service does not provide a percentage-weight field; replica counts determine the approximate split.
+Use a common `app=shop` selector and separate `track` labels. A normal Service does not provide an exact percentage-weight field; matching endpoint counts can influence exposure, but the observed traffic split is not guaranteed.
 
 </details>
 
@@ -924,7 +971,7 @@ spec:
     targetPort: 80
 ```
 
-Create stable with 4 replicas and canary with 1 replica, then verify:
+Create stable with 4 replicas and canary with 1 replica, wait for both workloads to be Ready, then verify:
 
 ```bash
 kubectl get endpointslice -l kubernetes.io/service-name=shop
@@ -934,6 +981,7 @@ Promote:
 
 ```bash
 kubectl scale deployment shop-canary --replicas=4
+kubectl rollout status deployment/shop-canary
 kubectl scale deployment shop-stable --replicas=0
 kubectl get endpointslice -l kubernetes.io/service-name=shop
 ```
@@ -942,10 +990,13 @@ Rollback:
 
 ```bash
 kubectl scale deployment shop-stable --replicas=4
+kubectl rollout status deployment/shop-stable
 kubectl scale deployment shop-canary --replicas=0
+kubectl get endpointslice -l kubernetes.io/service-name=shop
 ```
 
 The key CKAD-style pattern is that both versions share the Service's selector during the canary phase; exposure may be influenced by the number of matching ready endpoints, but ordinary Service routing does not guarantee an exact percentage split.
 
 </details>
 
+**Next:** Chapter 4 — Services and Networking (20%) covers how traffic actually reaches the Pods these deployment strategies manage — Services, Ingress, and NetworkPolicy.

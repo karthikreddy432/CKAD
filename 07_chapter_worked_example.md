@@ -19,16 +19,16 @@ Every chapter so far taught one concept at a time. Real tasks — and the exam i
 By the end of this chapter, you should be able to:
 
 - Trace how a single Deployment's Pod spec accumulates fields as new requirements (config, secrets, identity, security, probes) stack on top of each other, and say which of those edits created a new rollout revision. *(Steps 1–4, assembled Deployment, revision check)*
-- Explain why the init container deliberately fails at first (`Init:0/1`), and read that as confirmation the gate is working, not a bug. *(Step 1)*
+- Explain why the init container deliberately **blocks/waits** at first (`Init:0/1`), and read that as confirmation the gate is working, not a bug. *(Step 1)*
 - Predict, at each step, exactly which fields the *next* domain's requirements will add to the spec, before reading ahead. *(🔮 Predict checkpoints)*
 - Change a ConfigMap value and explain why environment variables need a Pod restart to pick it up. *(Lab A)*
-- Add a probe to a dependency and explain how readiness gates both Service traffic and rollouts. *(Step 4, Lab B)*
+- Add a probe to a dependency and explain how readiness gates Service traffic and affects Pod availability during a Deployment rollout. *(Step 4, Lab B)*
 - Change a Service port and trace the change through every object that refers to it. *(Lab C)*
 - Run the full verification pass and interpret each command's output as evidence a specific requirement is actually satisfied. *(Full Verification Pass)*
 - Perform a controlled image update, watch a bad revision stall safely, and roll back. *(Lab D)*
 - Diagnose an unknown failure from Kubernetes evidence before changing anything. *(Lab E)*
 
-**The scenario:** `checkout-api` is a small HTTP service. It needs configuration from a ConfigMap, a database password from a Secret, must wait for its database to be reachable before starting, must be reachable internally and externally, must run with a hardened security posture, and must roll out with zero downtime. Its database must accept connections **only** from `checkout-api`.
+**The scenario:** `checkout-api` is a small HTTP service. It needs configuration from a ConfigMap, a database password from a Secret, must wait for its database to be reachable before starting, must be reachable internally and externally, must run with a hardened security posture, and must roll out while maintaining the desired number of available replicas. Its database must accept connections **only** from `checkout-api`.
 
 Namespace `checkout` is used throughout — create it first: `kubectl create namespace checkout`.
 
@@ -39,7 +39,7 @@ Namespace `checkout` is used throughout — create it first: `kubectl create nam
 >         command: ["sh", "-c", "mkdir -p /tmp/www && echo ok > /tmp/www/healthz && exec httpd -f -p 8080 -h /tmp/www"]
 > ```
 >
-> It serves `ok` on `/healthz`, has a shell (so `kubectl exec ... -- env` works), and writes only to `/tmp` — which is exactly why the hardened version in Step 2 needs its `emptyDir`. The verification commands in this chapter request `/healthz` for that reason.
+> It serves `ok` on `/healthz`, has a shell (so the `kubectl exec ...` checks in this chapter work), and writes only to `/tmp` — which is exactly why the hardened version in Step 2 needs its `emptyDir`. The verification commands below assume this stand-in; if you use your own image, it must expose `/healthz` on port `8080` and support the shell/file operations used by the checks.
 
 **Where this is headed — the finished system:**
 
@@ -120,18 +120,18 @@ kubectl logs -n checkout deploy/checkout-api -c wait-for-db --tail=3
 kubectl describe pod -n checkout -l app=checkout-api | grep -A6 -E 'Init Containers|Conditions'
 ```
 
-At this point the Pods sit at `Init:0/1` forever — there's no `checkout-db` yet, which is expected. Read the evidence rather than assuming: the log shows `waiting` lines (possibly preceded by an `nc: bad address` message — that is DNS failing to resolve a Service that doesn't exist yet), `describe` shows the init container `Running`, and the `Initialized` condition is `False`. `Init:0/1` means *zero of one* init containers have completed. The main container has not even been created. That is the gate working exactly as designed.
+At this point the Pods remain at `Init:0/1` until `checkout-db` exists and becomes reachable — there's no `checkout-db` yet, which is expected. Read the evidence rather than assuming: the log shows `waiting` lines (possibly preceded by an `nc: bad address` message — that is DNS failing to resolve a Service that doesn't exist yet), `describe` shows the init container `Running`, and the `Initialized` condition is `False`. `Init:0/1` means *zero of one* init containers have completed. The main container has not even been created. That is the gate working as designed: the init container remains running until its dependency becomes reachable.
 
 > **🌍 Real-world example.** After a maintenance window or a cluster-wide restart, applications and databases come back at the same time, in no particular order. An app with no gate starts first, fails to connect, and enters `CrashLoopBackOff` — and Kubernetes backs off restarts exponentially, up to five minutes between attempts. The database can be healthy for minutes while the app is still sitting out its back-off. An init container that polls the dependency turns that into a clean wait: the app container starts within seconds of the database becoming reachable, with no crash history and no noisy alerts.
 
-> **📚 Theory.** Init containers run to completion, one at a time and in order, *before* any app container starts, and the Pod's phase stays `Pending` until they all succeed. That makes them a **hard dependency gate**. A readiness probe (Step 4) is a different tool: it lets the app start, then controls whether it receives traffic. Choose the init container when "the app must not even start without X"; choose readiness when "the app can start but might not be able to serve yet."
+> **📚 Theory.** Init containers run to completion, one at a time and in order, *before* any app container starts. While an init container is still running, a normal Deployment Pod remains in the `Pending` phase with an `Initialized` condition of `False`; if the Pod uses `restartPolicy: Never` and an init container fails, the Pod can instead enter `Failed`. This makes init containers a **hard dependency gate**. A readiness probe (Step 4) is a different tool: it lets the app start, then controls whether it receives traffic. Choose the init container when "the app must not even start without X"; choose readiness when "the app can start but might not be able to serve yet."
 
 <details>
 <summary>🔮 Predict before Step 2</summary>
 
 The requirements are now: configuration values, a database password, a dedicated identity, resource limits, and a hardened security posture. Before scrolling, write down which **Pod-spec fields** each one adds and which of them need a **new object** first.
 
-**Answer:** ConfigMap → `envFrom.configMapRef` (new ConfigMap); Secret → `env[].valueFrom.secretKeyRef` (new Secret); identity → `serviceAccountName` (new ServiceAccount); limits → `resources`; hardening → `securityContext` (plus a writable `emptyDir` volume if the root filesystem becomes read-only). Three new objects, five edits to one Pod template.
+**Answer:** ConfigMap → `envFrom.configMapRef` (new ConfigMap); Secret → `env[].valueFrom.secretKeyRef` (new Secret); identity → `serviceAccountName` (new ServiceAccount); limits → `resources`; hardening → `securityContext` (plus a writable `emptyDir` volume if the root filesystem becomes read-only). Three new objects, plus several field additions grouped into five requirement areas on one Pod template.
 
 </details>
 
@@ -226,7 +226,7 @@ The Pods are still stuck in `Init:0/1` (`checkout-db` doesn't exist — that is 
 
 🟡 **Note the second pattern:** `runAsNonRoot: true` is a *check*, not a switch — it doesn't change who the container runs as, it makes the kubelet refuse to start a container that would run as root. If the image's user is root or non-numeric you get `CreateContainerConfigError`. Setting a numeric `runAsUser` satisfies the check explicitly. (The database container is deliberately *not* hardened this way in Step 3: the official Postgres image starts as root and drops privileges itself.)
 
-> **🌍 Real-world example.** By default every Pod mounts a ServiceAccount token that can authenticate to the API server. If an attacker gets remote code execution in a web service, that token is the first thing they look for — it lets them start enumerating the cluster. A checkout API never calls the Kubernetes API, so `automountServiceAccountToken: false` removes the credential entirely at zero cost. Combined with a read-only root filesystem and dropped capabilities, the attacker lands in a container with nothing to steal and nowhere to write.
+> **🌍 Real-world example.** By default, a Pod using a ServiceAccount can receive a token that authenticates to the API server. If an attacker gets remote code execution in a web service, that token becomes an additional credential to abuse. A checkout API never calls the Kubernetes API, so `automountServiceAccountToken: false` removes that automatically mounted credential. Combined with a read-only root filesystem and dropped capabilities, this reduces the credential and filesystem write surface; the application still has access to the configuration and credentials it legitimately consumes, and `/tmp` remains writable.
 
 > **📚 Theory.** ConfigMap, Secret, and ServiceAccount are separate objects; the Pod template holds only *references* by name. That separation is what lets one image run unchanged in every environment (Chapter 1). One mechanism matters for the next lab: **environment variables are resolved once, when the container is created.** Editing the ConfigMap afterwards updates the stored object but not the environment of already-running containers — only a new container (a Pod restart or rollout) sees the change. ConfigMaps mounted as *volumes* behave differently: the kubelet refreshes the mounted files eventually (though not for `subPath` mounts), but the application must re-read them.
 
@@ -245,7 +245,7 @@ The `wait-for-db` init container is polling `checkout-db:5432`. What object must
 
 This step does two jobs from two domains: the database is Chapter 2 material (StatefulSet + headless Service), the `strategy` is Chapter 3 material (Deployment updates).
 
-`checkout-db` is a StatefulSet so it gets a stable name the init container's `nc -z checkout-db 5432` can resolve:
+The `checkout-db` Service provides the DNS name that the init container can resolve, while the StatefulSet gives its database Pod a stable ordinal identity. The Service name and the Pod's ordinal name are related but are not the same thing:
 
 ```yaml
 apiVersion: v1
@@ -285,7 +285,7 @@ spec:
 
 > This StatefulSet has no `volumeClaimTemplates`, so the database's data disappears if its Pod is recreated. That keeps the example small; a real database would add a `volumeClaimTemplates` block like the one in Chapter 2.
 
-Now add a rollout strategy to the `checkout-api` Deployment, directly under `spec` (a sibling of `replicas`, *not* inside `template`) so future updates never drop capacity:
+Now add a rollout strategy to the `checkout-api` Deployment, directly under `spec` (a sibling of `replicas`, *not* inside `template`) so normal rollouts do not intentionally reduce available capacity below the configured `maxUnavailable` bound:
 
 ```yaml
 spec:
@@ -307,9 +307,9 @@ kubectl exec -n checkout deploy/checkout-api -- env | grep -E 'LOG_LEVEL|DB_HOST
 
 Pods should now reach `Running`, `1/1 Ready` — the init container's wait condition is finally satisfied. And because a container is now running, the `exec` finally works: you should see the ConfigMap values and the Pod's own name injected.
 
-> **🌍 Real-world example.** The app finds its database through `DB_HOST=checkout-db` — a name from a ConfigMap that resolves through a Service. That indirection pays off across environments: in dev the name points at the in-cluster Postgres built here; in production many teams keep the database outside the cluster (a managed cloud database) and make `checkout-db` an `ExternalName` Service pointing at it. The application image, the Deployment, and the ConfigMap key are identical in both places — only the object behind the Service name changes.
+> **🌍 Real-world example.** The app finds its database through `DB_HOST=checkout-db` — a name from a ConfigMap that resolves through a Service. That indirection pays off across environments: in dev the name points at the in-cluster Postgres built here; in production many teams keep the database outside the cluster (a managed cloud database) and make `checkout-db` an `ExternalName` Service pointing at it. The application image, the Deployment, and the ConfigMap key are identical in both places — only the object behind the Service name changes. An `ExternalName` Service is a DNS CNAME-style abstraction for an external hostname; it is not a normal virtual-IP Service and does not create EndpointSlices for Pods.
 
-> **📚 Theory.** With `maxSurge: 1, maxUnavailable: 0` and 3 replicas, a rollout may run **up to 4** Pods and must keep **at least 3** available at all times: it starts one new Pod, waits until it is *Ready*, only then removes one old Pod, and repeats. "Ready" is doing all the work in that sentence — the strategy is only as safe as the Pod's definition of ready, which is why Step 4 matters. Also note what this step did *not* do to the revision history: `strategy` lives outside `.spec.template`, and only template changes create a new ReplicaSet, so applying it triggered no rollout.
+> **📚 Theory.** With `maxSurge: 1, maxUnavailable: 0` and 3 replicas, a rollout may run **up to 4** Pods, and the Deployment controller will not intentionally reduce the number of available replicas below 3 as part of the rollout. In the normal case, it starts one new Pod, waits for it to become *Ready* and available, then removes one old Pod and repeats. "Ready" is doing all the work in that sentence — the strategy is only as safe as the Pod's definition of ready, which is why Step 4 matters. Also note what this step did *not* do to the revision history: `strategy` lives outside `.spec.template`, and only template changes create a new ReplicaSet, so applying it triggered no rollout.
 
 ---
 
@@ -411,7 +411,7 @@ Now look at the revision history and try to account for every line. You should s
 
 > **🌍 Real-world example.** A checkout service pointed its **liveness** probe at an endpoint that also checked database connectivity. During a 30-second database failover, every replica's liveness probe failed at once, the kubelet restarted all of them together, and a brief database blip became a multi-minute full outage while the Pods came back up and re-warmed. The lesson most teams learn the hard way: **readiness may reflect dependencies** (stop sending traffic while the dependency is down), but **liveness should reflect only "this process is wedged and a restart would help."** This chapter uses the same `/healthz` path for both to keep the example small; in production they are often different endpoints.
 
-> **📚 Theory.** Probes are executed by the **kubelet on the node**, not by the API server or the Service. The two outcomes are wired to different consumers: a failing readiness probe flips the Pod's `Ready` condition to `False`, and the EndpointSlice controller responds by removing that Pod from Service endpoints — the container keeps running. A failing liveness probe makes the kubelet kill and restart the container. Readiness is also what a Deployment rollout waits on: with `maxUnavailable: 0` from Step 3, a new Pod that never becomes Ready stalls the rollout while the old Pods keep serving. **Without a readiness probe, a Pod counts as Ready the moment its container starts, and the zero-downtime guarantee from Step 3 would be an illusion.**
+> **📚 Theory.** Probes are executed by the **kubelet on the node**, not by the API server or the Service. The two outcomes are wired to different consumers: a failing readiness probe flips the Pod's `Ready` condition to `False`, and the EndpointSlice controller responds by removing that Pod from Service endpoints — the container keeps running. A failing liveness probe makes the kubelet kill and restart the container. Readiness is also what a Deployment rollout waits on: with `maxUnavailable: 0` from Step 3, a new Pod that never becomes Ready stalls the rollout while the old Pods keep serving. **Without a readiness probe or readiness gates, Kubernetes can consider a Pod ready once its containers are running, so the rollout strategy alone does not prove that the application can serve traffic correctly.**
 
 ### The Deployment, fully assembled
 
@@ -541,13 +541,13 @@ kubectl get pod checkout-db-0 -n checkout
 kubectl describe pod checkout-db-0 -n checkout | grep -A6 Conditions
 ```
 
-Changing the template makes the StatefulSet replace `checkout-db-0`. Because this example has no persistent volume, the database's contents are lost with the old Pod — one more reason a real database needs `volumeClaimTemplates`. The payoff of the probe: the headless Service only publishes DNS records for *ready* Pods, so `checkout-db` now resolves only once Postgres is genuinely accepting connections, which makes the `wait-for-db` gate in every new `checkout-api` Pod more trustworthy.
+Changing the template makes the StatefulSet replace `checkout-db-0`. Because this example has no persistent volume, the database's contents are lost with the old Pod — one more reason a real database needs `volumeClaimTemplates`. The payoff of the probe: for this headless Service, the EndpointSlice/DNS path exposes the Pod as a ready backend once the readiness probe succeeds (unless `publishNotReadyAddresses` is enabled). Thus `checkout-db` becomes discoverable as a ready backend only after Postgres is accepting connections, which makes the `wait-for-db` gate more trustworthy.
 
 </details>
 
 ---
 
-## Step 5 — Services and Networking: exposing and restricting traffic 🟢 NICE TO KNOW
+## Step 5 — Services and Networking: exposing and restricting traffic 🟢 SUPPORTING INTEGRATION
 
 ```yaml
 apiVersion: v1
@@ -608,14 +608,14 @@ The EndpointSlice should list three ready addresses on port `8080` — one per `
 
 > **🌍 Real-world example.** By default every Pod in a cluster can open a connection to every other Pod. That means a compromised, unrelated container — a forgotten debug Pod, a vulnerable third-party tool in the same namespace — can reach the production database and start guessing passwords. The NetworkPolicy shrinks the database's exposure from "anything in the cluster" to "the one client that needs it," so the password becomes a second line of defense rather than the only one.
 
-> **📚 Theory.** Three separate mechanisms are at work, and all three key on **labels**. The Service selector builds the EndpointSlice: a controller continuously watches for Ready Pods labelled `app=checkout-api` and lists their IPs — the Service holds no Pod names at all. The Ingress is only *configuration*: it maps a host/path to a Service, and a controller (nginx here) reads it and does the routing. The NetworkPolicy is an **allow-list**: once any policy selects a Pod for `Ingress`, everything not explicitly allowed is denied. Note that the init container passes the policy for free — it shares the Pod's network identity and labels. And labels are identity: a Pod labelled `app=checkout-api` would both receive Service traffic *and* be allowed through to the database.
+> **📚 Theory.** Three separate mechanisms are at work, but they key on different information. The Service selector builds the EndpointSlice: a controller continuously watches for Ready Pods labelled `app=checkout-api` and lists their IPs — the Service holds no Pod names at all. The Ingress matches **host/path** and maps the request to a Service; an Ingress controller (nginx here) performs the routing. The NetworkPolicy selects Pods by labels and acts as an **allow-list**: once any policy selects a Pod for `Ingress`, traffic not explicitly allowed by the applicable ingress rules is denied. Note that the init container passes the policy for free — it shares the Pod's network identity and labels. A Ready Pod labelled `app=checkout-api` therefore both receives Service traffic and matches the NetworkPolicy source rule for database access.
 
 <details>
 <summary>🔮 Predict before Lab C</summary>
 
 If you change the Service's `port` from `80` to `8088`, which *other* object in this chapter refers to the Service by port number — and what will break if you forget it?
 
-**Answer:** The Ingress backend (`service.port.number: 80`). The Ingress would point at a Service port that no longer exists, and external requests would fail even though the Service itself works.
+**Answer:** The Ingress backend (`service.port.number: 80`). The Ingress would point at a Service port that no longer exists; the Service itself could still work on its new port, but external requests would fail until the Ingress backend port is updated.
 
 </details>
 
@@ -647,7 +647,7 @@ The Service exposes `8088` and forwards to `8080`, the Ingress backend reference
 <details>
 <summary>💡 Hint</summary>
 
-`port` is what clients of the *Service* use; `targetPort` is the application's port. An Ingress backend names a Service **port**, not a targetPort. `kubectl describe ingress` shows which Pod addresses each backend resolves to.
+`port` is what clients of the *Service* use; `targetPort` is the application's port. An Ingress backend names a Service **port**, not a targetPort. `kubectl describe ingress` confirms the configured Service backend; use the Service's EndpointSlices to inspect the actual Pod addresses behind it.
 
 </details>
 
@@ -671,7 +671,7 @@ kubectl describe ingress checkout-api -n checkout | grep -A2 Backends
 kubectl run test-client -n checkout --image=busybox:1.36 --rm -it --restart=Never -- wget -qO- checkout-api:8088/healthz
 ```
 
-The Ingress description should show `checkout-api:8088` resolving to the three Pod addresses on `8080`. (The old port is now dead: `wget checkout-api:80/healthz` from the same kind of Pod fails.) To restore, set both files back to `80` and re-apply.
+`kubectl describe ingress` should show the backend Service port `8088`, while the `checkout-api` EndpointSlice should still show the backend Pods on target port `8080`. The old Service port `80` is no longer exposed: `wget checkout-api:80/healthz` from the same kind of Pod should fail. To restore, set both files back to `80` and re-apply.
 
 </details>
 
@@ -689,7 +689,7 @@ kubectl get endpointslice -l kubernetes.io/service-name=checkout-db -n checkout 
 kubectl describe pod -n checkout -l app=checkout-api | grep -A6 Conditions   # Initialized, Ready, ContainersReady, PodScheduled: True
 kubectl exec -n checkout deploy/checkout-api -- env | grep DB_HOST           # DB_HOST=checkout-db (config really injected)
 kubectl get pod -n checkout -l app=checkout-api -o jsonpath='{.items[0].status.qosClass}'   # Burstable (requests < limits)
-kubectl exec -n checkout deploy/checkout-api -- ls /var/run/secrets/kubernetes.io/serviceaccount   # fails: token not mounted
+kubectl exec -n checkout deploy/checkout-api -- ls /var/run/secrets/kubernetes.io/serviceaccount   # should fail because automountServiceAccountToken=false
 kubectl exec -n checkout deploy/checkout-api -- touch /probe-test            # fails: read-only file system
 kubectl exec -n checkout deploy/checkout-api -- touch /tmp/probe-test        # succeeds: the emptyDir is writable
 kubectl run tmp -n checkout --image=busybox:1.36 --rm -it --restart=Never -- wget -qO- checkout-api.checkout/healthz   # end-to-end request answered
@@ -831,13 +831,13 @@ kubectl rollout status deployment/checkout-api -n checkout --timeout=30s
 
 What each failure looks like:
 
-| Failure | Evidence |
-|---|---|
-| Wrong Service selector | All Pods Running and Ready; the Service has **no endpoints**; selector differs from Pod labels |
-| Wrong `targetPort` | Endpoints exist, but they list port `9090`; requests get "connection refused" |
-| Wrong Secret key | A new Pod stuck in `CreateContainerConfigError`; Event names the missing key; rollout stalled |
-| Bad image | A new Pod in `ErrImagePull` / `ImagePullBackOff`; Event shows the pull failure; rollout stalled |
-| Failing readiness probe | A new Pod `Running` but `0/1` Ready; Events show `Readiness probe failed`; rollout stalled |
+| Failure | Evidence | Minimal correction |
+|---|---|---|
+| Wrong Service selector | All Pods Running and Ready; the Service has **no endpoints**; selector differs from Pod labels | Restore `.spec.selector.app` to `checkout-api` |
+| Wrong `targetPort` | Endpoints exist, but they list port `9090`; requests get "connection refused" | Restore `.spec.ports[0].targetPort` to `8080` |
+| Wrong Secret key | A new Pod stuck in `CreateContainerConfigError`; Event names the missing key; rollout stalled | Restore the Secret key reference to `DB_PASSWORD` |
+| Bad image | A new Pod in `ErrImagePull` / `ImagePullBackOff`; Event shows the pull failure; rollout stalled | Restore the previous image with `kubectl rollout undo` |
+| Failing readiness probe | A new Pod `Running` but `0/1` Ready; Events show `Readiness probe failed`; rollout stalled | Restore the probe path to `/healthz` |
 
 Inspect the implicated object, fix only the field the evidence supports, and verify:
 
@@ -846,7 +846,32 @@ kubectl get deployment checkout-api -n checkout -o yaml
 kubectl get service checkout-api -n checkout -o yaml
 ```
 
-For the three Deployment-level failures, `kubectl rollout undo deployment/checkout-api -n checkout` is a valid smallest fix; for the two Service failures, patch the Service field back. Then:
+For the two Service failures and the Secret/probe faults, patch the exact field identified by the evidence. For the bad-image case, `kubectl rollout undo deployment/checkout-api -n checkout` is an acceptable recovery shortcut in this lab because the injected Deployment fault is the only change since the last known-good revision. Then:
+
+Examples of minimal fixes:
+
+```bash
+# wrong Service selector
+kubectl patch svc checkout-api -n checkout --type=json \
+  -p='[{"op":"replace","path":"/spec/selector/app","value":"checkout-api"}]'
+
+# wrong targetPort
+kubectl patch svc checkout-api -n checkout --type=json \
+  -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":8080}]'
+
+# wrong Secret key
+kubectl patch deploy checkout-api -n checkout --type=json \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/env/0/valueFrom/secretKeyRef/key","value":"DB_PASSWORD"}]'
+
+# failing readiness probe
+kubectl patch deploy checkout-api -n checkout --type=json \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/healthz"}]'
+
+# bad image
+kubectl rollout undo deployment/checkout-api -n checkout
+```
+
+Then verify:
 
 ```bash
 kubectl rollout status deployment/checkout-api -n checkout
@@ -882,7 +907,7 @@ Use the final Service port if it differs from `80`.
 | Controlled rollout and rollback | Practice D |
 | Diagnose from evidence | Practice E |
 
-Every piece here was covered in isolation in Chapters 1–5 — the only thing new in this chapter is the order of operations and how one Deployment's spec accumulates fields as requirements stack up. That accumulation, done live, under time pressure, reading a task description instead of this book, is what the exam actually measures.
+Nearly every Kubernetes concept here was covered in isolation in Chapters 1–5 — the main new skill in this chapter is the order of operations and how one Deployment's spec accumulates fields as requirements stack up. That accumulation, done live, under time pressure, reading a task description instead of this book, is what the exam actually measures.
 
 **Next:** Chapter 8 — CKAD Reference & Cheat Sheets condenses everything from Chapters 0–7 into a compact revision format for the final study phase.
 \newpage

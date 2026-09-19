@@ -19,7 +19,7 @@ Use this chapter during timed practice, not during the real exam (no personal no
 By the end of this chapter, you should be able to:
 
 - Locate the correct cheat-sheet table for any command, YAML skeleton, or troubleshooting symptom in seconds. *(Lookup Sprint drill)*
-- Write from memory the manifests that have **no imperative generator** (StatefulSet, NetworkPolicy, PVC, probe/security fragments), and generate every other skeleton with `kubectl ... --dry-run=client -o yaml`. *(Skeletons drill)*
+- Write from memory the manifests/fragments that have **no dedicated imperative generator in the common CKAD workflow** (StatefulSet, NetworkPolicy, PVC, probe/security fragments), and generate the other common skeletons with `kubectl ... --dry-run=client -o yaml`. *(Skeletons drill)*
 - Map a Pod/Service/Job symptom straight to its likely cause using 8.4, without re-deriving the diagnosis from first principles each time. *(Symptom Triage drill)*
 
 > **📚 Theory — why cheat sheets work as a study tool even though you can't bring them to the exam.** The goal of drilling against a cheat sheet isn't memorizing the sheet itself — it's *offloading recall* so your working memory during the exam is spent on reading the task and reasoning about the fix, not on reconstructing syntax. This mirrors how experienced engineers actually work: they don't have `kubectl explain` output memorized either, they've just internalized the handful of patterns that cover 90% of real usage (this is the same "recognize the pattern, then generate/edit" workflow from Chapter 0). Repetition against this reference is what converts "I could look this up" into "I just typed it," which is the only thing that matters under a 2-hour clock.
@@ -60,13 +60,13 @@ source <(kubectl completion bash) && complete -o default -F __start_kubectl k
 | `kubectl api-resources` | Kinds, short names, and whether they are namespaced |
 | `kubectl logs <pod> [-c container] [--previous] [-f]` | Container logs |
 | `kubectl exec -it <pod> [-c container] -- <cmd>` | Shell into a container |
-| `kubectl debug <pod> -it --image=busybox --target=<container>` | Ephemeral debug container |
+| `kubectl debug <pod> -it --image=busybox --target=<container>` | Ephemeral debug container (runtime support for `--target` varies) |
 | `kubectl run tmp --image=busybox:1.36 --rm -it --restart=Never -- <cmd>` | Throwaway Pod for in-cluster tests |
 | `kubectl port-forward <pod\|svc/name> LOCAL:REMOTE` | Reach a workload from your terminal |
 | `kubectl apply -f <file/dir>` / `apply -k <dir>` | Declarative create/update |
-| `kubectl diff -f <file>` | Preview what `apply` would change |
+| `kubectl diff -f <file>` | Preview what `apply` would change (server-side dry-run; requires appropriate permissions) |
 | `kubectl delete -f <file>` / `delete <kind> <name>` | Remove objects |
-| `kubectl replace --force -f <file>` | Delete and recreate (immutable-field changes) |
+| `kubectl replace --force -f <file>` | Delete and recreate; use only when destructive replacement is intentional |
 | `kubectl edit <kind> <name>` | Live-edit an object |
 | `kubectl patch <kind> <name> -p '<json>'` | Targeted field update |
 | `kubectl label / annotate <kind> <name> k=v` | Add/update labels or annotations |
@@ -75,6 +75,10 @@ source <(kubectl completion bash) && complete -o default -F __start_kubectl k
 | `kubectl top pods/nodes` | Live resource usage |
 | `kubectl auth can-i <verb> <resource> --as=<identity>` | Permission check |
 | `kubectl config set-context --current --namespace=<ns>` | Switch default namespace |
+
+> **Patch note:** Strategic merge patch is not supported for Custom Resources. For CRDs, use JSON merge (`--type=merge`) or JSON Patch (`--type=json`) as appropriate.
+
+> **Management note:** For exam speed, imperative `set`/`patch` commands are often fastest. In real clusters, use a consistent management model for a given object and be cautious when mixing imperative changes with declarative `apply` or server-side apply.
 
 ## 8.2 Imperative Command Cheat Sheet
 
@@ -91,34 +95,34 @@ kubectl create configmap <name> --from-literal=k=v | --from-file=f | --from-env-
 kubectl create secret generic <name> --from-literal=k=v
 kubectl create secret docker-registry <name> --docker-server=.. --docker-username=.. --docker-password=..
 kubectl create secret tls <name> --cert=c.crt --key=c.key
-kubectl create serviceaccount <name>
-kubectl create role <name> --verb=get,list --resource=pods
-kubectl create rolebinding <name> --role=<role> --serviceaccount=ns:sa
+kubectl create serviceaccount <name> -n <ns>
+kubectl create role <name> --verb=get,list --resource=pods -n <ns>
+kubectl create rolebinding <name> --role=<role> --serviceaccount=ns:sa -n <ns>  # binding and referenced Role are in <ns>
 kubectl create namespace <name>
 kubectl create quota <name> --hard=cpu=2,memory=2Gi,pods=10
 
 # Networking
 kubectl expose deployment <name> --port=P [--target-port=P2] [--type=NodePort]
-kubectl create ingress <name> --rule="host/path=svc:port"
+kubectl create ingress <name> --rule="host/path=svc:port"   # add * to the path for Prefix semantics, e.g. host/path*=svc:port
 
 # Change an existing workload without editing YAML
 kubectl set image deployment/<name> <container>=<img>
 kubectl set env deployment/<name> K=V
 kubectl set resources deployment/<name> --requests=cpu=100m,memory=64Mi --limits=cpu=200m,memory=128Mi
 kubectl set serviceaccount deployment/<name> <sa>
-kubectl autoscale deployment <name> --min=2 --max=5 --cpu-percent=80
+kubectl autoscale deployment <name> --min=2 --max=5 --cpu=80%
 ```
 
 ## 8.3 YAML Cheat Sheet — Skeletons
 
-Most kinds have an imperative generator (8.2). Append `--dry-run=client -o yaml` to produce the skeleton instead of typing it. The kinds with **no generator** are the ones worth being able to write from memory:
+Most kinds have an imperative generator (8.2). Append `--dry-run=client -o yaml` to produce the skeleton instead of typing it. The kinds with **no dedicated imperative generator in the common CKAD workflow** are the ones worth being able to write or adapt from memory:
 
 | Kind / fragment | Fastest way to get a skeleton |
 |---|---|
 | Pod, Deployment, Job, CronJob | `kubectl run` / `create deployment` / `create job` / `create cronjob` with `--dry-run=client -o yaml` |
 | Service | `kubectl expose ... --dry-run=client -o yaml` or `kubectl create service` |
 | Ingress, ConfigMap, Secret, Role, RoleBinding, ServiceAccount | `kubectl create ...` with `--dry-run=client -o yaml` |
-| ✍️ StatefulSet, DaemonSet | Generate a Deployment, then change `kind`, add `serviceName` (StatefulSet) and `volumeClaimTemplates`; remove `replicas`/strategy for DaemonSet |
+| ✍️ StatefulSet, DaemonSet | Adapt a generated Deployment skeleton: StatefulSet needs `serviceName` (and optionally `volumeClaimTemplates`) and uses `updateStrategy`; DaemonSet removes `replicas`/Deployment `strategy` |
 | ✍️ NetworkPolicy, PVC, PV | **Write by hand** (or copy from `kubectl explain`/docs) |
 | ✍️ Probes, `securityContext`, `resources`, volumes, init containers | **Write by hand** — they are fragments inside a Pod spec |
 
@@ -155,7 +159,9 @@ kind: Service
 metadata: {name: x}
 spec:
   selector: {app: x}
-  ports: [{port: 80, targetPort: 8080}]
+  ports:
+  - port: 80
+    targetPort: 80        # change this to the application's actual listening port
 ```
 
 ### Ingress (v1)
@@ -211,6 +217,8 @@ spec:
 ```
 
 ### StatefulSet with `volumeClaimTemplates` ✍️
+
+> **StatefulSet note:** `serviceName` names the governing Service used for stable network identity; create that Service separately (typically a headless Service) when Pod-specific DNS names are required.
 
 ```yaml
 apiVersion: apps/v1
@@ -401,7 +409,7 @@ Compare the finished files with the StatefulSet, PVC and NetworkPolicy blocks in
 
 🔴 **MUST KNOW**
 
-> **📚 Theory.** A Pod's `STATUS` tells you *which stage of its life it failed in*: scheduling (`Pending`) → preparing the container (`ContainerCreating`, `CreateContainerConfigError`, `ImagePullBackOff`) → init containers (`Init:...`) → running the app (`CrashLoopBackOff`, `OOMKilled`) → passing probes (`Running` but `0/1`, or restarting). The stage decides which tool can see the problem: before any container starts there are **no logs**, so `describe` → Events is the only source; once a container has run, `logs` (and `--previous` after a restart) holds the answer.
+> **📚 Theory.** A Pod's `STATUS` is a useful symptom, not a complete diagnosis: scheduling (`Pending`) → preparing the container (`ContainerCreating`, `CreateContainerConfigError`, `ImagePullBackOff`) → init containers (`Init:...`) → running the app (`CrashLoopBackOff`, `OOMKilled`) → readiness (`Running` but `0/1`, or restarting). Match the tool to the stage: before a container has run there may be no useful container logs, so `describe` → Events is the first source; once a container has run, `logs` (and `--previous` after a restart) can provide application-level evidence.
 
 > **🌍 Real-world example.** A common time-waster: an engineer runs `kubectl logs` on a Pod stuck in `Pending` or `ContainerCreating`, gets an empty result or an error, and concludes "no information." The Pod isn't broken *inside* — it never got a node or a working image. Reading `STATUS` first sends you to `describe pod`, where the Events say `0/3 nodes are available: insufficient cpu` in one line.
 
@@ -434,7 +442,7 @@ flowchart TD
 | `ImagePullBackOff` / `ErrImagePull` | `describe pod` → Events | Image name/tag typo; private registry without `imagePullSecrets`; registry rate limit |
 | `Init:0/1`, `Init:Error`, `Init:CrashLoopBackOff` | `logs <pod> -c <init-container>`; `describe pod` | Init container waiting on a dependency that doesn't exist yet, or failing — the app container has not started |
 | `CrashLoopBackOff` | `logs --previous`; `describe` → Last State / exit code | Bad command/args; missing required env var; app-level fatal error |
-| `OOMKilled` (Last State, exit code 137) | `describe` → Last State: reason | Memory limit too low, or a real memory leak → raise the limit or fix the app |
+| `OOMKilled` (Last State, often exit code 137) | `describe` → Last State: reason | Memory pressure caused the container to be killed; confirm whether the container exceeded its limit or the node experienced memory pressure before changing limits |
 | `Running`, `0/1` Ready (no restarts) | `describe` → Events, Conditions | Readiness probe path/port wrong; app or its dependency not ready yet |
 | `Running`, restart count climbing | `describe` → Events; `logs --previous` | Liveness probe failing: `initialDelaySeconds` too short (consider a `startupProbe`) or probe too strict |
 | `Forbidden` on `kubectl apply` | Read the error text; `auth can-i` | RBAC denied (`... cannot create resource ...`) vs an admission policy (message names the policy, e.g. Pod Security) |
@@ -532,7 +540,9 @@ matchExpressions:                            # set-based, richer
 - {key: env, operator: In, values: [prod, staging]}
 ```
 
-> **📚 Theory.** Labels are the join key of Kubernetes: Services, Deployments, ReplicaSets, NetworkPolicies and `kubectl -l` all find their targets by matching labels rather than by name or ID. That loose coupling is why Pods can be replaced freely — and why a label edit is a silent breaking change. A Deployment's `spec.selector` is also **immutable** after creation, so changing the labels it selects on means recreating it.
+> **Selector trap:** `!=` and `notin` selectors also match objects where the selected label key is absent. Use an existence check (`-l 'key'`) when you specifically require the label to be present.
+
+> **📚 Theory.** Labels are a major join mechanism in Kubernetes: Services, Deployments, ReplicaSets, NetworkPolicies and `kubectl -l` use label selectors to identify Pods or other objects. That loose coupling is why Pods can be replaced freely — and why a label edit is a silent breaking change. A Deployment's `spec.selector` is also **immutable** after creation, so changing the labels it selects on means recreating it.
 
 > **🌍 Real-world example.** During a naming cleanup a team renamed `app: cart` to `app: cart-service` on a Deployment and its own Service, but an older Service that other teams called still selected `app: cart`. It silently dropped to zero endpoints; nothing alerted on the Service itself, and the outage surfaced as timeouts in a different team's logs. After any label change, list every Service that selects the old value.
 
@@ -542,7 +552,7 @@ matchExpressions:                            # set-based, richer
 |---|---|---|
 | `readinessProbe` | Should this Pod receive traffic right now? | Pod removed from Service endpoints; **no restart** |
 | `livenessProbe` | Is the container stuck beyond recovery? | kubelet **restarts** the container |
-| `startupProbe` | Has a slow app finished starting? | Runs first; liveness/readiness are held off until it succeeds, and the container is restarted if it never does |
+| `startupProbe` | Has a slow app finished starting? | Runs before liveness/readiness for startup protection; those probes are not run until it succeeds, and repeated startup failures restart the container |
 
 | Field | Meaning | Default |
 |---|---|---|
@@ -554,13 +564,15 @@ matchExpressions:                            # set-based, richer
 
 `httpGet` (2xx/3xx = success) · `tcpSocket` (connection succeeds = success) · `exec` (exit 0 = success)
 
+> **Startup-probe timing:** When `startupProbe` is configured, liveness and readiness probes do not start until the startup probe succeeds. Their `initialDelaySeconds` values do not replace the startup probe's grace period.
+
 ```yaml
 startupProbe:   {httpGet: {path: /healthz, port: 8080}, periodSeconds: 5, failureThreshold: 30}   # up to 150 s to start
 readinessProbe: {httpGet: {path: /ready,   port: 8080}, periodSeconds: 5}
 livenessProbe:  {httpGet: {path: /healthz, port: 8080}, periodSeconds: 10}
 ```
 
-> **📚 Theory.** Probes are run by the **kubelet on the node**, and each outcome feeds a different consumer: readiness drives the Pod's `Ready` condition (which the EndpointSlice controller and Deployment rollouts both watch), liveness drives container restarts. Because rollouts wait on readiness, a Deployment with `maxUnavailable: 0` is only truly zero-downtime if its Pods have a readiness probe that means something.
+> **📚 Theory.** Probes are run by the **kubelet on the node**. Readiness affects the Pod's readiness state and, for Service-backed traffic, which ready endpoints are published; liveness can trigger container restarts. A Deployment with `maxUnavailable: 0` can still have availability problems if readiness is missing or incorrectly defined, because the controller cannot distinguish a merely started process from one that is actually ready to serve.
 
 > **🌍 Real-world example.** A team whose liveness probe also checked the database saw every replica restart at the same moment during a short database failover, turning a 30-second blip into a multi-minute outage. Rule of thumb: readiness may depend on dependencies; liveness should only test whether the process itself is wedged.
 
@@ -571,7 +583,7 @@ livenessProbe:  {httpGet: {path: /healthz, port: 8080}, periodSeconds: 10}
 | `emptyDir` | Yes | No | No (node-local, Pod-local); `medium: Memory` makes it RAM-backed |
 | `hostPath` | Yes | Yes (on that node only) | No |
 | `configMap` / `secret` | Yes (re-mounted) | Source object persists; mount is read-only | N/A |
-| PVC-backed (network storage) | Yes | Yes | Depends on accessMode (RWO/ROX/RWX) |
+| `PVC-backed storage` | Yes | Yes | Depends on the storage backend and its supported access modes |
 
 ## 8.8 ConfigMap & Secret Cheat Sheet
 
@@ -581,11 +593,11 @@ livenessProbe:  {httpGet: {path: /healthz, port: 8080}, periodSeconds: 10}
 | All keys as env vars | `envFrom.configMapRef` | `envFrom.secretRef` |
 | Mounted files | `volumes.configMap` | `volumes.secret` |
 | Plaintext authoring shortcut | `data:` (plain strings) | `stringData:` (auto-encoded) |
-| Change picked up without restart? | Only mounted-file form, eventually (not `subPath` mounts) | Only mounted-file form, eventually (not `subPath` mounts) |
+| Change picked up without restart? | Mounted-file form can update eventually (not `subPath`; immutable objects do not update) | Mounted-file form can update eventually (not `subPath`; immutable objects do not update) |
 
 Read a Secret value back: `kubectl get secret x -o jsonpath='{.data.KEY}' | base64 -d`
 
-> **📚 Theory.** Environment variables are resolved once, when the container is created, so editing a ConfigMap or Secret never changes the environment of a running container — a rollout (`kubectl rollout restart`) is required. Mounted volumes are refreshed by the kubelet on a delay, but the application still has to re-read the file. A Secret is base64-*encoded*, not encrypted; treat the manifest as sensitive.
+> **📚 Theory.** Environment variables are resolved once, when the container is created, so editing a ConfigMap or Secret does not change the environment of an already-running container. A new container instance is required; for Deployments, `kubectl rollout restart` is the common manual trigger. Mounted volumes are refreshed by the kubelet on a delay, but the application still has to re-read the file. A Secret is base64-*encoded*, not encrypted; treat the manifest as sensitive.
 
 > **🌍 Real-world example.** "I updated the ConfigMap but the app still behaves the same" is one of the most common Kubernetes support questions. Helm charts routinely add a checksum of the ConfigMap to a Pod-template annotation so that any config change also changes the template and triggers a rollout automatically.
 
@@ -607,7 +619,7 @@ kubectl annotate deployment/x kubernetes.io/change-cause="bump to 1.26"   # show
 | `maxSurge` | Extra Pods allowed **above** desired count during update (number or %; % rounds up) |
 | `maxUnavailable` | Pods allowed **below** desired count during update (number or %; % rounds down) |
 
-> **📚 Theory.** A Deployment never edits Pods in place. Changing `.spec.template` creates a new ReplicaSet, which scales up while the old one scales down; the old ReplicaSet is kept at 0 replicas, which is what makes `rollout undo` instant. Only **template** changes create revisions — editing `strategy` or `replicas` does not. With 4 replicas, `maxSurge: 25%` and `maxUnavailable: 25%` allow at most 5 Pods and at least 3 available (25% of 4 is exactly 1 either way; with 3 replicas, surge rounds up to 1 but unavailable rounds down to 0).
+> **📚 Theory.** A Deployment never edits Pods in place. Changing `.spec.template` creates a new ReplicaSet, which scales up while the old one scales down; previous ReplicaSets are typically retained up to `revisionHistoryLimit`, which is what makes rollback possible without reconstructing the old template. Only **template** changes create new rollout revisions — editing `strategy` or `replicas` does not. `rollout undo` changes the Deployment back to a previous template; the rollout itself still has to complete and Pods may need time to become Ready. With 4 replicas, `maxSurge: 25%` and `maxUnavailable: 25%` allow at most 5 Pods and at least 3 available (25% of 4 is exactly 1 either way; with 3 replicas, surge rounds up to 1 but unavailable rounds down to 0).
 
 > **🌍 Real-world example.** With `maxUnavailable: 0` and a readiness probe, an update to a nonexistent image tag simply stalls: the new Pod sits in `ImagePullBackOff` while every old Pod keeps serving. The bad release costs nothing but a stuck rollout, and `rollout undo` clears it. Chapter 7's Practice D walks through exactly this.
 
@@ -617,9 +629,9 @@ kubectl annotate deployment/x kubernetes.io/change-cause="bump to 1.26"   # show
 |---|---|
 | `completions` | Total successful Pod completions needed |
 | `parallelism` | Max Pods running at once |
-| `backoffLimit` | Retries before Job is marked failed |
+| `backoffLimit` | Number of counted Pod failures allowed before the Job is marked failed |
 | `activeDeadlineSeconds` | Hard wall-clock timeout for the whole Job |
-| `ttlSecondsAfterFinished` | Auto-delete a finished Job (and its Pods) after N seconds |
+| `ttlSecondsAfterFinished` | Auto-delete a finished Job (and its dependents) after N seconds when the TTL controller is enabled |
 | `restartPolicy` | Must be `Never` or `OnFailure` inside a Job's Pod template (never `Always`) |
 | `schedule` (CronJob) | Standard 5-field cron syntax |
 | `concurrencyPolicy` | `Allow` (default) \| `Forbid` \| `Replace` |
@@ -677,20 +689,20 @@ patches:
 In namespace `drill`, complete all nine items. Each item should take no more than a minute from "read the task" to "verified."
 
 1. Create a Deployment `web` with image `nginx:1.25` and 3 replicas.
-2. Expose it on Service port `80`, forwarding to container port `8080`.
+2. Expose it on Service port `8080`, forwarding to nginx's container port `80`.
 3. Create a ConfigMap `app-config` with `MODE=fast`.
 4. Run a Job `hello` (image `busybox:1.36`) that echoes `hello`.
 5. Print each Pod's name and image as two columns.
 6. Scale `web` to 5 replicas.
 7. Update `web` to `nginx:1.26`, then roll it back.
-8. Add the label `env=test` to one `web` Pod, then remove it.
-9. List only Pods carrying `env=test`.
+8. Add the label `env=test` to one `web` Pod, then list only Pods carrying it.
+9. Remove `env=test` from that Pod, then confirm that no Pods remain selected by `-l env=test`.
 
 ### Requirements
 
 - Use the cheat-sheet sections, not the Kubernetes docs; note which section you used for each item.
 - Imperative commands only — no YAML files.
-- Verify each item's result before moving to the next.
+- Verify each item's result before moving to the next; for item 9, confirm the final `-l env=test` selection is empty.
 
 ### Success Criteria
 
@@ -713,7 +725,7 @@ Sections: items 1–4 → 8.2; item 5 → 8.11 (`custom-columns`); items 6–7 �
 ```bash
 kubectl create namespace drill
 kubectl create deployment web -n drill --image=nginx:1.25 --replicas=3
-kubectl expose deployment web -n drill --port=80 --target-port=8080
+kubectl expose deployment web -n drill --port=8080 --target-port=80   # Service clients use 8080; nginx listens on 80
 kubectl create configmap app-config -n drill --from-literal=MODE=fast
 kubectl create job hello -n drill --image=busybox:1.36 -- echo hello
 kubectl get pods -n drill -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image
@@ -722,9 +734,10 @@ kubectl set image deployment/web nginx=nginx:1.26 -n drill
 kubectl rollout status deployment/web -n drill
 kubectl rollout undo deployment/web -n drill
 POD=$(kubectl get pods -n drill -l app=web -o jsonpath='{.items[0].metadata.name}')
-kubectl label pod $POD -n drill env=test
+kubectl label pod "$POD" -n drill env=test
 kubectl get pods -n drill -l env=test
-kubectl label pod $POD -n drill env-
+kubectl label pod "$POD" -n drill env-
+kubectl get pods -n drill -l env=test
 kubectl delete namespace drill
 ```
 

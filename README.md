@@ -47,7 +47,7 @@ flowchart TD
     C10 --> EXAM["Sit the CKAD exam"]
 ```
 
-The five domain chapters (1–5) mirror the five scored domains on the real exam, in the order dependencies actually run: design what you'll run, configure it, deploy it safely, expose it on the network, then learn to debug it when something breaks. **Each chapter includes hands-on practice for the concepts you just learned.** Chapters 6–10 then convert that knowledge into exam-day speed, cumulative practice, reference use, and final revision.
+The five domain chapters (1–5) cover the five scored domains on the real exam, arranged here in the guide's learning-dependency order rather than the official exam listing order: configure what you'll run, design it, deploy it safely, expose it on the network, then learn to debug it when something breaks. **Each chapter includes hands-on practice for the concepts you just learned.** Chapters 6–10 then convert that knowledge into exam-day speed, cumulative practice, reference use, and final revision.
 
 > **Content preservation:** The chapter enhancements add practice and readability improvements without removing the existing learning content. Reference and cheat-sheet formatting has been kept aligned with the current chapter structure.
 
@@ -62,9 +62,9 @@ The five domain chapters (1–5) mirror the five scored domains on the real exam
 | 4  | [Services &amp; Networking](04_chapter_services_networking.md)                         | 🎯 Core CKAD Skill | 20%    | 2–2.5 hrs                |
 | 5  | [Observability &amp; Maintenance](05_chapter_observability_maintenance.md)             | 🎯 Core CKAD Skill | 15%    | 1.5–2 hrs                |
 | 6  | [CKAD Command Mastery](06_chapter_command_mastery.md)                                  | 🧭 Exam Focus      | —     | 45–60 min + daily drills |
-| 7  | [End-to-End Worked Example](07_chapter_worked_example.md)                              | 🔍 Deep Dive       | —     | 1–1.5 hrs                |
+| 7  | [End-to-End Worked Example](07_chapter_worked_example.md)                              | 🔍 Deep Dive       | —     | 1.5–2 hrs                |
 | 8  | [Reference &amp; Cheat Sheets](08_chapter_reference_cheatsheets.md)                    | 🧭 Exam Focus      | —     | 20–30 min per pass       |
-| 9  | [Practice &amp; Labs](09_chapter_practice_labs.md)                                     | 🏋️ Practice      | —     | 6–9 hrs                  |
+| 9  | [Practice &amp; Labs](09_chapter_practice_labs.md)                                     | 🏋️ Practice      | —     | 11–14 hrs                |
 | 10 | [Study &amp; Exam Plan](10_chapter_study_exam_plan.md)                                 | 🧭 Exam Focus      | —     | 15–20 min                |
 
 ### Companion & Architecture References
@@ -116,17 +116,18 @@ This keeps the guide as **one continuous learning path** while building hands-on
 
 ### Study Timeline
 
-**Total prep time:** 40–60 hours (varies by background) — the chapter-level time estimates in the roadmap above cover reading and drilling; the phases below show how that time is typically distributed.
+**Total prep time:** ~40–60 hours for a complete preparation cycle (varies by background). The roadmap chapter estimates are the baseline passes; the 40–60-hour total assumes repeated drills, retries of weak labs, and full mock/exam-simulator practice.
 
-| Phase                                     | Time           | Focus                                             |
-| ----------------------------------------- | -------------- | ------------------------------------------------- |
-| **Phase 1: Learn**                  | 15–20h        | Chapters 0–5, domain by domain                   |
-| **Phase 2: Command Drills**         | Ongoing, daily | Chapter 6, until typing is automatic              |
-| **Phase 3: Cumulative Practice**    | 15–25h        | Chapter 9, Levels 1–4 + repeat weak chapter labs |
-| **Phase 4: Timed Practice & Mocks** | 6–10h         | Chapter 9, Levels 5–6 + three 2-hour mock exams |
-| **Phase 5: Final Revision**         | 5h             | Chapter 8 cheat sheets, weak-area review          |
+| Phase | Time | Focus |
+|---|---|---|
+| **Phase 1: Learn** | ~15–20h | Chapters 0–5, domain by domain |
+| **Phase 2: Command Drills + Foundations** | ~4–6h initially + daily drills | Chapter 6, then Chapter 9 Levels 1–2 and Chapter 7 |
+| **Phase 3: Troubleshooting + Combined Work** | ~3–6h + repeats | Chapter 9 Levels 3–4; repeat weak areas |
+| **Phase 4: Speed** | ~1–2h + repeats | Chapter 9 Level 5 timed tasks |
+| **Phase 5: Mock Exams** | ~10h+ | Chapter 9 Level 6 (three course mocks) plus the two Killer.sh simulator sessions |
+| **Phase 6: Final Revision** | ~3–5h + targeted review | Chapter 8 plus mistakes from labs and mocks |
 
-This mirrors Chapter 10's Phase-by-Phase Progression in more detail — see that chapter for the full breakdown and a Final Readiness Self-Check.
+This mirrors Chapter 10's six-phase progression: Learn → Command Drills + Foundations → Troubleshooting + Combined Work → Speed → Mock Exams → Final Revision.
 
 ---
 
@@ -232,7 +233,7 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 ├── 05_chapter_observability_maintenance.md        # Ch 5: Observability & Maintenance + integrated practice
 ├── 06_chapter_command_mastery.md                  # Ch 6: kubectl Command Mastery + integrated practice
 ├── 07_chapter_worked_example.md                   # Ch 7: End-to-End Worked Example + integrated practice
-├── 08_chapter_reference_cheatsheets.md            # Ch 8: Reference & Cheat Sheets (unchanged)
+├── 08_chapter_reference_cheatsheets.md            # Ch 8: Reference & Cheat Sheets
 ├── 09_chapter_practice_labs.md                    # Ch 9: Cumulative Hands-on Labs
 ├── 10_chapter_study_exam_plan.md                  # Ch 10: Study & Exam Plan
 ├── kubernetes-architecture-and-communication-flow.md # Architecture foundation
@@ -260,7 +261,7 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 
 ## 🔗 Exam Information
 
-**Official:** [CKAD at CNCF](https://www.cncf.io/certification/ckad/)
+**Official references:** [Linux Foundation CKAD](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/) · [CNCF CKAD Curriculum](https://github.com/cncf/curriculum/blob/master/CKAD_Curriculum_v1.35.pdf)
 
 **Exam Format:**
 
@@ -268,7 +269,10 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 - Format: Hands-on, terminal-based (no multiple choice)
 - Passing score: 66%, weighted across 5 domains
 - Environment: Pre-configured Linux terminal + a real Kubernetes cluster
-- Documentation/resources: follow the current Linux Foundation exam-resource policy; the Kubernetes documentation is the primary reference allowed during the exam. Verify the current policy before exam day.
+- Documentation/resources: follow the current Linux Foundation exam-resource policy and candidate handbook. Verify the exact allowed resources immediately before exam day.
+- Current simulator access: the Linux Foundation currently states that enrolled CKAD candidates receive two Killer.sh simulator sessions, with 17 questions in each session.
+
+> **Current reference checked September 19, 2026:** the Linux Foundation currently lists CKAD as a 2-hour, online, proctored, performance-based exam based on Kubernetes v1.35.
 
 **Domain Breakdown:**
 
@@ -293,10 +297,10 @@ Chapter 7's End-to-End Worked Example builds one real application through exactl
 ### During the Exam
 
 1. **Read the full task before typing anything.** Understand the namespace, resource names, and exit criteria first.
-2. **Run `kubectl config get-contexts`** immediately. Know which cluster/namespace you're in.
+2. **Confirm your current context and namespace** before the first task and whenever a task changes context or namespace. Do not assume the previous terminal state is correct.
 3. **Generate, don't hand-write.** Use `kubectl create <kind> ... --dry-run=client -o yaml`, then edit — don't start from blank YAML.
 4. **Verify every step.** After `apply`, run `get` and `describe` to confirm the resource is correct.
-5. **If stuck, move on.** The exam has many smaller tasks; spend at most ~15 minutes on one, then come back later if time remains.
+5. **If stuck, move on.** When a task is consuming disproportionate time, leave it and return later if time remains.
 6. **Read error messages carefully.** API errors often identify the failing resource, field, or authorization boundary directly.
 
 ### After the Exam
@@ -363,9 +367,9 @@ See [LICENSE](LICENSE) for details.
 
 ---
 
-**Last Updated:** September 11, 2026
+**Last Updated:** September 19, 2026
 **Kubernetes Version:** v1.35
 **Exam Focus:** CKAD (Application Developer)
-**Learning Model:** One continuous path with hands-on practice integrated into Chapters 0–7
+**Learning Model:** One continuous path with hands-on practice integrated into Chapters 0–7, then consolidated through Chapters 8–10
 
 Happy studying! 🚀

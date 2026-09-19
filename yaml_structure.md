@@ -6,16 +6,18 @@
 
 ## 1. The One Mental Model
 
-Every Kubernetes YAML document can be understood as a tree.
+Most Kubernetes resource manifests can be understood as a tree.
 
 ```text
-Object
+Kubernetes resource
+├── apiVersion
+├── kind
 ├── metadata
-└── spec
-    ├── simple values
-    ├── dictionaries / maps
-    └── lists
-        └── list items
+└── resource-specific configuration
+    ├── usually spec
+    ├── sometimes data / stringData
+    ├── sometimes rules
+    └── other kind-specific top-level fields
 ```
 
 When you need to add a field:
@@ -115,7 +117,7 @@ there is no `-` because `resources` is a **map**.
 | Field | Shape | Dash? | Typical location |
 |---|---|---:|---|
 | `metadata` | Map | No | Object |
-| `spec` | Map | No | Object |
+| `spec` | Map (when present) | No | Object/workload/resource-specific |
 | `containers` | List of maps | Yes | Pod spec |
 | `env` | List of maps | Yes | Container |
 | `ports` | List of maps | Yes | Container |
@@ -125,7 +127,7 @@ there is no `-` because `resources` is a **map**.
 | `requests` | Map | No | Resources |
 | `limits` | Map | No | Resources |
 | `securityContext` | Map | No | Pod/container |
-| `selector` | Map | No | Resource spec |
+| `selector` | Map (often with nested `matchLabels` / `matchExpressions`) | No | Resource spec |
 
 ---
 
@@ -137,9 +139,9 @@ Think about **who owns the setting**.
 Object identity
 └── metadata
 
-Pod-level configuration
+Pod configuration
 └── spec
-    └── template.spec
+    └── (or template.spec for a Pod template)
 
 Container configuration
 └── spec.containers[].<field>
@@ -214,7 +216,7 @@ This is useful when a task requires several related resources in one manifest fi
 
 ## 6. The Kubernetes Object Envelope
 
-Most manifests begin with:
+Most workload/resource manifests often begin with this common envelope:
 
 ```yaml
 apiVersion: ...
@@ -228,16 +230,23 @@ spec:
 Think of the top-level keys as the first branches of the tree.
 
 ```text
-Object
+Kubernetes resource
 ├── apiVersion
 ├── kind
 ├── metadata
-└── spec
+└── kind-specific fields
+    ├── spec        # common for workloads and many other resources
+    ├── data        # e.g. ConfigMap / Secret
+    └── rules       # e.g. RBAC resources
 ```
 
-`metadata` describes the object; `spec` contains the desired configuration.
+`metadata` identifies and describes the object. Many resources use `spec` for desired configuration, but not every Kubernetes resource has a `spec`; for example, ConfigMaps use `data`/`binaryData`, Secrets use `data`/`stringData`, and RBAC Roles use `rules`.
+
+> **`status` is different:** live objects often show a top-level `status` field, but `status` is normally populated and maintained by Kubernetes/controllers. For CKAD manifest authoring, focus on the fields you are expected to declare; do not copy server-generated `status` back into a new manifest.
 
 > **YAML syntax trap:** Use spaces for indentation, never tab characters. YAML parsers reject tabs used for indentation.
+
+> **Schema trap:** A document can be valid YAML and still be invalid Kubernetes. YAML only determines the data tree; the Kubernetes API schema determines whether that tree is valid for the resource kind.
 
 ### Multi-document YAML
 
@@ -352,11 +361,13 @@ Pod-level fields do **not** automatically belong directly under the Deployment's
 
 For `apps/v1` Deployments, every key in `spec.selector.matchLabels` must be present in the Pod template's labels. The template may contain additional labels.
 
-For a Deployment, the Pod configuration generally lives under:
+For a Deployment, the Pod template configuration generally lives under:
 
 ```text
 spec.template.spec
 ```
+
+For a standalone Pod, the equivalent path is simply `spec`.
 
 The Deployment selector must match the labels on the Pod template (for `apps/v1`, the selector is required and cannot be changed after creation).
 
@@ -486,7 +497,12 @@ ports:
 
 ## 12. ConfigMap and Secret
 
-The important structural idea is that configuration data is usually represented as a **map of keys to values**.
+The important structural idea is that both resources contain key/value data, but their top-level fields differ slightly:
+
+- `ConfigMap`: `data` and optionally `binaryData`
+- `Secret`: `data`, and `stringData` as a write-time convenience
+
+The `data`/`stringData` maps are not the same as a workload's `spec`.
 
 ```yaml
 apiVersion: v1
@@ -498,17 +514,16 @@ data:
   LOG_LEVEL: info
 ```
 
-The same tree-thinking approach applies to Secrets:
+For a Secret, think:
 
 ```text
-Object
+Secret
 ├── metadata
-└── data
-    ├── key
-    └── key
+├── data        → map of base64-encoded values
+└── stringData  → map of plaintext input values
 ```
 
-The exact field and value format should be confirmed from the resource schema when needed.
+`stringData` is converted by the API server into `data`; use the schema when you're unsure which field applies.
 
 ---
 
@@ -538,13 +553,15 @@ spec
     └── requests        → map
 ```
 
-The same rule keeps working: identify the type of each node before worrying about indentation.
+The same rule keeps working: identify the type of each node before worrying about indentation. Then confirm that the resulting structure matches the Kubernetes schema.
 
 ---
 
 ## 14. Common YAML Mistakes
 
 ### Mistake 1 — Adding `-` to a map
+
+> **Important:** The “wrong” example is still valid YAML syntax. The mistake is that the resulting data structure does not match the Kubernetes API schema.
 
 Wrong:
 
@@ -563,6 +580,8 @@ resources:
 ```
 
 ### Mistake 2 — Putting a Pod field at the wrong level
+
+> **Important:** This can also be valid YAML syntax while being invalid for the Kubernetes object schema.
 
 Wrong:
 
@@ -662,7 +681,7 @@ kubectl explain <resource>.<field>
 kubectl describe <resource> <name>
 ```
 
-The goal is not to memorize every manifest. The goal is to be able to **construct, modify, inspect, and correct** YAML quickly.
+The goal is not to memorize every manifest. The goal is to be able to **construct, modify, inspect, and correct** the YAML structure quickly—and to distinguish valid YAML syntax from a valid Kubernetes resource.
 
 ---
 
@@ -670,7 +689,7 @@ The goal is not to memorize every manifest. The goal is to be able to **construc
 
 ### Exercise 1
 
-Is this valid?
+Is this **valid Kubernetes structure**? (It is valid YAML syntax, but may not match the Kubernetes schema.)
 
 ```yaml
 resources:
@@ -687,7 +706,7 @@ Is `resources` a list or a map?
 <details>
 <summary>✅ Solution</summary>
 
-No. `resources` is a map:
+No. The YAML is syntactically valid, but `resources` is the wrong shape for the Kubernetes schema: `resources` is a map:
 
 ```yaml
 resources:

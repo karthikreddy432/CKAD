@@ -37,13 +37,12 @@ flowchart TB
 
     User -->|"HTTPS"| API
     API <-->|"read / write state"| ETCD
-    SCHED -->|"watch / assign"| API
-    CTRL -->|"watch / reconcile"| API
-    API -->|"Pod assignment / desired state"| K1
-    API -->|"Pod assignment / desired state"| K2
+    SCHED -->|"watch / write binding"| API
+    CTRL -->|"watch / reconcile via API"| API
+    K1 -->|"watch assigned Pods"| API
+    K2 -->|"watch assigned Pods"| API
     K1 --> R1
-    R1 --> P1
-    K1 --> CNI1
+    R1 -->|"container + Pod sandbox networking"| CNI1
     CNI1 --> P1
     K2 --> R2
     R2 --> P2
@@ -63,8 +62,8 @@ flowchart TB
 | **Controllers** | Control plane | Continuously reconcile desired and observed state |
 | **Kubelet** | Worker node | Makes Pods assigned to its node actually run |
 | **Container Runtime** | Worker node | Pulls images and creates/runs containers |
-| **CNI / networking** | Worker node | Configures Pod networking |
-| **Service routing** | Cluster/node networking | Routes Service traffic toward selected endpoints |
+| **CNI / networking** | Worker node / node networking | Provides the Pod-networking implementation; commonly invoked by the container runtime during Pod sandbox setup |
+| **Service routing** | Cluster/node networking | Programs the data plane to route Service traffic toward selected endpoints |
 | **CoreDNS** | Usually a cluster workload | Resolves Kubernetes DNS names |
 
 ### The architecture in one sentence
@@ -280,7 +279,7 @@ ReplicaSet
 Pods
 ```
 
-The controller does not directly start a Linux process. It manages Kubernetes objects. Node-level execution happens later through the scheduler, Kubelet, runtime, and networking components.
+This is a **logical ownership/reconciliation relationship**, not a direct network call chain. The Deployment controller and ReplicaSet controller read and write Kubernetes objects through the API Server. The controllers do not directly start Linux processes; node-level execution happens later through scheduling, the Kubelet, the runtime, and the networking implementation.
 
 ---
 
@@ -320,7 +319,7 @@ The scheduler considers constraints such as:
 
 The scheduler does not start containers and does not directly command the Kubelet.
 
-Its decision is represented in Kubernetes state through the API Server.
+Its placement decision is written through the API Server (conceptually by binding the Pod to a node). The Kubelet then observes that assignment from the API Server.
 
 ---
 
@@ -341,11 +340,10 @@ flowchart TD
     CNI["CNI Plugin"]
     Pod["Pod"]
 
-    API -->|"Pod assigned to this node"| Kubelet
-    Kubelet -->|"container operations"| CRI
-    CRI --> Runtime
-    Runtime --> Pod
-    Kubelet -->|"network setup"| CNI
+    Kubelet -->|"watch assigned Pods"| API
+    Kubelet -->|"container operations via CRI"| Runtime
+    Runtime -->|"create Pod sandbox / containers"| Pod
+    Runtime -->|"invoke CNI for Pod network setup"| CNI
     CNI --> Pod
     Kubelet -->|"status"| API
 ```
@@ -353,8 +351,8 @@ flowchart TD
 The Kubelet:
 
 - watches for Pods assigned to its node
-- asks the runtime to pull images and manage containers
-- works with networking components to configure Pod networking
+- asks the runtime to pull images and manage containers through CRI
+- coordinates Pod startup with the runtime; the runtime commonly invokes CNI plugins to configure Pod networking
 - monitors container/Pod health
 - reports status through the API Server
 
@@ -445,11 +443,10 @@ sequenceDiagram
 
     K->>A: Watch Pods assigned here
     A-->>K: Pod assigned to this node
-    K->>R: Pull image / create container
-    K->>N: Configure Pod networking
-    N-->>K: Network ready
-    K->>R: Start container
-    R-->>K: Container running
+    K->>R: CRI: create Pod sandbox / containers
+    R->>N: Invoke CNI for Pod networking
+    N-->>R: Network ready
+    R-->>K: Sandbox/container running
     K->>A: Report status
 ```
 
@@ -480,8 +477,8 @@ API Server
 The main node-local execution paths are:
 
 ```text
-Kubelet → Container Runtime
-Kubelet → CNI
+Kubelet → Container Runtime (via CRI)
+Container Runtime → CNI/networking plugin (for Pod network setup)
 ```
 
 That distinction is extremely useful when troubleshooting.
@@ -490,18 +487,20 @@ That distinction is extremely useful when troubleshooting.
 
 ## 10. Pod Networking
 
-Pods receive network connectivity through the cluster's networking implementation.
+Pods receive network connectivity through the cluster's networking implementation. On typical nodes, the container runtime invokes CNI plugins when creating the Pod sandbox; the exact data path varies by implementation.
 
 ```mermaid
 flowchart LR
-    Pod["Pod<br/>network namespace + IP"]
+    Runtime["Container Runtime"]
     CNI["CNI Plugin"]
     Node["Node Networking"]
+    Pod["Pod network namespace + IP"]
     Cluster["Cluster Pod Network"]
 
-    Pod --> CNI
+    Runtime -->|"invoke during Pod sandbox setup"| CNI
     CNI --> Node
     Node --> Cluster
+    CNI --> Pod
 ```
 
 Conceptually:
@@ -541,14 +540,14 @@ flowchart LR
     Client["Client Pod"]
     DNS["CoreDNS"]
     Service["Service<br/>stable virtual IP"]
-    EPS["EndpointSlice<br/>current endpoints"]
+    Proxy["Service proxy / data plane"]
     Pod["Ready backend Pod"]
 
     Client -->|"1. resolve name"| DNS
-    DNS -->|"2. Service IP"| Client
-    Client -->|"3. traffic"| Service
-    Service -->|"4. select/routing"| EPS
-    EPS -->|"5. backend endpoint"| Pod
+    DNS -->|"2. Service address"| Client
+    Client -->|"3. traffic to Service IP:port"| Service
+    Service --> Proxy
+    Proxy -->|"4. route to a selected backend"| Pod
 ```
 
 Think:
@@ -559,19 +558,23 @@ Think:
 
 ### EndpointSlices and node-level Service routing
 
-EndpointSlices represent the current endpoints associated with a Service. The EndpointSlice controller keeps that backend information up to date; the API server stores and serves the state, but does not proxy application traffic.
+EndpointSlices are **control-plane state** describing the current network endpoints for a Service. The EndpointSlice controller keeps that backend information up to date; the API server stores and serves the state, but does not proxy application traffic.
 
-On nodes, the actual Service data-plane routing is implemented by the cluster networking stack—commonly `kube-proxy` using iptables/IPVS, or an eBPF-based implementation such as Cilium. The exact mechanism varies by cluster. The important CKAD mental model is:
+A Service proxy implementation watches Service and EndpointSlice state and programs the node data plane. Kubernetes commonly provides `kube-proxy`, but a networking implementation can provide equivalent Service proxying itself. The exact mechanism varies by cluster.
+
+The important CKAD mental model is:
 
 ```text
-Service ClusterIP + port
+Service + EndpointSlice state
         ↓
-node-level Service routing
+service proxy / data-plane rules
         ↓
-selected/ready backend Pod
+Service traffic
+        ↓
+selected backend Pod
 ```
 
-The relationship is:
+The relationship is **control-plane state, not a packet path**:
 
 ```text
 Service selector
@@ -580,10 +583,46 @@ Matching Pods
       ↓
 EndpointSlice state
       ↓
-Service traffic
+service proxy programs routing
 ```
 
-The EndpointSlice controller keeps this information current as Pods are created, deleted, or become Ready/NotReady.
+Traffic does **not** travel through an EndpointSlice object. EndpointSlices tell the data-plane implementation which endpoints exist; the data plane performs the actual forwarding. The EndpointSlice controller keeps this information current as Pods are created, deleted, or change readiness.
+
+> **Exam trap:** An EndpointSlice is not a forwarding device. It is API state that a service-proxy implementation consumes to program the data plane.
+
+---
+
+### Control Plane State vs. Data-Plane Traffic
+
+One of the easiest architecture mistakes is drawing Kubernetes objects as if packets literally travel through them.
+
+Keep these two paths separate:
+
+```text
+CONTROL PLANE
+Service selector
+      ↓
+EndpointSlice controller
+      ↓
+EndpointSlice objects
+      ↓
+service proxy / networking implementation
+      ↓
+node data-plane rules
+```
+
+```text
+DATA PLANE
+Client Pod
+      ↓
+Service address
+      ↓
+service proxy / networking implementation
+      ↓
+backend Pod
+```
+
+`EndpointSlice` is **state describing endpoints**, not a network hop. Likewise, a Service object is an API abstraction/configuration object; the node or networking implementation performs the actual forwarding. The API Server and etcd are not in the application packet path.
 
 ---
 
@@ -599,7 +638,8 @@ sequenceDiagram
     participant DNS as CoreDNS
     participant API as API Server
 
-    API-->>DNS: Service information is watched/cached
+    DNS->>API: Watch relevant Service / endpoint state
+    API-->>DNS: Current state / change events
     App->>DNS: Resolve "my-service"
     DNS-->>App: Service address
 ```
@@ -637,13 +677,15 @@ There are several common ways traffic can enter a cluster.
 flowchart LR
     Client["External Client"]
     Node["Node IP : NodePort"]
-    Service["Service"]
+    Proxy["Service proxy / node data plane"]
     Pod["Pod"]
 
     Client --> Node
-    Node --> Service
-    Service --> Pod
+    Node --> Proxy
+    Proxy --> Pod
 ```
+
+The Service abstraction is still the configuration model, but a NodePort connection is implemented by the node's Service data plane; there is not necessarily a separate network hop through a Service object.
 
 ### LoadBalancer
 
@@ -651,13 +693,15 @@ flowchart LR
 flowchart LR
     Client["External Client"]
     LB["External / Cloud Load Balancer"]
-    Service["Service"]
+    Proxy["Service load-balancing implementation"]
     Pod["Pod"]
 
     Client --> LB
-    LB --> Service
-    Service --> Pod
+    LB --> Proxy
+    Proxy --> Pod
 ```
+
+A cloud/provider implementation may send traffic to node ports or, depending on its design and configuration, directly toward Pods. Treat the diagram as the conceptual exposure path, not a packet-level guarantee.
 
 ### Ingress / Gateway
 
@@ -693,7 +737,7 @@ The exact infrastructure behind external load balancing depends on the environme
 
 ## 14. Pod Lifecycle and Failure
 
-A Pod can move through phases such as:
+A Pod reports one of a small set of high-level lifecycle phases; these phases are not a detailed state machine:
 
 ```mermaid
 stateDiagram-v2
@@ -815,10 +859,10 @@ The important mental model is:
 | Scheduler | API Server | Watch unscheduled Pods; record placement |
 | Controllers | API Server | Watch and reconcile resources |
 | Kubelet | API Server | Observe assigned Pods; report status |
-| Kubelet | Container Runtime | Create/start/stop containers through CRI |
-| Kubelet | CNI | Configure Pod networking |
+| Kubelet | Container Runtime | Create/start/stop Pod sandboxes and containers through CRI |
+| Container Runtime | CNI / networking plugin | Configure Pod networking during sandbox setup (typical implementation) |
 | EndpointSlice controller | API Server | Maintain Service endpoint state |
-| CoreDNS | Cluster/API state | Provide DNS service discovery |
+| CoreDNS | API Server | Watch relevant Service / endpoint state and provide DNS service discovery |
 | Application Pod | CoreDNS | Resolve Service names |
 | Application Pod | Service | Send traffic to stable Service endpoint |
 
@@ -833,8 +877,8 @@ flowchart TB
     Controllers["Controllers"] --> API
     Kubelet["Kubelet"] --> API
 
-    Kubelet --> Runtime["Container Runtime"]
-    Kubelet --> CNI["CNI"]
+    Kubelet -->|"CRI"| Runtime["Container Runtime"]
+    Runtime -->|"network setup"| CNI["CNI"]
 
     Pod["Application Pod"] --> DNS["CoreDNS"]
     Pod --> Service["Service"]
@@ -842,7 +886,7 @@ flowchart TB
     EPS["EndpointSlice Controller"] --> API
 ```
 
-The API Server is the main coordination hub. The notable execution paths outside that hub are primarily node-local, such as Kubelet ↔ runtime and Kubelet ↔ CNI.
+The API Server is the main coordination hub. The notable execution paths outside that hub are primarily node-local, such as Kubelet ↔ container runtime and the runtime ↔ networking plugin during Pod sandbox setup.
 
 ---
 
@@ -852,8 +896,8 @@ The API Server is the main coordination hub. The notable execution paths outside
 |---|---|---|
 | **HTTPS / REST** | Clients/components ↔ API Server | Kubernetes API communication |
 | **Watch** | Components ↔ API Server | Efficient change notification |
-| **gRPC via CRI** | Kubelet ↔ container runtime | Container lifecycle operations |
-| **CNI** | Kubelet ↔ networking plugin | Pod network setup |
+| **gRPC via CRI** | Kubelet ↔ container runtime | Pod sandbox and container lifecycle operations |
+| **CNI** | Container runtime ↔ networking plugin (typically) | Pod network setup during sandbox creation |
 | **DNS** | Pod ↔ CoreDNS | Name resolution |
 | **TCP/IP** | Application endpoints | Actual application traffic |
 
@@ -865,20 +909,24 @@ For example:
 
 ```text
 Kubelet
-   ↓
-CRI
-   ↓
+   │
+   │ CRI calls
+   ▼
 containerd / CRI-O
 ```
 
-and:
+and, during Pod sandbox setup:
 
 ```text
 Kubelet
-   ↓
-CNI
-   ↓
-chosen networking implementation
+   │
+   │ asks runtime via CRI
+   ▼
+container runtime
+   │
+   │ invokes
+   ▼
+CNI plugin / networking implementation
 ```
 
 This separation allows implementations to vary without changing the Kubernetes API model.
@@ -924,28 +972,26 @@ flowchart TB
     User --> API
     API <--> ETCD
 
-    API --> DC
-    DC --> RS
-    RS --> API
+    DC -->|"watch / write via API"| API
+    RS -->|"watch / write via API"| API
+    SCHED -->|"watch / write binding via API"| API
 
-    API --> SCHED
-    SCHED --> API
+    K1 -->|"watch assigned Pods"| API
+    K2 -->|"watch assigned Pods"| API
 
-    API --> K1
-    API --> K2
-
-    K1 --> Runtime
-    K1 --> CNI
-    K2 --> Runtime
-    K2 --> CNI
+    K1 -->|"CRI"| Runtime
+    K2 -->|"CRI"| Runtime
+    Runtime -->|"network setup"| CNI
 
     Runtime --> Pods
     CNI --> Pods
 
-    Service --> EPS
-    EPS --> Pods
-    DNS --> Service
+    Service -.->|"represented in API state"| API
+    EPS -.->|"endpoint state in API"| API
+    DNS -.->|"watches API state"| API
 ```
+
+> **Diagram note:** The arrows to the API Server represent API/watch interactions, not a physical packet path. Controllers, the scheduler, and Kubelets coordinate through API state; they do not directly command one another.
 
 ### In chronological order
 
@@ -955,11 +1001,11 @@ flowchart TB
 4. The controller establishes the ReplicaSet needed for the desired replicas.
 5. The ReplicaSet controller creates the required Pod objects.
 6. The scheduler notices unscheduled Pods and assigns nodes.
-7. Kubelets on those nodes notice their assigned Pods.
-8. Kubelets ask the runtime to create/start containers.
-9. CNI configures Pod networking.
+7. Kubelets on those nodes observe their assigned Pods.
+8. Kubelets ask the runtime, through CRI, to create the Pod sandbox and containers.
+9. The runtime invokes the networking implementation/CNI to configure Pod networking as part of sandbox setup.
 10. Kubelets report status.
-11. EndpointSlice state is updated as appropriate Pods become eligible backends.
+11. The EndpointSlice controller updates endpoint state as Pods become eligible or ineligible backends.
 12. CoreDNS provides Service-name resolution.
 13. A client sends traffic to the Service's stable endpoint.
 14. Service routing directs traffic toward an appropriate backend Pod.
@@ -1072,13 +1118,13 @@ flowchart TB
     L1 --> L2
     L2 --> L3
     L2 --> L4
-    L4 --> L5
+    L2 -->|"Kubelet watches API state"| L5
+    L4 -.->|"writes desired / placement state via API"| L2
     L5 --> L6
-    L5 --> L7
     L6 --> L8
+    L6 -.->|"invokes"| L7
     L7 --> L8
-    L8 -.->|"observed status"| L2
-    L4 -.->|"continuous reconciliation"| L8
+    L5 -.->|"reports observed status via API"| L2
 ```
 
 Think of the system as two broad directions:
@@ -1090,7 +1136,7 @@ API → State → Control → Node → Workload
 
 Observed state
         ↑
-Workload → Node → API → State
+Workload → Kubelet → API → State
 ```
 
 ---
@@ -1104,19 +1150,17 @@ kubectl
   ↓
 API Server
   ↓
-Persist state
+Persist desired state
   ↓
-Controller
+Controller creates Pod object
   ↓
-Pod
+Scheduler records node assignment
   ↓
-Scheduler
+Kubelet observes assigned Pod
   ↓
-Node assignment
+Runtime via CRI
   ↓
-Kubelet
-  ↓
-Runtime + CNI
+CNI/networking during Pod sandbox setup
   ↓
 Running Pod
 ```
@@ -1148,13 +1192,15 @@ Pods
 ### Networking
 
 ```text
-Pod → Service → Ready backend Pod
+Pod → Service address → service data plane → Ready backend Pod
+
+EndpointSlice = control-plane endpoint state used to program that data plane
 ```
 
 ### DNS
 
 ```text
-Pod → CoreDNS → Service name → Service address
+Pod → CoreDNS → Service address
 ```
 
 ### Responsibility map
@@ -1179,19 +1225,19 @@ Request
   ↓
 API Server
   ↓
-Desired state
+Desired state in cluster state
   ↓
 Controllers / Scheduler
   ↓
-Kubelet
+Kubelet observes assigned Pods
   ↓
-Runtime + CNI
+Runtime via CRI + networking implementation
   ↓
 Pod
   ↓
-Service / DNS
+Service / DNS data plane
   ↓
-Observed status
+Kubelet reports observed status
   ↓
 Reconciliation continues
 ```
