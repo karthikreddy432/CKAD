@@ -27,47 +27,6 @@ By the end of this chapter, you should be able to:
 
 ## 5.1 The Debugging Workflow 🔴 MUST KNOW
 
----
-
-## 🧪 Practice — Diagnose a Failing Pod
-
-### Task
-A Pod named `checkout` in namespace `debug` is not working. Diagnose the failure using the chapter's workflow. Do not change anything until you have collected enough evidence to identify the failing stage, then make the smallest required correction.
-
-### Requirements
-- Use `get`, then `describe`, then `logs` or `exec` only when appropriate.
-- Inspect Conditions and Events.
-- If the container has restarted, inspect previous logs.
-- Verify the final Pod state after the fix.
-
-### Success Criteria
-You can state the failure stage, identify the evidence that proves it, make the smallest correction, and verify the Pod becomes healthy.
-
-### Suggested Time
-**10 minutes**
-
-<details>
-<summary>💡 Hint</summary>
-
-Start with `kubectl get pod checkout -n debug -o wide`, then `kubectl describe pod checkout -n debug`. Match the next command to the lifecycle stage that is failing.
-
-</details>
-
-<details>
-<summary>✅ Solution</summary>
-
-```bash
-kubectl get pod checkout -n debug -o wide
-kubectl describe pod checkout -n debug
-kubectl get pod checkout -n debug -o jsonpath='{.status.conditions}'
-kubectl logs checkout -n debug
-kubectl logs checkout -n debug --previous
-```
-
-Use the evidence to identify the failure stage, correct that issue, then verify with `kubectl get pod checkout -n debug` and `kubectl describe pod checkout -n debug`.
-
-</details>
-
 Use this exact sequence on every broken resource, every time, instead of guessing:
 
 ```
@@ -157,11 +116,71 @@ Pod isn't serving traffic"]
     C4 -->|Yes| OK["Pod fully healthy"]
 ```
 
+**Immutability reminder:** Many Pod-level fields cannot be changed in place after creation. For Pods managed by a Deployment/StatefulSet/Job, update the controller template instead — this is the concrete form "apply the fix" often takes. Recreate the Pod when necessary; treat `kubectl replace --force` as a last-resort destructive operation, not the normal fix.
+
 > **🌍 Real-world example.** On-call engineers at most companies follow almost exactly this sequence during an incident, often without consciously naming it: PagerDuty fires because a Deployment's replica count dropped, `kubectl get pods` shows `CrashLoopBackOff`, `kubectl describe pod` Events shows `Back-off restarting failed container`, and `kubectl logs --previous` reveals the actual application stack trace from the crash. The entire "identify -> describe -> logs -> exec -> fix -> verify" loop in this chapter isn't exam-specific trivia — it's the literal muscle memory that separates a five-minute incident from a forty-five-minute one in production.
 
 ---
 
+## 🧪 Practice — Diagnose a Failing Pod
+
+### Task
+A Pod named `checkout` in namespace `debug` is not working. Diagnose the failure using the chapter's workflow. Do not change anything until you have collected enough evidence to identify the failing stage, then make the smallest required correction.
+
+### Requirements
+- Use `get`, then `describe`, then `logs` or `exec` only when appropriate.
+- Inspect Conditions and Events.
+- If the container has restarted, inspect previous logs.
+- Verify the final Pod state after the fix.
+
+### Success Criteria
+You can state the failure stage, identify the evidence that proves it, make the smallest correction, and verify the Pod becomes healthy.
+
+### Suggested Time
+**10 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+Start with `kubectl get pod checkout -n debug -o wide`, then `kubectl describe pod checkout -n debug`. Match the next command to the lifecycle stage that is failing.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get pod checkout -n debug -o wide
+kubectl describe pod checkout -n debug
+kubectl get pod checkout -n debug -o jsonpath='{.status.conditions}'
+kubectl logs checkout -n debug
+kubectl logs checkout -n debug --previous
+```
+
+Use the evidence to identify the failure stage, correct that issue, then verify with `kubectl get pod checkout -n debug` and `kubectl describe pod checkout -n debug`.
+
+</details>
+
+---
+
 ## 5.2 Container Logs 🔴 MUST KNOW
+
+```bash
+kubectl logs mypod
+kubectl logs mypod -c sidecar              # multi-container pod
+kubectl logs mypod --previous              # logs from the container BEFORE its last restart
+kubectl logs mypod --previous -c sidecar
+kubectl logs mypod -f                      # follow/stream
+kubectl logs mypod --since=10m
+kubectl logs mypod --tail=50
+kubectl logs -l app=web --all-containers=true --prefix=true   # logs from every matching pod
+```
+
+🔴 `--previous` is the detail candidates forget most often — if a container has already restarted, `kubectl logs` without `--previous` shows the *new* attempt's logs, which are often just a clean startup with no sign of what actually crashed it.
+
+> **🌍 Real-world example.** A support engineer once spent twenty minutes convinced a service had "no error logs at all" during an incident — `kubectl logs` showed a perfectly clean, quiet startup sequence, nothing unusual. The container had actually been crash-looping every 90 seconds; every time they ran `kubectl logs`, it happened to catch the brand-new attempt's fresh boot, seconds after the previous crash. The instant they added `--previous`, the real stack trace (a missing environment variable causing a null pointer exception at startup) was right there. This gap between "the crash" and "the freshest restart" is a common reason logs look misleadingly clean during an active `CrashLoopBackOff`.
+
+> **📚 Theory.** `kubectl logs` doesn't read from the Pod at all — a Pod is just a spec; it's the container runtime on the node that captures each container *instance's* stdout/stderr to a log file for as long as that specific instance lives. When a container crashes and restarts, that's a brand-new instance with its own fresh log capture starting from nothing — the old instance's logs don't disappear immediately, but they're no longer what plain `kubectl logs` shows you by default. `--previous` is simply telling the runtime "give me the instance one restart back, not the current one." This is also why logs are eventually lost for good: once the old container instance is garbage-collected by the kubelet (or the Pod itself is deleted), that log file goes with it — which is the real-world case for shipping logs to persistent storage (a sidecar, a node-level log agent) rather than relying on `kubectl logs` for anything you need to keep.
 
 ---
 
@@ -201,62 +220,9 @@ For a multi-container Pod, add `-c <container-name>`.
 
 </details>
 
-```bash
-kubectl logs mypod
-kubectl logs mypod -c sidecar              # multi-container pod
-kubectl logs mypod --previous              # logs from the container BEFORE its last restart
-kubectl logs mypod --previous -c sidecar
-kubectl logs mypod -f                      # follow/stream
-kubectl logs mypod --since=10m
-kubectl logs mypod --tail=50
-kubectl logs -l app=web --all-containers=true --prefix=true   # logs from every matching pod
-```
-
-🔴 `--previous` is the detail candidates forget most often — if a container has already restarted, `kubectl logs` without `--previous` shows the *new* attempt's logs, which are often just a clean startup with no sign of what actually crashed it.
-
-> **🌍 Real-world example.** A support engineer once spent twenty minutes convinced a service had "no error logs at all" during an incident — `kubectl logs` showed a perfectly clean, quiet startup sequence, nothing unusual. The container had actually been crash-looping every 90 seconds; every time they ran `kubectl logs`, it happened to catch the brand-new attempt's fresh boot, seconds after the previous crash. The instant they added `--previous`, the real stack trace (a missing environment variable causing a null pointer exception at startup) was right there. This gap between "the crash" and "the freshest restart" is a common reason logs look misleadingly clean during an active `CrashLoopBackOff`.
-
 ---
 
 ## 5.3 Debugging Failure States 🔴 MUST KNOW
-
----
-
-## 🧪 Practice — Diagnose OOMKilled
-
-### Task
-Pod `memory-test` in namespace `debug` repeatedly restarts. Determine whether the container was killed because it exceeded its memory limit. Report the termination reason, exit code, and configured memory limit.
-
-### Requirements
-- Inspect the last termination state.
-- Confirm the resource limit instead of inferring from restart count.
-- Explain what the evidence means.
-
-### Success Criteria
-You identify the termination evidence and the configured memory limit.
-
-### Suggested Time
-**7 minutes**
-
-<details>
-<summary>💡 Hint</summary>
-
-`kubectl describe pod` shows `Last State`; JSONPath can retrieve the termination reason and exit code directly.
-
-</details>
-
-<details>
-<summary>✅ Solution</summary>
-
-```bash
-kubectl describe pod memory-test -n debug
-kubectl get pod memory-test -n debug -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}{"\n"}{.status.containerStatuses[*].lastState.terminated.exitCode}{"\n"}'
-kubectl get pod memory-test -n debug -o jsonpath='{.spec.containers[*].resources.limits.memory}{"\n"}'
-```
-
-If the termination reason is `OOMKilled`, the container exceeded its memory limit. Exit code `137` commonly accompanies this termination.
-
-</details>
 
 | State | Meaning | Where to look |
 |---|---|---|
@@ -337,6 +303,8 @@ kubectl debug node/<node-name> -it --image=busybox   # debug a node itself
 
 > **🌍 Real-world example.** Security-conscious teams increasingly ship production images built `FROM scratch` or `FROM gcr.io/distroless/static` — no shell, no package manager, no `ls`, nothing an attacker could use if they somehow got code execution inside the container (this is the same security principle behind Chapter 1's `readOnlyRootFilesystem` and dropped capabilities: minimize what's available to abuse). The tradeoff is that a developer can no longer `kubectl exec -it mypod -- sh` to poke around when something's wrong. `kubectl debug --target=app` was built specifically to resolve this tension: it attaches a full-featured temporary container (e.g., `busybox` or a custom debug image with `curl`, `netstat`, `strace`) that shares the *same* process and network namespace as the minimal target container, giving you a shell to investigate without ever weakening the production image itself.
 
+> **📚 Theory.** The `128 + N` pattern behind exit codes `137`, `139`, and `143` isn't a Kubernetes convention — it's decades older, from how Unix shells report a process killed by a signal: exit code = 128 + signal number. Signal `9` (`SIGKILL`, un-catchable, immediate) gives `137`; signal `11` (`SIGSEGV`, a memory-access violation) gives `139`; signal `15` (`SIGTERM`, a polite "please shut down") gives `143`. Kubernetes itself always sends `SIGTERM` first when stopping a container (giving it `terminationGracePeriodSeconds` to exit cleanly) and only escalates to `SIGKILL` if the process ignores that — which is why `137` specifically, rather than `143`, is the number worth treating as a clue: it means something forced an immediate, non-negotiable kill, and OOM is the most common reason the kubelet does that.
+
 **Verify after any fix:**
 ```bash
 kubectl get pod mypod -w
@@ -346,73 +314,45 @@ kubectl describe pod mypod | tail -20
 
 ---
 
-## 5.4 Probes and Health Checks 🔴 MUST KNOW
-
----
-
-## 🧪 Practice — Correct Application Probes
+## 🧪 Practice — Diagnose OOMKilled
 
 ### Task
-Deployment `api` in namespace `prod` starts slowly. Its readiness endpoint is `/ready` on port `8080`; its liveness endpoint is `/healthz`. Configure the probes so slow startup is protected, readiness controls Service traffic, and liveness controls restarts.
+Pod `memory-test` in namespace `debug` repeatedly restarts. Determine whether the container was killed because it exceeded its memory limit. Report the termination reason, exit code, and configured memory limit.
 
 ### Requirements
-- Use a `startupProbe` for the slow startup.
-- Readiness must use `/ready` on `8080`.
-- Liveness must use `/healthz` on `8080`.
-- Verify rollout and Service endpoints after the change.
+- Inspect the last termination state.
+- Confirm the resource limit instead of inferring from restart count.
+- Explain what the evidence means.
 
 ### Success Criteria
-The Pod is not sent traffic before readiness succeeds, slow startup is not killed prematurely, and liveness checks the health endpoint after startup.
+You identify the termination evidence and the configured memory limit.
 
 ### Suggested Time
-**10 minutes**
+**7 minutes**
 
 <details>
 <summary>💡 Hint</summary>
 
-Readiness controls routing; liveness controls restarts; `startupProbe` protects slow-starting containers.
+`kubectl describe pod` shows `Last State`; JSONPath can retrieve the termination reason and exit code directly.
 
 </details>
 
 <details>
 <summary>✅ Solution</summary>
 
-Inspect first:
-
 ```bash
-kubectl describe deployment api -n prod
-kubectl get pods -n prod
-kubectl describe pod <api-pod> -n prod
+kubectl describe pod memory-test -n debug
+kubectl get pod memory-test -n debug -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}{"\n"}{.status.containerStatuses[*].lastState.terminated.exitCode}{"\n"}'
+kubectl get pod memory-test -n debug -o jsonpath='{.spec.containers[*].resources.limits.memory}{"\n"}'
 ```
 
-A representative configuration is:
-
-```yaml
-startupProbe:
-  httpGet:
-    path: /healthz
-    port: 8080
-  failureThreshold: 30
-  periodSeconds: 2
-readinessProbe:
-  httpGet:
-    path: /ready
-    port: 8080
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 8080
-```
-
-Verify with:
-
-```bash
-kubectl rollout status deployment/api -n prod
-kubectl get pods -n prod
-kubectl get endpointslice -l kubernetes.io/service-name=api -n prod
-```
+If the termination reason is `OOMKilled`, the container exceeded its memory limit. Exit code `137` commonly accompanies this termination.
 
 </details>
+
+---
+
+## 5.4 Probes and Health Checks 🔴 MUST KNOW
 
 **What it is.** Kubernetes-native health checks the kubelet runs against each container.
 
@@ -536,7 +476,88 @@ Result: CrashLoopBackOff until you add the startupProbe or increase `initialDela
 
 ---
 
+## 🧪 Practice — Correct Application Probes
+
+### Task
+Deployment `api` in namespace `prod` starts slowly. Its readiness endpoint is `/ready` on port `8080`; its liveness endpoint is `/healthz`. Configure the probes so slow startup is protected, readiness controls Service traffic, and liveness controls restarts.
+
+### Requirements
+- Use a `startupProbe` for the slow startup.
+- Readiness must use `/ready` on `8080`.
+- Liveness must use `/healthz` on `8080`.
+- Verify rollout and Service endpoints after the change.
+
+### Success Criteria
+The Pod is not sent traffic before readiness succeeds, slow startup is not killed prematurely, and liveness checks the health endpoint after startup.
+
+### Suggested Time
+**10 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+Readiness controls routing; liveness controls restarts; `startupProbe` protects slow-starting containers.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+Inspect first:
+
+```bash
+kubectl describe deployment api -n prod
+kubectl get pods -n prod
+kubectl describe pod <api-pod> -n prod
+```
+
+A representative configuration is:
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 2
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+```
+
+Verify with:
+
+```bash
+kubectl rollout status deployment/api -n prod
+kubectl get pods -n prod
+kubectl get endpointslice -l kubernetes.io/service-name=api -n prod
+```
+
+</details>
+
+---
+
 ## 5.5 CLI Monitoring Tools 🟡 SHOULD KNOW
+
+```bash
+kubectl top pods
+kubectl top pods --containers
+kubectl top nodes
+kubectl get pods -o wide
+kubectl get pods --sort-by=.status.startTime
+kubectl get pods -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
+kubectl get events --sort-by=.lastTimestamp
+kubectl get events -n dev --field-selector involvedObject.name=mypod
+```
+
+🟢 `kubectl top` requires a working resource-metrics API (commonly metrics-server). If metrics are unavailable, diagnose that explicitly rather than inventing usage values.
+
+> **🌍 Real-world example.** During a traffic spike, an on-call engineer needs to know *right now* whether the API Deployment is CPU-bound or memory-bound before deciding whether to scale replicas or investigate a leak. `kubectl top pods --containers` gives that answer in seconds, live, without needing a Grafana dashboard to be open or a metrics pipeline to be correctly wired up for that specific namespace. This is exactly why CKAD tests the CLI versions of these tools rather than assuming a monitoring stack: in a fresh cluster, or one where observability tooling isn't fully set up yet, `kubectl top` and sorted `get events` are often the only signal available.
 
 ---
 
@@ -580,22 +601,27 @@ kubectl get apiservice | grep metrics
 
 </details>
 
-```bash
-kubectl top pods
-kubectl top pods --containers
-kubectl top nodes
-kubectl get pods -o wide
-kubectl get pods --sort-by=.status.startTime
-kubectl get pods -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
-kubectl get events --sort-by=.lastTimestamp
-kubectl get events -n dev --field-selector involvedObject.name=mypod
-```
-
-🟢 `kubectl top` requires a working resource-metrics API (commonly metrics-server). If metrics are unavailable, diagnose that explicitly rather than inventing usage values.
-
 ---
 
 ## 5.6 API Deprecations 🟡 SHOULD KNOW
+
+**What it is.** Kubernetes periodically removes old API versions of a resource after a deprecation window; manifests using a removed `apiVersion` are rejected outright.
+
+**Why CKAD tests it.** OM-01 — recognizing and migrating a deprecated `apiVersion` is a realistic, common real-world maintenance task.
+
+```bash
+kubectl api-resources                                  # current available kinds/versions
+kubectl api-versions
+kubectl explain deployment                              # shows the current recommended apiVersion
+kubectl apply -f old-manifest.yaml --dry-run=server     # server will reject/warn on removed APIs
+kubectl convert -f old.yaml --output-version apps/v1    # optional plugin; use only if installed
+```
+
+Common historical migrations worth recognizing on sight: `extensions/v1beta1` -> `apps/v1` (Deployments, DaemonSets), `policy/v1beta1` -> `policy/v1` (PodDisruptionBudget), `batch/v1beta1` -> `batch/v1` (CronJob), `networking.k8s.io/v1beta1` -> `networking.k8s.io/v1` (Ingress).
+
+🟡 **Exam tip:** if applying a manifest fails with an error naming an unrecognized `apiVersion` or `kind`, that's the whole task — fix the `apiVersion` string to the current one and re-apply; nothing else in the spec usually needs to change.
+
+> **🌍 Real-world example.** Teams that pin a Kubernetes cluster's minor version for stability (common in regulated environments that only upgrade twice a year after a change-control review) periodically get an unpleasant surprise when they finally upgrade several versions at once: manifests that had been working unchanged for two years suddenly fail outright because an `apiVersion` used since a very old tutorial (`extensions/v1beta1` Deployments, for instance) was removed entirely, not just deprecated. The exam tests the same muscle real platform teams need before any cluster upgrade: run `kubectl apply --dry-run=server` against every manifest in the repo ahead of time and fix deprecated API versions proactively, rather than discovering them mid-outage during the actual upgrade window.
 
 ---
 
@@ -640,29 +666,29 @@ kubectl apply -f manifest.yaml
 
 </details>
 
-**What it is.** Kubernetes periodically removes old API versions of a resource after a deprecation window; manifests using a removed `apiVersion` are rejected outright.
-
-**Why CKAD tests it.** OM-01 — recognizing and migrating a deprecated `apiVersion` is a realistic, common real-world maintenance task.
-
-```bash
-kubectl api-resources                                  # current available kinds/versions
-kubectl api-versions
-kubectl explain deployment                              # shows the current recommended apiVersion
-kubectl apply -f old-manifest.yaml --dry-run=server     # server will reject/warn on removed APIs
-kubectl convert -f old.yaml --output-version apps/v1    # optional plugin; use only if installed
-```
-
-Common historical migrations worth recognizing on sight: `extensions/v1beta1` -> `apps/v1` (Deployments, DaemonSets), `policy/v1beta1` -> `policy/v1` (PodDisruptionBudget), `batch/v1beta1` -> `batch/v1` (CronJob), `networking.k8s.io/v1beta1` -> `networking.k8s.io/v1` (Ingress).
-
-🟡 **Exam tip:** if applying a manifest fails with an error naming an unrecognized `apiVersion` or `kind`, that's the whole task — fix the `apiVersion` string to the current one and re-apply; nothing else in the spec usually needs to change.
-
-> **🌍 Real-world example.** Teams that pin a Kubernetes cluster's minor version for stability (common in regulated environments that only upgrade twice a year after a change-control review) periodically get an unpleasant surprise when they finally upgrade several versions at once: manifests that had been working unchanged for two years suddenly fail outright because an `apiVersion` used since a very old tutorial (`extensions/v1beta1` Deployments, for instance) was removed entirely, not just deprecated. The exam tests the same muscle real platform teams need before any cluster upgrade: run `kubectl apply --dry-run=server` against every manifest in the repo ahead of time and fix deprecated API versions proactively, rather than discovering them mid-outage during the actual upgrade window.
-
 ---
 
-> **Immutability reminder:** Many Pod-level fields cannot be changed in place after creation. For Pods managed by a Deployment/StatefulSet/Job, update the controller template instead. Recreate the Pod when necessary; treat `kubectl replace --force` as a last-resort destructive operation, not the normal fix.
-
 ## 5.7 Node Maintenance — Cordon and Drain 🟢 NICE TO KNOW
+
+**Important drain behavior:** `kubectl drain` will stop if it encounters standalone/unmanaged Pods unless you explicitly add `--force`. Read the error first; `--force` is an intentional exception, not a default flag.
+
+**What it is.** `cordon` marks a node unschedulable (existing Pods keep running); `drain` additionally evicts existing Pods so the node can be safely taken down.
+
+**Why CKAD tests it.** Listed under OM-05 debugging awareness — you may need to recognize *why* Pods rescheduled, even though performing cluster maintenance itself is more of a CKA task.
+
+```bash
+kubectl cordon <node-name>
+kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
+kubectl uncordon <node-name>
+```
+
+**Verify:**
+```bash
+kubectl get nodes                          # SCHEDULING DISABLED next to cordoned node
+kubectl get pods -o wide                   # confirm Pods moved off the drained node
+```
+
+> **🌍 Real-world example.** Before applying a security patch to a node's operating system, or right before that node is scheduled for decommission by a cloud provider, an SRE cordons it (stopping any *new* Pods from landing there) and then drains it (gracefully evicting every existing Pod, respecting PodDisruptionBudgets so a rolling drain doesn't take an entire Deployment down at once). The Pods reschedule onto other nodes automatically because the Deployment/StatefulSet controllers behind them are continuously reconciling toward their desired replica count — the exact same reconciliation loop discussed in Chapter 2.2. As an application developer you rarely run `drain` yourself, but recognizing "my Pod moved nodes and I didn't touch it" as a routine maintenance event — not a mystery — is the OM-05 competency being tested here.
 
 ---
 
@@ -705,25 +731,7 @@ kubectl get nodes
 
 </details>
 
-**Important drain behavior:** `kubectl drain` will stop if it encounters standalone/unmanaged Pods unless you explicitly add `--force`. Read the error first; `--force` is an intentional exception, not a default flag.
-
-**What it is.** `cordon` marks a node unschedulable (existing Pods keep running); `drain` additionally evicts existing Pods so the node can be safely taken down.
-
-**Why CKAD tests it.** Listed under OM-05 debugging awareness — you may need to recognize *why* Pods rescheduled, even though performing cluster maintenance itself is more of a CKA task.
-
-```bash
-kubectl cordon <node-name>
-kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data
-kubectl uncordon <node-name>
-```
-
-**Verify:**
-```bash
-kubectl get nodes                          # SCHEDULING DISABLED next to cordoned node
-kubectl get pods -o wide                   # confirm Pods moved off the drained node
-```
-
-> **🌍 Real-world example.** Before applying a security patch to a node's operating system, or right before that node is scheduled for decommission by a cloud provider, an SRE cordons it (stopping any *new* Pods from landing there) and then drains it (gracefully evicting every existing Pod, respecting PodDisruptionBudgets so a rolling drain doesn't take an entire Deployment down at once). The Pods reschedule onto other nodes automatically because the Deployment/StatefulSet controllers behind them are continuously reconciling toward their desired replica count — the exact same reconciliation loop discussed in Chapter 2.2. As an application developer you rarely run `drain` yourself, but recognizing "my Pod moved nodes and I didn't touch it" as a routine maintenance event — not a mystery — is the OM-05 competency being tested here.
+---
 
 **Exam Tips — Chapter 5**
 - Always run `describe` before `logs` — Events often name the exact problem (bad image, unschedulable, failed mount) before you'd ever see it in application logs.

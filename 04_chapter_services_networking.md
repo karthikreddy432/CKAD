@@ -303,6 +303,8 @@ curl -H "Host: shop.example.com" http://<ingress-controller-ip>/
 
 > **🌍 Real-world example.**A SaaS company runs ` app.example.com ` (frontend), ` api.example.com ` (backend API), and ` docs.example.com ` (documentation site) — three entirely separate Deployments and Services — behind one single cloud load balancer, routed purely by an Ingress's host-based rules. Without Ingress, exposing three services externally the naive way (three `LoadBalancer`-type Services) would mean provisioning and paying for three separate cloud load balancers, each needing its own TLS certificate management. This cost and operational consolidation — one external IP and one certificate story for an arbitrary number of internal services — is the actual business reason Ingress exists and is tested so heavily.
 
+> **📚 Theory.** An Ingress object, by itself, does nothing — it's a declarative routing spec sitting in etcd. All the actual work (opening a listener, terminating TLS, proxying to the right Service) is done by whatever Ingress Controller is running in the cluster (nginx, Traefik, cloud-provider-specific, etc.), which watches Ingress objects the same way a Deployment's controller watches Deployment objects and reconfigures its own proxy to match. This is exactly why `kubectl apply -f ingress.yaml` succeeding tells you nothing about whether routing actually works: the object was accepted by the API server, but no controller may exist to act on it. This is also why `ingressClassName` matters — in a cluster running multiple controllers, it's the field that says which one should claim this particular Ingress object.
+
 ---
 
 ## 🧪 Practice — Route Two Paths Through One Ingress
@@ -383,9 +385,6 @@ kubectl describe ingress shop-ingress -n web
 If the environment uses a different installed IngressClass, use that class instead of ` nginx `.
 
 </details>
-
-
-> **DNS egress trap:** With a default-deny egress policy, Pods may also need an explicit egress rule permitting DNS queries to the cluster DNS service (typically UDP/TCP 53 in `kube-system`, depending on the cluster DNS setup). Check the actual CoreDNS Service/Endpoints in the cluster rather than hard-coding a namespace/IP assumption.
 
 ## 4.3 NetworkPolicies 🔴 MUST KNOW
 
@@ -477,7 +476,7 @@ spec:
       port: 5432
 ```
 
-> **Note:**`namespaceSelector: {}` allows UDP/53 to Pods in any namespace. It is a simple CKAD pattern, not a strict 'only CoreDNS' rule. A production policy can narrow the DNS destination using the cluster's CoreDNS namespace/Pod labels.
+> **Note:**`namespaceSelector: {}` allows UDP/53 to Pods in any namespace. It is a simple CKAD pattern, not a strict 'only CoreDNS' rule. A production policy can narrow the DNS destination using the cluster's CoreDNS namespace/Pod labels — check the actual CoreDNS Service/Endpoints in the cluster (`kubectl get svc,ep -n kube-system -l k8s-app=kube-dns`) rather than hard-coding a namespace/IP assumption, since some clusters run DNS outside `kube-system` or under a different label.
 
 **Verify:**
 
@@ -499,62 +498,11 @@ kubectl exec other-pod -- curl -sS -m3 api:8080        # test blocked path (shou
 
 🔴 **CKAD-style pattern — memorize this order of operations:**(1) ` podSelector: {}` + ` policyTypes: [Ingress]` with no ` ingress:` block = deny all ingress to every Pod in the namespace. (2) Layer specific ` NetworkPolicy ` objects with narrow ` podSelector ` s to re-allow exactly the traffic that should be permitted. NetworkPolicies are additive — multiple policies selecting the same Pod combine with OR logic, they never subtract from each other.
 
-### 4.3B NetworkPolicy Cross-Namespace Scoping — Critical Detail
+> **🌍 Real-world example.** A fintech company's payments namespace runs a database Pod that should only ever be reachable from the one payment-processing service that needs it — not from a marketing dashboard, a logging sidecar experiment, or any other Pod someone happens to spin up in the same namespace later. Without NetworkPolicy, all of those have equal network access to the database by default. The team's actual policy is exactly the two-object pattern above: a namespace-wide `default-deny-ingress`, plus one narrowly-scoped allow rule naming the specific payment-processor label and port. Critically, this means a brand-new, unrelated Pod added to the namespace six months later is *automatically* denied by default — nobody has to remember to update a policy every time the namespace grows, which is the opposite of how a traditional allow-list firewall rule usually degrades over time.
 
-**Critical insight: NetworkPolicies are namespace-scoped, but Pods talk across namespaces by default.**
+> **📚 Theory.** NetworkPolicy objects don't "do" anything themselves — like Ingress, they're a spec that the cluster's CNI plugin reads and translates into actual packet-filtering rules (iptables, eBPF, or similar, depending on the plugin). This is why the very first troubleshooting question for "my deny policy isn't working" is never about the YAML — it's whether the installed CNI enforces NetworkPolicy at all; some don't. It also explains the OR-only combination rule: each policy independently tells the CNI plugin "also allow this," so the CNI is simply unioning every applicable allow rule for a given Pod — there's no mechanism for one policy to subtract permission granted by another, because each is evaluated as its own independent addition to what's permitted.
 
-A NetworkPolicy in namespace A does * not * affect Pods in namespace B. This is a common exam trap:
-
-**Wrong understanding:**
-
-> "A NetworkPolicy in namespace A automatically controls traffic to or from Pods in namespace B."
-
-That is false. A NetworkPolicy is namespace-scoped and its `podSelector` selects only Pods in the policy's own namespace. Cross-namespace rules become possible by selecting the peer namespace with `namespaceSelector` and, when needed, selecting peer Pods with `podSelector`.
-
-**Key mental model:**
-
-```text
-Policy namespace
-      ↓
-podSelector → selects destination Pods in that namespace
-
-namespaceSelector → selects peer namespace(s)
-podSelector       → selects peer Pod(s) when combined with a namespaceSelector
-```
-
-When `namespaceSelector` and `podSelector` appear in the **same `from` or `to` item**, they are ANDed:
-
-```yaml
-from:
-- namespaceSelector:
-    matchLabels:
-      name: app
-  podSelector:
-    matchLabels:
-      app: frontend
-```
-
-This means:
-
-> Pods labeled `app=frontend` AND located in a namespace labeled `name=app`.
-
-When they are separate list items, the entries are alternatives (OR):
-
-```yaml
-from:
-- namespaceSelector:
-    matchLabels:
-      name: app
-- podSelector:
-    matchLabels:
-      app: frontend
-```
-
-This means:
-
-> Pods from namespace `app` OR matching `app=frontend` in the policy namespace.
-
-This distinction is a high-value NetworkPolicy detail to practice.
+---
 
 ## 🧪 Practice — Default Deny, Then Allow Only Frontend → Backend
 
@@ -634,84 +582,62 @@ Apply both and test from a frontend Pod and an unrelated Pod.
 
 </details>
 
-## 🧪 Practice — Allow One Cross-Namespace Database Connection
+### 4.3B NetworkPolicy Cross-Namespace Scoping — Critical Detail
 
-### Task
+**Critical insight: NetworkPolicies are namespace-scoped, but Pods talk across namespaces by default.**
 
-Namespace ` app ` contains ` app=frontend ` Pods. Namespace ` data ` contains ` app=db ` Pods listening on TCP ` 5432 `.
+A NetworkPolicy in namespace A does * not * affect Pods in namespace B. This is a common exam trap:
 
-Configure NetworkPolicy so only frontend Pods in namespace ` app ` can reach database Pods in namespace ` data ` on TCP ` 5432 `. Other namespaces must not be allowed by this rule.
+**Wrong understanding:**
 
-### Requirements
+> "A NetworkPolicy in namespace A automatically controls traffic to or from Pods in namespace B."
 
-- Source namespace: ` app `.
-- Destination namespace: ` data `.
-- Source Pods: ` app=frontend `.
-- Destination Pods: ` app=db `.
-- Database port: TCP ` 5432 `.
-- Ensure namespace ` app ` has label ` name=app ` if needed.
-- The policy protecting the database is created in namespace ` data `.
-- Use both ` namespaceSelector ` and ` podSelector ` in the same ` from ` item.
+That is false. A NetworkPolicy is namespace-scoped and its `podSelector` selects only Pods in the policy's own namespace. Cross-namespace rules become possible by selecting the peer namespace with `namespaceSelector` and, when needed, selecting peer Pods with `podSelector`.
 
-### Success Criteria
+**Key mental model:**
 
-Frontend Pods in ` app ` can reach database Pods in ` data:5432 `; a frontend-labeled Pod in another namespace cannot use this policy to reach the database.
+```text
+Policy namespace
+      ↓
+podSelector → selects destination Pods in that namespace
 
-### Suggested Time
-
-**10 minutes**
-
-<details>
-<summary>💡 Hint</summary>
-
-Put the policy in namespace ` data `. In one ` from ` item, ` namespaceSelector ` and ` podSelector ` are ANDed; separate list items would create OR behavior.
-
-</details>
-
-<details>
-<summary>✅ Solution</summary>
-
-Label the source namespace:
-
-```bash
-kubectl label namespace app name=app --overwrite
+namespaceSelector → selects peer namespace(s)
+podSelector       → selects peer Pod(s) when combined with a namespaceSelector
 ```
 
-Create the policy in ` data `:
+When `namespaceSelector` and `podSelector` appear in the **same `from` or `to` item**, they are ANDed:
 
 ```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-app-frontend-to-db
-  namespace: data
-spec:
+from:
+- namespaceSelector:
+    matchLabels:
+      name: app
   podSelector:
     matchLabels:
-      app: db
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: app
-      podSelector:
-        matchLabels:
-          app: frontend
-    ports:
-    - protocol: TCP
-      port: 5432
+      app: frontend
 ```
 
-Verify:
+This means:
 
-```bash
-kubectl describe networkpolicy allow-app-frontend-to-db -n data
-kubectl get ns app --show-labels
+> Pods labeled `app=frontend` AND located in a namespace labeled `name=app`.
+
+When they are separate list items, the entries are alternatives (OR):
+
+```yaml
+from:
+- namespaceSelector:
+    matchLabels:
+      name: app
+- podSelector:
+    matchLabels:
+      app: frontend
 ```
 
-</details>
+This means:
+
+> Pods from namespace `app` OR matching `app=frontend` in the policy namespace.
+
+This distinction is a high-value NetworkPolicy detail to practice.
 
 **Written in namespace A:**
 
@@ -815,6 +741,85 @@ kubectl label namespace b name=b
 > **🌍 Real-world example.**A multi-tenant cluster has ` tenant-a ` and ` tenant-b ` namespaces running in the same cluster. Without NetworkPolicy, tenant-b's Pods can query tenant-a's database — a security disaster. The platform team writes NetworkPolicies in both namespaces: ` tenant-a ` denies ingress from ` tenant-b ` (or explicitly allows only internal traffic), and ` tenant-b ` denies egress to ` tenant-a `'s CIDR. Even if one is misconfigured, the other catches it. This defense-in-depth (deny at both boundaries) is the real-world standard.
 
 > **📚 Theory.**By default Kubernetes networking is a flat, fully-open mesh — every Pod can reach every other Pod's IP directly, cluster-wide, regardless of namespace. This is a deliberate simplicity choice (it makes basic networking "just work" without configuration), but it means production clusters running multiple teams' workloads need NetworkPolicy to reconstruct the network segmentation that a traditional multi-VLAN data center would have had by default. The "default allow, must opt into deny" starting point is why the "default-deny-ingress" pattern is a common first hardening step. For cross-namespace traffic, reason about both source and destination boundaries when the requirement explicitly constrains both.
+
+## 🧪 Practice — Allow One Cross-Namespace Database Connection
+
+### Task
+
+Namespace ` app ` contains ` app=frontend ` Pods. Namespace ` data ` contains ` app=db ` Pods listening on TCP ` 5432 `.
+
+Configure NetworkPolicy so only frontend Pods in namespace ` app ` can reach database Pods in namespace ` data ` on TCP ` 5432 `. Other namespaces must not be allowed by this rule.
+
+### Requirements
+
+- Source namespace: ` app `.
+- Destination namespace: ` data `.
+- Source Pods: ` app=frontend `.
+- Destination Pods: ` app=db `.
+- Database port: TCP ` 5432 `.
+- Ensure namespace ` app ` has label ` name=app ` if needed.
+- The policy protecting the database is created in namespace ` data `.
+- Use both ` namespaceSelector ` and ` podSelector ` in the same ` from ` item.
+
+### Success Criteria
+
+Frontend Pods in ` app ` can reach database Pods in ` data:5432 `; a frontend-labeled Pod in another namespace cannot use this policy to reach the database.
+
+### Suggested Time
+
+**10 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+Put the policy in namespace ` data `. In one ` from ` item, ` namespaceSelector ` and ` podSelector ` are ANDed; separate list items would create OR behavior.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+Label the source namespace:
+
+```bash
+kubectl label namespace app name=app --overwrite
+```
+
+Create the policy in ` data `:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-frontend-to-db
+  namespace: data
+spec:
+  podSelector:
+    matchLabels:
+      app: db
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: app
+      podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - protocol: TCP
+      port: 5432
+```
+
+Verify:
+
+```bash
+kubectl describe networkpolicy allow-app-frontend-to-db -n data
+kubectl get ns app --show-labels
+```
+
+</details>
 
 **Exam Tips — Chapter 4**
 

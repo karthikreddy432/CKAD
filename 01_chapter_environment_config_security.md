@@ -333,9 +333,19 @@ kubectl exec mypod -- env | grep DB_PASSWORD
 
 | Problem | Likely cause | Fix |
 |---|---|---|
-| `ImagePullBackOff` from a private registry | Image pull failed; credentials are one possible cause | Inspect Pod Events to distinguish credentials, image/tag, registry, network/TLS, or rate-limit problems | Fix the specific cause; use `imagePullSecrets` when Pod-supplied registry credentials are required |
+| `ImagePullBackOff` from a private registry | Image pull failed; credentials are one possible cause among several | Inspect Pod Events (`kubectl describe pod`) to distinguish credentials, image/tag, registry, network/TLS, or rate-limit issues, then fix that specific cause — use `imagePullSecrets` when the Pod itself must supply registry credentials |
 | `CreateContainerConfigError` | Secret or key doesn't exist | `kubectl describe pod`, check exact key names |
 | Base64 confusion | Wrote raw text under `data:` instead of encoding it | Use `stringData:` for plain text — Kubernetes encodes it for you |
+
+**Secret types — what `type` actually controls:** the commands above create three different `type` values, and the exam expects you to recognize which one a task calls for rather than defaulting to `generic`/`Opaque` for everything.
+
+| `type` value | Created by | What it's for |
+|---|---|---|
+| `Opaque` | `kubectl create secret generic` | Arbitrary key/value data — the default for app credentials, tokens, config |
+| `kubernetes.io/tls` | `kubectl create secret tls` | A TLS cert/key pair; requires exactly the keys `tls.crt` and `tls.key` — used by Ingress resources for HTTPS |
+| `kubernetes.io/dockerconfigjson` | `kubectl create secret docker-registry` | Registry credentials in the exact JSON shape the kubelet expects when pulling a private image via `imagePullSecrets` |
+
+🟡 **Exam tip:** if a task says "create a Secret for pulling images from a private registry" or "create a Secret for an Ingress's TLS certificate," use the matching typed command (`docker-registry` or `tls`) rather than `generic` — the typed commands validate the required keys and set the correct `type` for you.
 
 🟡 **`stringData` shortcut** — skip manual base64 entirely:
 ```yaml
@@ -351,14 +361,7 @@ stringData:
 
 > **📚 Theory.** By default, Secret data is stored in etcd as base64 — readable by anyone with etcd access or sufficient RBAC to `get` the Secret object. Real confidentiality requires layering on: encryption at rest for etcd (a cluster-admin concern, not developer-facing on the exam), RBAC restricting who can read Secret objects (Ch. 1.6), and often an external secrets backend. Understanding that "Secret" describes an API *shape*, not a security *guarantee*, is what separates surface-level and production-grade Kubernetes knowledge.
 
-**Secret update behavior — same as ConfigMaps:**
-
-| Consumption Method | Behavior After Secret Data Changes |
-|---|---|
-| `env.valueFrom.secretKeyRef` | Existing container environment does NOT change; restart/recreate the Pod to receive the new value |
-| `envFrom.secretRef` | Existing container environment does NOT change; restart/recreate the Pod to receive the new value |
-| Secret volume mount (normal) | Mounted files can update automatically after kubelet sync delay; no restart required |
-| Secret volume via `subPath` | Updates do NOT propagate into the mounted file; restart required to see changes |
+**Secret update behavior:** identical mechanics to ConfigMaps (see 1.1's table) — env-var consumption needs a restart, normal volume mounts sync after the kubelet delay, `subPath` mounts never update. The one Secret-specific wrinkle: because credentials often gate authentication, an app that silently keeps using a stale in-memory password after a rotation can fail *intermittently* rather than obviously — if a task involves a credential rotation, restarting the consuming Pods is usually part of the expected fix, not an optional cleanup step.
 
 ---
 
@@ -606,10 +609,7 @@ kubectl exec -n checkout identity-demo -- printenv MY_POD_NAME MY_NAMESPACE MY_P
 
 ## 1.4 Resource Requests, Limits, and Quotas 🔴 MUST KNOW
 
-In addition to CPU and memory, Pods can request/limit `ephemeral-storage` when a workload needs explicit local ephemeral-storage accounting.
-
-
-**What it is.** `requests` tell the scheduler how much CPU/memory a container needs to be placed on a node; `limits` cap what it can consume. `LimitRange` sets defaults/bounds per container in a namespace; `ResourceQuota` caps the total consumption across a namespace.
+**What it is.** `requests` tell the scheduler how much CPU/memory a container needs to be placed on a node; `limits` cap what it can consume. The same `requests`/`limits` fields also accept `ephemeral-storage` when a workload needs explicit accounting for its local scratch disk usage, not just CPU/memory. `LimitRange` sets defaults/bounds per container in a namespace; `ResourceQuota` caps the total consumption across a namespace.
 
 **Why CKAD tests it.** Application developers are expected to right-size their own workloads and understand namespace-level guardrails set by platform teams.
 
@@ -619,116 +619,6 @@ In addition to CPU and memory, Pods can request/limit `ephemeral-storage` when a
 ```bash
 kubectl run web --image=nginx --dry-run=client -o yaml > pod.yaml
 ```
-
-## 🧪 Practice — Requests, Limits, LimitRange, and Quota
-
-### Task
-
-Create namespace `resource-demo`.
-
-In that namespace:
-
-1. Create a LimitRange named `container-defaults` that sets a default memory limit of `256Mi` for containers that do not specify one.
-2. Create a ResourceQuota named `team-quota` that allows a maximum of `2` Pods.
-3. Create a Pod named `worker` using `busybox:1.36` with command `sleep 3600`.
-4. Set the Pod's container memory request to `64Mi` and memory limit to `128Mi`.
-5. Create a second Pod named `worker-2` with the same resource settings.
-6. Attempt to create a third Pod named `worker-3` with the same resource settings and investigate the result.
-
-### Requirements
-
-- Namespace: `resource-demo`
-- LimitRange: `container-defaults`
-- Default memory limit: `256Mi`
-- ResourceQuota: `team-quota`
-- Maximum Pods: `2`
-- Pod memory request: `64Mi`
-- Pod memory limit: `128Mi`
-- Image: `busybox:1.36`
-- Command: `sleep 3600`
-
-### Success Criteria
-
-- `worker` and `worker-2` are running.
-- The namespace reports a Pod quota of `2`.
-- `worker-3` is rejected because the Pod quota is exhausted.
-- The existing Pods have the requested `64Mi` / `128Mi` values.
-
-### Suggested Time
-
-**10 minutes**
-
-<details>
-<summary>💡 Hint</summary>
-
-LimitRange and ResourceQuota are independent controls. Inspect the quota after creating the first two Pods and read the API error when the third is rejected.
-
-</details>
-
-<details>
-<summary>✅ Solution</summary>
-
-```bash
-kubectl create namespace resource-demo
-
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: LimitRange
-metadata:
-  name: container-defaults
-  namespace: resource-demo
-spec:
-  limits:
-  - type: Container
-    default:
-      memory: 256Mi
-EOF
-
-kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: team-quota
-  namespace: resource-demo
-spec:
-  hard:
-    pods: "2"
-EOF
-```
-
-Create the Pods:
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: worker
-  namespace: resource-demo
-spec:
-  containers:
-  - name: worker
-    image: busybox:1.36
-    command: ["sleep", "3600"]
-    resources:
-      requests:
-        memory: 64Mi
-      limits:
-        memory: 128Mi
-```
-
-Create `worker-2` with the same specification and change only the name to `worker-2`.
-
-Then attempt `worker-3` with the same specification. The API server should reject it because the quota allows only two Pods.
-
-Verify:
-
-```bash
-kubectl get pods -n resource-demo
-kubectl describe resourcequota team-quota -n resource-demo
-kubectl get pod worker -n resource-demo -o jsonpath='{.spec.containers[0].resources}'
-```
-
-</details>
 
 **Then add to the generated `pod.yaml`:**
 ```yaml
@@ -932,6 +822,118 @@ kubectl describe resourcequota dev-quota -n dev | grep -A 10 "Resource"
 
 ---
 
+## 🧪 Practice — Requests, Limits, LimitRange, and Quota
+
+### Task
+
+Create namespace `resource-demo`.
+
+In that namespace:
+
+1. Create a LimitRange named `container-defaults` that sets a default memory limit of `256Mi` for containers that do not specify one.
+2. Create a ResourceQuota named `team-quota` that allows a maximum of `2` Pods.
+3. Create a Pod named `worker` using `busybox:1.36` with command `sleep 3600`.
+4. Set the Pod's container memory request to `64Mi` and memory limit to `128Mi`.
+5. Create a second Pod named `worker-2` with the same resource settings.
+6. Attempt to create a third Pod named `worker-3` with the same resource settings and investigate the result.
+
+### Requirements
+
+- Namespace: `resource-demo`
+- LimitRange: `container-defaults`
+- Default memory limit: `256Mi`
+- ResourceQuota: `team-quota`
+- Maximum Pods: `2`
+- Pod memory request: `64Mi`
+- Pod memory limit: `128Mi`
+- Image: `busybox:1.36`
+- Command: `sleep 3600`
+
+### Success Criteria
+
+- `worker` and `worker-2` are running.
+- The namespace reports a Pod quota of `2`.
+- `worker-3` is rejected because the Pod quota is exhausted.
+- The existing Pods have the requested `64Mi` / `128Mi` values.
+
+### Suggested Time
+
+**10 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+LimitRange and ResourceQuota are independent controls. Inspect the quota after creating the first two Pods and read the API error when the third is rejected.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create namespace resource-demo
+
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-defaults
+  namespace: resource-demo
+spec:
+  limits:
+  - type: Container
+    default:
+      memory: 256Mi
+EOF
+
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: resource-demo
+spec:
+  hard:
+    pods: "2"
+EOF
+```
+
+Create the Pods:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker
+  namespace: resource-demo
+spec:
+  containers:
+  - name: worker
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    resources:
+      requests:
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+```
+
+Create `worker-2` with the same specification and change only the name to `worker-2`.
+
+Then attempt `worker-3` with the same specification. The API server should reject it because the quota allows only two Pods.
+
+Verify:
+
+```bash
+kubectl get pods -n resource-demo
+kubectl describe resourcequota team-quota -n resource-demo
+kubectl get pod worker -n resource-demo -o jsonpath='{.spec.containers[0].resources}'
+```
+
+</details>
+
+---
+
 ## 1.5 ServiceAccounts 🔴 MUST KNOW
 
 > **Modern token behavior:** Since Kubernetes 1.24, creating a ServiceAccount does not automatically create a long-lived token Secret. Pods normally receive short-lived projected ServiceAccount tokens. Only create a long-lived `kubernetes.io/service-account-token` Secret when a task explicitly requires a persisted token; prefer the TokenRequest mechanism otherwise.
@@ -963,13 +965,21 @@ spec:
     image: nginx
 ```
 
+**Attaching image-pull credentials to a ServiceAccount instead of every Pod:** a `docker-registry` Secret (1.2) can be attached once to a ServiceAccount, and every Pod that uses that ServiceAccount inherits it automatically — no need to repeat `imagePullSecrets` on each Pod spec individually.
+
+```bash
+kubectl patch serviceaccount app-sa \
+  -p '{"imagePullSecrets": [{"name": "regcred"}]}'
+```
+
+🟡 **Exam tip:** if a task says "every Pod in this namespace should be able to pull from the private registry without modifying each Pod," attach the pull Secret to the namespace's default ServiceAccount rather than editing individual Pod specs.
+
 **Verify:**
 ```bash
 kubectl get pod web -o jsonpath='{.spec.serviceAccountName}'
 # automountServiceAccountToken:false means the API token is intentionally absent
 kubectl exec web -- sh -c 'test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token'
 ```
-
 
 **Troubleshoot:**
 
@@ -1195,6 +1205,97 @@ rules:
 ```
 
 > **🌍 Real-world example.** A platform team grants developers permission to debug via logs but *not* via exec, to maintain audit trails and security boundaries. A Kubernetes controller that only needs to inspect Pod status doesn't get create/update verbs — it reads status only. A CI/CD system gets narrowly scoped to create Deployments and Jobs in the `ci-namespace` only, not the whole cluster. Each permission boundary in production maps directly to a CKAD exam constraint: "grant this identity only what it needs."
+
+---
+
+## 🧪 Practice — Logs Yes, Exec No
+
+### Task
+
+In namespace `rbac-demo`, create a ServiceAccount named `log-viewer`.
+
+Create a Role named `log-reader` that permits `get` on the `pods/log` subresource only. Bind it to `log-viewer` with a RoleBinding.
+
+Verify that `log-viewer` can read Pod logs but cannot exec into Pods, and cannot even `get` plain Pods.
+
+### Requirements
+
+- Namespace: `rbac-demo`
+- ServiceAccount: `log-viewer`
+- Role: `log-reader`
+- Resource: `pods/log` only — not `pods`, not `pods/exec`
+- Allowed verb: `get`
+- Use a Role and RoleBinding, not cluster-scoped equivalents.
+
+### Success Criteria
+
+These checks must produce:
+
+- `get pods/log`: allowed
+- `create pods/exec`: denied
+- `get pods`: denied
+
+### Suggested Time
+
+**6 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+`pods/log` and `pods/exec` are separate resource strings from `pods` itself — granting one grants none of the others. `kubectl auth can-i` accepts a subresource with `--subresource=log` or the combined `pods/log` form depending on your kubectl version; either way, checking plain `pods` access requires its own separate rule.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create namespace rbac-demo
+kubectl create serviceaccount log-viewer -n rbac-demo
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: log-reader
+  namespace: rbac-demo
+rules:
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: log-reader-binding
+  namespace: rbac-demo
+subjects:
+- kind: ServiceAccount
+  name: log-viewer
+  namespace: rbac-demo
+roleRef:
+  kind: Role
+  name: log-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Verify the three-way distinction:
+
+```bash
+kubectl auth can-i get pods/log \
+  --as=system:serviceaccount:rbac-demo:log-viewer -n rbac-demo
+
+kubectl auth can-i create pods/exec \
+  --as=system:serviceaccount:rbac-demo:log-viewer -n rbac-demo
+
+kubectl auth can-i get pods \
+  --as=system:serviceaccount:rbac-demo:log-viewer -n rbac-demo
+```
+
+Expected results: `yes`, `no`, `no`. The third check is the one people get wrong — permission on `pods/log` says nothing about `pods` itself, they're entirely separate resource strings to RBAC even though they sound related.
+
+</details>
 
 ---
 
@@ -1643,7 +1744,7 @@ If the cluster has no suitable CRD installed, this exercise is discovery-only an
 | Secrets (1.2) | Same mechanics as ConfigMaps, base64-*encoded* not encrypted — use `stringData` to skip manual encoding |
 | Downward API (1.3) | Free, RBAC-free access to a Pod's own metadata — no API calls needed |
 | Requests/Limits/Quotas (1.4) | Requests = scheduling promise; limits = hard ceiling; CPU throttles, memory OOM-kills |
-| ServiceAccounts (1.5) | Every Pod uses a ServiceAccount; choose the identity intentionally and disable token automount when Kubernetes API access is unnecessary |
+| ServiceAccounts (1.5) | Every Pod uses a ServiceAccount; choose the identity intentionally, disable token automount when API access is unnecessary, and attach registry pull Secrets at the ServiceAccount level to avoid repeating them per Pod |
 | RBAC/Admission (1.6) | Role/RoleBinding = namespace scope; ClusterRole/ClusterRoleBinding = cluster scope; verify with `kubectl auth can-i` |
 | SecurityContext (1.7) | `runAsNonRoot: true` and `allowPrivilegeEscalation: false` are graded literally — know them by heart |
 | Pod Security Admission (1.8) | Namespace-level enforcement of the securityContext baseline — a rejection here means fix the Pod, not the namespace |

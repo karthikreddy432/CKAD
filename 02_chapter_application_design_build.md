@@ -84,28 +84,6 @@ docker history myapp:1.0
 
 > **🌍 Real-world example.** A Node.js team once shipped a production image built with a single `FROM node:20` stage that included the full `node_modules` dev dependencies, source maps, and the entire npm cache — a 1.4GB image. Switching to a multi-stage build (compile/install in one stage, copy only the built `dist/` and production `node_modules` into a slim `node:20-slim` final stage) cut the image to 180MB. On a cluster doing frequent rolling deploys across dozens of nodes, that difference is the gap between a 90-second rollout and a 12-second one, because every node has to pull the full image before it can start the container.
 
-### 2.1B Private Registries and imagePullSecrets 🟡 SHOULD KNOW
-
-**What it is.** When a Pod's image is stored in a private registry (requiring authentication), Kubernetes needs credentials to pull it. `imagePullSecrets` provides those credentials.
-
-**Why CKAD tests it.** Real clusters often use private registries for security; hardcoding credentials in YAML is wrong, so you need to know the right pattern.
-
-**The two failure modes:**
-
-| Status | Meaning | Common Causes | Diagnosis |
-|---|---|---|---|
-| `ErrImagePull` | Image-pull attempt failed immediately | Wrong image name/tag, registry unreachable, authentication failed, network/TLS issue, registry rate limiting | `kubectl describe pod` → look at "Events" for specific error message |
-| `ImagePullBackOff` | Kubernetes is backing off and retrying the pull | Same root causes as `ErrImagePull`, but the first attempt didn't immediately reveal the issue | `kubectl describe pod` → check how many retries; wait and check again or fix the root cause |
-
-**Create a Secret for registry credentials:**
-
-```bash
-kubectl create secret docker-registry regcred \
-  --docker-server=registry.example.com \
-  --docker-username=user \
-  --docker-password=pass
-```
-
 ## 🧪 Practice — Build and Inspect a Multi-Stage Image
 
 ### Task
@@ -174,6 +152,81 @@ docker history ckad-go:1.0
 
 </details>
 
+### 2.1B Private Registries and imagePullSecrets 🟡 SHOULD KNOW
+
+**What it is.** When a Pod's image is stored in a private registry (requiring authentication), Kubernetes needs credentials to pull it. `imagePullSecrets` provides those credentials.
+
+**Why CKAD tests it.** Real clusters often use private registries for security; hardcoding credentials in YAML is wrong, so you need to know the right pattern.
+
+**The two failure modes:**
+
+| Status | Meaning | Common Causes | Diagnosis |
+|---|---|---|---|
+| `ErrImagePull` | Image-pull attempt failed immediately | Wrong image name/tag, registry unreachable, authentication failed, network/TLS issue, registry rate limiting | `kubectl describe pod` → look at "Events" for specific error message |
+| `ImagePullBackOff` | Kubernetes is backing off and retrying the pull | Same root causes as `ErrImagePull`, but the first attempt didn't immediately reveal the issue | `kubectl describe pod` → check how many retries; wait and check again or fix the root cause |
+
+**Create a Secret for registry credentials (standard way):**
+
+```bash
+kubectl create secret docker-registry regcred \
+  --docker-server=registry.example.com \
+  --docker-username=user \
+  --docker-password=pass \
+  --docker-email=user@example.com
+
+# Or build the generic form yourself if the registry format is non-standard
+kubectl create secret generic regcred \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson=<path-to-.docker/config.json>
+```
+
+**Use the secret in a Pod:**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: private-app
+spec:
+  imagePullSecrets:
+  - name: regcred           # references the Secret created above
+  containers:
+  - name: app
+    image: registry.example.com/myapp:1.0   # private registry URL
+    imagePullPolicy: Always    # pull on every container start
+```
+
+**Declarative Secret (base64 encoded):**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: regcred
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <base64-encoded Docker config JSON>
+```
+
+**Verify imagePullSecrets:**
+```bash
+kubectl get secret regcred
+kubectl describe secret regcred
+kubectl get pod private-app -o jsonpath='{.spec.imagePullSecrets}'
+```
+
+**Troubleshoot ImagePullBackOff:**
+```bash
+kubectl describe pod private-app | grep -A 10 Events
+# should show the specific error: "authentication required" or "image not found"
+kubectl logs private-app                     # won't work if pull is still failing
+kubectl rollout history deployment/app       # check if image was pulled successfully before
+```
+
+🔴 **Exam tip:** If registry credentials must be supplied through the Pod specification, create an `imagePullSecret` and reference it in the Pod or ServiceAccount. Other registry credential mechanisms may also be configured at the cluster/node level.
+
+> **🌍 Real-world example.** A developer once spent 30 minutes debugging "why does my app work locally but the Kubernetes Pod can't pull the image" — they'd built and run the image locally using `docker login` (credentials stored in `~/.docker/config.json`), then pushed to a private registry. They assumed the Kubernetes cluster could "just" pull it, but the kubelet running on each node has no access to the developer's personal Docker credentials. The fix was simple: create an `imagePullSecret` from a registry token/password and reference it in the Pod. Now the kubelet has explicit credentials for that private registry and can pull the image.
+
+> **📚 Theory.** Kubernetes doesn't have built-in registry credentials — it relies on the kubelet (running on each node) to execute the actual `docker pull` or equivalent. The kubelet has no default access to any developer's `~/.docker/config.json`. When registry credentials are supplied through the Pod specification, the Pod (or its ServiceAccount) references an `imagePullSecret` that contains the registry credentials. This is a security best-practice: credentials are never hardcoded in YAML or Dockerfiles, they're stored in Secrets and referenced by Pods that need them.
+
 ## 🧪 Practice — Configure a Private Image Pull
 
 ### Task
@@ -234,75 +287,11 @@ kubectl describe pod private-app -n registry-demo
 
 </details>
 
-**Create a Docker config secret (standard way):**
-```bash
-kubectl create secret docker-registry myregistry \
-  --docker-server=registry.example.com \
-  --docker-username=myuser \
-  --docker-password=mypassword \
-  --docker-email=user@example.com
-
-# Or create a generic secret if the registry format is non-standard
-kubectl create secret generic myregistry \
-  --type=kubernetes.io/dockerconfigjson \
-  --from-file=.dockerconfigjson=<path-to-.docker/config.json>
-```
-
-**Use the secret in a Pod:**
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: private-app
-spec:
-  imagePullSecrets:
-  - name: myregistry           # references the Secret created above
-  containers:
-  - name: app
-    image: registry.example.com/myapp:1.0   # private registry URL
-    imagePullPolicy: Always    # pull on every container start
-```
-
-**Declarative Secret (base64 encoded):**
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: myregistry
-type: kubernetes.io/dockerconfigjson
-data:
-  .dockerconfigjson: <base64-encoded Docker config JSON>
-```
-
-**Verify imagePullSecrets:**
-```bash
-kubectl get secret myregistry
-kubectl describe secret myregistry
-kubectl get pod private-app -o jsonpath='{.spec.imagePullSecrets}'
-```
-
-**Troubleshoot ImagePullBackOff:**
-```bash
-kubectl describe pod private-app | grep -A 10 Events
-# should show the specific error: "authentication required" or "image not found"
-kubectl logs private-app                     # won't work if pull is still failing
-kubectl rollout history deployment/app       # check if image was pulled successfully before
-```
-
-🔴 **Exam tip:** If registry credentials must be supplied through the Pod specification, create an `imagePullSecret` and reference it in the Pod or ServiceAccount. Other registry credential mechanisms may also be configured at the cluster/node level.
-
-> **🌍 Real-world example.** A developer once spent 30 minutes debugging "why does my app work locally but the Kubernetes Pod can't pull the image" — they'd built and run the image locally using `docker login` (credentials stored in `~/.docker/config.json`), then pushed to a private registry. They assumed the Kubernetes cluster could "just" pull it, but the kubelet running on each node has no access to the developer's personal Docker credentials. The fix was simple: create an `imagePullSecret` from a registry token/password and reference it in the Pod. Now the kubelet has explicit credentials for that private registry and can pull the image.
-
-> **📚 Theory.** Kubernetes doesn't have built-in registry credentials — it relies on the kubelet (running on each node) to execute the actual `docker pull` or equivalent. The kubelet has no default access to any developer's `~/.docker/config.json`. When registry credentials are supplied through the Pod specification, the Pod (or its ServiceAccount) references an `imagePullSecret` that contains the registry credentials. This is a security best-practice: credentials are never hardcoded in YAML or Dockerfiles, they're stored in Secrets and referenced by Pods that need them.
-
 ---
 
 ## 2.2 Choosing the Right Workload Resource 🔴 MUST KNOW
 
 **What it is.** Kubernetes offers several controllers for running Pods; picking the right one for the job is graded directly.
-
-**Storage troubleshooting note:** If a StorageClass uses `volumeBindingMode: WaitForFirstConsumer`, a PVC may remain `Pending` until a Pod that uses it is being scheduled. This is intentional: binding/provisioning is delayed so scheduling constraints can be considered.
-
 
 | Resource | Use when |
 |---|---|
@@ -1289,11 +1278,14 @@ kubectl exec db -- df -h /var/lib/postgresql/data
 | Problem | Likely cause | Diagnostic | Fix |
 |---|---|---|---|
 | PVC stuck `Pending` | No PV matches size/accessMode/storageClass, or no default StorageClass and none specified | `kubectl describe pvc` -> Events | Create a matching PV, or set correct `storageClassName` |
+| PVC stuck `Pending`, but nothing looks wrong | StorageClass uses `volumeBindingMode: WaitForFirstConsumer` | `kubectl describe storageclass <name>` | This is expected — binding is delayed on purpose until a Pod using the PVC is scheduled; the PVC binds once that Pod is created |
 | Pod stuck `Pending`, "unbound PVC" | PVC itself isn't bound yet | `kubectl get pvc`, `kubectl describe pod` | Fix the PVC first |
 | Data lost after Pod restart | Used `emptyDir` for something that needed persistence | n/a | Switch to PVC-backed volume |
 | Multi-Pod write conflict | Used RWO where RWX was needed | `kubectl describe pvc` (accessMode) | Use an RWX-capable StorageClass or redesign as single-writer |
 
 > **🌍 Real-world example.** A media-processing pipeline needed multiple worker Pods to read and write to the *same* directory of uploaded video files simultaneously — a classic ReadWriteMany requirement. On a cloud provider whose default block-storage StorageClass only supports `ReadWriteOnce` (the storage is physically attached to one node at a time), the team's PVC sat `Pending` forever until they switched to an RWX-capable backend like an NFS server or a managed file service (e.g., AWS EFS, Azure Files). This is a common real production gotcha: not every StorageClass supports every access mode, and the failure looks identical to a simple typo unless you check `kubectl describe storageclass` and the provider's documentation for what that class actually supports.
+
+> **📚 Theory.** The Pod → volume → PVC → PV → disk chain exists to separate two concerns that change on different timescales: a developer's Pod spec says *what kind* of storage it needs (size, access mode) without knowing or caring which physical disk backs it; a cluster admin's PV (or a StorageClass provisioning one automatically) says *what's actually available*. A PVC is the matchmaker between the two — it's why the same Pod manifest can run unchanged against a hostPath PV in a kind cluster during practice and a cloud provider's dynamically-provisioned SSD in production. This is the same separation-of-concerns principle behind ConfigMaps in Chapter 1: developer intent stays in the Pod spec, environment-specific detail lives one layer away.
 
 **Exam Tips — Chapter 2**
 - "One Pod per node" -> DaemonSet. "Run once" -> Job. "Run on a schedule" -> CronJob. "Stable identity per replica" -> StatefulSet. For a long-running stateless workload with interchangeable replicas, Deployment is usually the default.

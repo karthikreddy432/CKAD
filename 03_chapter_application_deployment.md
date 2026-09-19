@@ -68,7 +68,7 @@ kubectl rollout restart deployment/web
 
 **Rollback note:** `kubectl rollout undo` needs a previous revision. If the Deployment only has revision 1, there is nothing to roll back to and the command returns an error.
 
-With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, a rollout might progress like this — capacity never drops below 5, and never exceeds 8.
+With `maxSurge: 2` and `maxUnavailable: 1` on 6 desired replicas, the *theoretical* bounds are a ceiling of 8 total Pods (6 + maxSurge) and a floor of 5 available Pods (6 − maxUnavailable). A real rollout doesn't have to touch either extreme at every step — the sequence below stays at 7 total throughout, which still satisfies both constraints without ever maxing out the surge:
 
 For stalled rollouts, `spec.progressDeadlineSeconds` controls how long Kubernetes waits for deployment progress before surfacing `ProgressDeadlineExceeded` in Deployment status. It reports the condition; it does not automatically roll the Deployment back.
 
@@ -329,6 +329,8 @@ kubectl run canary-test --rm -it --restart=Never --image=busybox:1.36 -- sh -c '
 
 > **🌍 Real-world example.** A social media company rolling out a new recommendation-ranking model doesn't trust a rolling update alone — a subtle ranking regression wouldn't crash any Pods or fail any probe, so a normal `RollingUpdate` would happily ship it to 100% of users. Instead they run it as a canary at 5% of traffic for an hour, watching business metrics (click-through rate, session length) rather than infrastructure metrics, before manually promoting it to 100%. This is the real reason canary and blue/green exist as *separate* concepts from rolling updates: rolling updates protect against infrastructure-level failure (crashes, failed health checks); canary and blue/green protect against business-logic regressions that Kubernetes itself has no way to detect.
 
+> **📚 Theory.** Neither pattern is a Kubernetes feature — both are emergent behavior of one simple fact: a Service has no idea which Deployment "owns" a Pod. It only maintains a live, continuously-updated list of endpoints matching its selector at this instant, built by watching Pod labels cluster-wide. Blue/green works because swapping the selector's `version` value atomically swaps which pre-existing, fully-warmed set of Pods qualifies. Canary works because *removing* a distinguishing label from the selector (matching only `app=web`, not `track`) makes two unrelated Deployments' Pods equally eligible at once. This is also exactly why exposure is approximate, not a guaranteed percentage: the Service is doing nothing more sophisticated than round-robin (or similar) across whatever list of endpoints currently matches — the "10%" in a 9-vs-1 replica split is just an emergent ratio of list membership, not a routing rule anyone configured. Chapter 4 covers exactly how that endpoint list gets built and kept in sync.
+
 **Blue/Green vs Canary — the distinction the exam expects you to know cold:**
 
 | | Blue/Green | Canary |
@@ -433,6 +435,101 @@ kubectl get endpointslice -l kubernetes.io/service-name=web
 
 </details>
 
+---
+
+## 🧪 Practice — Run a Canary Release
+
+### Task
+
+Create Deployment `api-stable` (8 replicas, image `myapi:1.0`, labels `app=api,track=stable`) and Deployment `api-canary` (2 replicas, image `myapi:2.0`, labels `app=api,track=canary`). Create Service `api` that selects only `app=api` — not `track` — so it matches both.
+
+Confirm both track values appear in the Service's endpoints, then roll back the canary by scaling it to 0.
+
+### Requirements
+
+- Deployments: `api-stable` (8 replicas, `myapi:1.0`), `api-canary` (2 replicas, `myapi:2.0`).
+- Shared label: `app=api`. Distinguishing label: `track`.
+- Service `api` selector: `app=api` only.
+- Verify both `stable` and `canary` Pods are eligible endpoints simultaneously.
+- Roll back by scaling `api-canary` to 0, not by deleting the Service or editing its selector.
+
+### Success Criteria
+
+While both Deployments are scaled up, `kubectl get endpointslice` for `api` shows Pods from both track values. After scaling `api-canary` to 0, only `stable` Pods remain as endpoints, and the Service itself was never touched.
+
+### Suggested Time
+
+**8 minutes**
+
+<details>
+<summary>💡 Hint</summary>
+
+The only thing that makes this a canary rather than two unrelated Deployments is that the Service's selector deliberately omits the `track` label. If you accidentally include `track` in the selector, only one Deployment's Pods will ever match.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-stable
+spec:
+  replicas: 8
+  selector:
+    matchLabels: {app: api, track: stable}
+  template:
+    metadata:
+      labels: {app: api, track: stable}
+    spec:
+      containers:
+      - name: api
+        image: myapi:1.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-canary
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: api, track: canary}
+  template:
+    metadata:
+      labels: {app: api, track: canary}
+    spec:
+      containers:
+      - name: api
+        image: myapi:2.0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
+Verify both tracks are being served, then roll back:
+
+```bash
+kubectl apply -f api-canary-release.yaml
+kubectl get endpointslice -l kubernetes.io/service-name=api -o wide
+# expect endpoints from both api-stable and api-canary Pods
+
+kubectl scale deployment api-canary --replicas=0
+kubectl get endpointslice -l kubernetes.io/service-name=api -o wide
+# expect only api-stable Pods remain
+```
+
+</details>
+
 ## 3.3 Helm 🟡 SHOULD KNOW
 
 **What it is.** A package manager for Kubernetes — a "chart" bundles templated manifests; `values.yaml` parameterizes them.
@@ -487,6 +584,8 @@ kubectl get all -l app.kubernetes.io/instance=my-release
 | Upgrade broke the release | Bad chart version or values change | `helm rollback my-release <previous-revision>` |
 
 > **🌍 Real-world example.** Installing a production-grade Prometheus + Grafana monitoring stack from raw YAML would mean hand-writing dozens of interdependent manifests (Deployments, RBAC, ConfigMaps for dashboards, ServiceMonitors, PVCs) and keeping them all in sync across every environment. Almost every team instead runs `helm install` against the community `kube-prometheus-stack` chart, overriding perhaps a dozen `values.yaml` fields (retention period, storage size, ingress hostname) for their specific needs. This is the mainstream real-world use of Helm on CKAD's radar: consuming a well-maintained chart someone else wrote, not authoring one from scratch.
+
+> **📚 Theory.** A Helm "release" isn't just a naming convention — it's a tracked object. Every `install`/`upgrade` stores the fully-rendered manifests and the exact values used for that revision in a Secret (by default) inside the cluster, one Secret per revision. This is *why* `helm rollback` works and works instantly: it isn't re-templating the chart from scratch and hoping for the same result, it's reapplying the exact previously-rendered manifests that are already sitting in that stored Secret. `helm history` is really just listing those stored revision Secrets. This is the same rollback-via-stored-prior-state principle as a Deployment's old ReplicaSet (3.1) — just implemented with a different storage mechanism.
 
 ---
 
@@ -576,6 +675,76 @@ This contrasts with JSON 6902 patches, which use explicit operations such as `re
 | Built into `kubectl`? | No — separate `helm` binary | Yes — `kubectl apply -k` |
 | Packaging concept | "Chart" with `values.yaml` | "Base" + "overlays", no packaging format |
 | CKAD scope | Install/upgrade/rollback existing charts | Author your own overlays on your own base |
+| Rollback mechanism | `helm rollback <rev>` restores a stored prior revision natively | No built-in equivalent — reapplying a previous overlay (or `git revert` on the overlay files) is how you go back |
+
+**Base `kustomization.yaml`:**
+```yaml
+resources:
+- deployment.yaml
+- service.yaml
+```
+
+**Overlay (e.g., production):**
+```yaml
+# overlays/prod/kustomization.yaml
+resources:
+- ../../base
+patches:
+- target:
+    kind: Deployment
+    name: web
+  patch: |-
+    - op: replace
+      path: /spec/replicas
+      value: 5
+images:
+- name: myapp
+  newTag: "2.0"
+configMapGenerator:
+- name: app-config
+  literals:
+  - MODE=prod
+```
+
+```mermaid
+flowchart TD
+    BASE["base/
+deployment.yaml, service.yaml
+(shared by every environment)"]
+    BASE --> DEV["overlays/dev
+patches: replicas=1"]
+    BASE --> STAGE["overlays/staging
+patches: replicas=3"]
+    BASE --> PROD["overlays/prod
+patches: replicas=5, image tag 2.0"]
+```
+
+A fix to `base/deployment.yaml` (say, adding a new probe) automatically applies to every overlay — nothing needs to be duplicated or manually kept in sync.
+
+**Commands:**
+```bash
+kubectl apply -k overlays/prod/
+kubectl kustomize overlays/prod/          # render without applying — use to debug
+kubectl delete -k overlays/prod/
+```
+
+**Verify:**
+```bash
+kubectl kustomize overlays/prod/ | less
+kubectl get deployment web -o jsonpath='{.spec.replicas}'
+```
+
+**Troubleshoot:**
+
+| Problem | Cause | Fix |
+|---|---|---|
+| `apply -k` applies unexpected resources | Base included in overlay's `resources:` unintentionally duplicates objects | Check `kustomization.yaml` resource list, render with `kubectl kustomize` first |
+| Patch doesn't seem to apply | Wrong `target` (kind/name mismatch), or JSON path wrong | `kubectl kustomize` to see rendered output before applying |
+| Generated ConfigMap name changes every apply | `configMapGenerator` appends a content hash by design | This is intentional (forces Pod rollout on config change) — reference the generated name via `kustomization.yaml`'s automatic substitution, not a hardcoded name |
+
+> **🌍 Real-world example.** A platform team maintains one `base/` directory of Deployment, Service, and Ingress manifests for their internal API gateway, then three thin overlays — `overlays/dev`, `overlays/staging`, `overlays/prod` — each patching only replica count, resource limits, and an image tag. When a new field needs to be added to every environment's Deployment (say, a new probe), it's added once in `base/deployment.yaml` and every overlay inherits it automatically. This is Kustomize's core value proposition versus copy-pasting: eliminate the "I updated staging's YAML but forgot prod's" class of bug entirely, without needing Helm's templating language for teams who find raw YAML overlays simpler to reason about.
+
+> **📚 Theory.** Kustomize has no client-server model and no in-cluster memory of what it applied — `kubectl apply -k overlays/prod/` is conceptually just `kubectl kustomize overlays/prod/ | kubectl apply -f -`, a one-shot rendering step with nothing stored afterward about *how* those manifests came to be. This is the direct opposite of Helm's per-revision Secret (3.3) and explains a question learners often ask: "why isn't there a `kustomize rollback`?" There's nothing to roll back to — Kustomize's only source of truth is whatever's on disk right now, so "rollback" means going back to a previous version of the overlay files themselves (a `git revert`, typically), not asking a tool to restore a state it never tracked in the first place.
 
 ## 🧪 Practice — Build an Environment Overlay
 
@@ -667,74 +836,6 @@ kubectl get configmap
 ```
 
 </details>
-
-**Base `kustomization.yaml`:**
-```yaml
-resources:
-- deployment.yaml
-- service.yaml
-```
-
-**Overlay (e.g., production):**
-```yaml
-# overlays/prod/kustomization.yaml
-resources:
-- ../../base
-patches:
-- target:
-    kind: Deployment
-    name: web
-  patch: |-
-    - op: replace
-      path: /spec/replicas
-      value: 5
-images:
-- name: myapp
-  newTag: "2.0"
-configMapGenerator:
-- name: app-config
-  literals:
-  - MODE=prod
-```
-
-```mermaid
-flowchart TD
-    BASE["base/
-deployment.yaml, service.yaml
-(shared by every environment)"]
-    BASE --> DEV["overlays/dev
-patches: replicas=1"]
-    BASE --> STAGE["overlays/staging
-patches: replicas=3"]
-    BASE --> PROD["overlays/prod
-patches: replicas=5, image tag 2.0"]
-```
-
-A fix to `base/deployment.yaml` (say, adding a new probe) automatically applies to every overlay — nothing needs to be duplicated or manually kept in sync.
-
-**Commands:**
-```bash
-kubectl apply -k overlays/prod/
-kubectl kustomize overlays/prod/          # render without applying — use to debug
-kubectl delete -k overlays/prod/
-```
-
-**Verify:**
-```bash
-kubectl kustomize overlays/prod/ | less
-kubectl get deployment web -o jsonpath='{.spec.replicas}'
-```
-
-**Troubleshoot:**
-
-| Problem | Cause | Fix |
-|---|---|---|
-| `apply -k` applies unexpected resources | Base included in overlay's `resources:` unintentionally duplicates objects | Check `kustomization.yaml` resource list, render with `kubectl kustomize` first |
-| Patch doesn't seem to apply | Wrong `target` (kind/name mismatch), or JSON path wrong | `kubectl kustomize` to see rendered output before applying |
-| Generated ConfigMap name changes every apply | `configMapGenerator` appends a content hash by design | This is intentional (forces Pod rollout on config change) — reference the generated name via `kustomization.yaml`'s automatic substitution, not a hardcoded name |
-
-> **🌍 Real-world example.** A platform team maintains one `base/` directory of Deployment, Service, and Ingress manifests for their internal API gateway, then three thin overlays — `overlays/dev`, `overlays/staging`, `overlays/prod` — each patching only replica count, resource limits, and an image tag. When a new field needs to be added to every environment's Deployment (say, a new probe), it's added once in `base/deployment.yaml` and every overlay inherits it automatically. This is Kustomize's core value proposition versus copy-pasting: eliminate the "I updated staging's YAML but forgot prod's" class of bug entirely, without needing Helm's templating language for teams who find raw YAML overlays simpler to reason about.
-
 **Exam Tips — Chapter 3**
 - Blue/green = two Deployments + a Service you repoint. Canary = two Deployments sharing the Service's selector, with exposure influenced by endpoint/replica distribution. Know both patterns well.
 - `maxSurge`/`maxUnavailable` questions often reduce to "why did the rollout behave this way" — read the current values with `kubectl get deployment -o yaml` before guessing.
@@ -746,7 +847,7 @@ kubectl get deployment web -o jsonpath='{.spec.replicas}'
 | Topic | One-line takeaway |
 |---|---|
 | Rolling updates (3.1) | `maxSurge`/`maxUnavailable` control the capacity trade-off; `Recreate` trades an outage window for "never two versions at once" |
-| Blue/Green & Canary (3.2) | Both are built from ordinary Deployments + Service selectors — no special Kubernetes object exists for either |
+| Blue/Green & Canary (3.2) | Both are built from ordinary Deployments + Service selectors — no special Kubernetes object exists for either; a Service only ever sees a live list of matching endpoints, never which Deployment "owns" them |
 | Helm (3.3) | Package manager for *consuming* charts — CKAD expects install/upgrade/rollback, not authoring |
 | Kustomize (3.4) | Template-free overlay patching, built into `kubectl apply -k` — one base, many thin per-environment diffs |
 
