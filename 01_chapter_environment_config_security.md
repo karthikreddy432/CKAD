@@ -187,7 +187,7 @@ kubectl exec -n checkout config-demo -- cat /etc/app-config/LOG_LEVEL
 </details>
 
 **Consuming it — three ways:**
-**1. Single env var:**
+# 1. Single env var
 ```yaml
 env:
 - name: MODE
@@ -195,13 +195,15 @@ env:
     configMapKeyRef:
       name: app-config
       key: MODE
----
+```      
 # 2. All keys as env vars
+```yaml
 envFrom:
 - configMapRef:
     name: app-config
----
+```
 # 3. Mounted as files (each key becomes a file)
+```yaml
 volumes:
 - name: config-vol
   configMap:
