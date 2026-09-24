@@ -2,16 +2,16 @@
 
 ## Contents
 
-1. Core Concepts & Workload Resources
-2. Pod Design (multi-container Pods, init/ephemeral containers)
-3. Configuration (command/args, ConfigMaps, Secrets, resources)
-4. Security & Kubernetes Extensions (ServiceAccounts, RBAC, admission, SecurityContext, CRDs)
-5. Storage & State Persistence
-6. Application Deployment (strategies, Helm, Kustomize)
-7. Observability & Application Maintenance
-8. Services & Networking
-9. Troubleshooting
-10. Final CKAD Revision Sheet
+1. [Core Concepts & Workload Resources](#1-core-concepts--workload-resources)
+2. [Pod Design](#2-pod-design) (multi-container Pods, init/ephemeral containers, lifecycle hooks)
+3. [Configuration](#3-configuration) (command/args, ConfigMaps, Secrets, resources)
+4. [Security & Kubernetes Extensions](#4-security--kubernetes-extensions) (ServiceAccounts, RBAC, admission, SecurityContext, CRDs)
+5. [Storage & State Persistence](#5-storage--state-persistence)
+6. [Application Deployment](#6-application-deployment) (strategies, Helm, Kustomize)
+7. [Observability & Application Maintenance](#7-observability--application-maintenance)
+8. [Services & Networking](#8-services--networking)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Final CKAD Revision Sheet](#10-final-ckad-revision-sheet) (commands, confused concepts, traps, checklist)
 
 ## Scope
 
@@ -25,15 +25,28 @@ These notes follow the official CKAD curriculum (Kubernetes **v1.35** per the Li
 | Application Environment, Configuration and Security | 25% | Ch. 3, 4 |
 | Services and Networking | 20% | Ch. 8 |
 
+Chapter 10 is the revision sheet (with common exam traps).
+
 The notes are application-developer focused. CKA-only administration (control-plane upgrades, etcd backup/restore, cluster bootstrapping) is excluded.
+
+### Exam format at a glance
+
+- Performance-based and proctored: you solve tasks in a live terminal, not multiple-choice questions.
+- Duration is about 2 hours with a 66% passing score. Confirm the current numbers in the Linux Foundation candidate handbook.
+- Tasks carry different weights. Do quick, high-weight tasks first and flag the long ones.
+- The official Kubernetes (and Helm) documentation sites are available during the exam. Learn where things live (`NetworkPolicy`, `PersistentVolume`, `kubectl` cheat sheet) so you can copy YAML fast.
+- Check the task’s **context** and **namespace** first. Set the required context and namespace before making changes.
+- The official domain list is maintained in the CNCF curriculum repository (`github.com/cncf/curriculum`).
 
 ## How to use these notes
 
 Read each topic as:
 
-**What it is -> key idea -> example -> commands -> ⚡ Remember -> 🎯 CKAD Focus.**
+**What it is → key idea → example → commands → ⚡ Remember.**
 
 Do not memorize every YAML line. Learn the fields a task is likely to make you change, and use `kubectl explain` for the rest.
+
+**Suggested study loop:** read a section → work through its example on a real cluster when practical → use the Final CKAD Revision Sheet for review.
 
 Diagrams are Mermaid. If your viewer does not render Mermaid, each diagram is followed by (or sits next to) a text explanation.
 
@@ -56,6 +69,8 @@ A Kubernetes cluster has a **control plane** that manages desired state and **wo
 - **kubelet** - node agent that manages Pods assigned to the node.
 - **container runtime** - runs containers.
 - **kube-proxy** - supports Service networking on nodes.
+
+Two add-ons run in almost every cluster: **CoreDNS** (Service DNS names) and a **CNI plugin** (Pod networking).
 
 ### Example
 
@@ -91,6 +106,19 @@ Every component talks to the API server; only the API server talks to etcd.
 The container runtime runs containers on a node. Kubernetes uses the **Container Runtime Interface (CRI)** to communicate with a compatible runtime.
 
 Modern Kubernetes commonly uses runtimes such as containerd or CRI-O. Docker Engine is not itself the CRI runtime Kubernetes directly expects by default.
+
+### Why it matters
+
+The kubelet does not start containers itself; it asks a runtime through the CRI. Kubernetes removed its built-in Docker bridge (`dockershim`) in v1.24, so nodes now run **containerd** or **CRI-O** directly. Images are still standard OCI images, so an image built with `docker build` or `podman build` runs the same way on any of them.
+
+| Task | Docker/Podman (your workstation) | Node runtime (containerd / CRI-O) |
+|---|---|---|
+| Build an image | `docker build` / `podman build` | Not the runtime's job |
+| List containers | `docker ps` | `crictl ps` |
+| List images | `docker images` | `crictl images` |
+| Container logs | `docker logs` | `crictl logs <id>` |
+
+`crictl` is a node-level debugging tool. In CKAD you almost always use `kubectl logs`/`describe` instead.
 
 ### ⚡ Remember
 
@@ -136,18 +164,6 @@ kubectl logs nginx
 ### ⚡ Remember
 
 **Pod = shared execution boundary for one or more tightly coupled containers.**
-
-### 🎯 CKAD Focus
-
-Generate a Pod in seconds and verify it:
-
-```bash
-kubectl run nginx --image=nginx:1.27 --port=80 --dry-run=client -o yaml > pod.yaml
-kubectl apply -f pod.yaml
-kubectl get pod nginx -o wide
-```
-
----
 
 ## 1.4 YAML resource structure
 
@@ -216,11 +232,31 @@ dev/web
 prod/web
 ```
 
+### Built-in namespaces
+
+| Namespace | Purpose |
+|---|---|
+| `default` | Where objects go when you do not specify a namespace |
+| `kube-system` | Cluster components (CoreDNS, kube-proxy, ...): look, do not edit |
+| `kube-public` | Readable by everyone; rarely used |
+| `kube-node-lease` | Node heartbeat (Lease) objects |
+
+### What is (and is not) namespaced
+
+Pods, Deployments, Services, ConfigMaps, Secrets, PVCs, Roles and NetworkPolicies live **inside** a namespace. Nodes, PersistentVolumes, StorageClasses, Namespaces, ClusterRoles and CRDs are **cluster-scoped**.
+
+```bash
+kubectl api-resources --namespaced=true     # namespaced kinds
+kubectl api-resources --namespaced=false    # cluster-scoped kinds
+kubectl config set-context --current --namespace=dev   # stop typing -n dev
+kubectl delete namespace dev                # deletes EVERYTHING inside it
+```
+
+A Service in another namespace is reached as `<service>.<namespace>` (see Service discovery in Chapter 8). ConfigMaps and Secrets cannot be referenced across namespaces.
+
 ### ⚡ Remember
 
 Always know which namespace the task is using. `-n <namespace>` is often the difference between changing the right object and the wrong one.
-
----
 
 ## 1.6 Labels, selectors and annotations
 
@@ -286,8 +322,6 @@ kubectl annotate pod web owner=platform
 | Selector | Pick objects by labels (Service, Deployment, NetworkPolicy, `-l`) | - |
 | Annotation | Non-identifying metadata (owner, change-cause, tool config) | No |
 
----
-
 ## 1.7 ReplicaSets
 
 A ReplicaSet maintains a specified number of matching Pods.
@@ -312,13 +346,23 @@ spec:
           image: nginx:1.27
 ```
 
+### How it works
+
+A ReplicaSet counts the Pods that match its **label selector**, not the Pods it created. If fewer than `replicas` match it creates more; if more match it deletes extras. A stray Pod carrying the label `app: web` is therefore adopted and counted.
+
+```bash
+kubectl apply -f rs.yaml
+kubectl delete pod <one-of-the-pods>     # a replacement appears within seconds
+kubectl scale rs web-rs --replicas=5
+```
+
+A ReplicaSet has no update strategy: changing its Pod template does not replace running Pods, only Pods created afterwards. That gap is why you normally use a **Deployment**, which creates a new ReplicaSet for each template change and shifts replicas between the old and new ones.
+
 ### ⚡ Remember
 
 **ReplicaSet = keep N matching Pods available.**
 
 In normal application deployments, a Deployment manages the ReplicaSet for you (see the relationship diagram in the workload decision table).
-
----
 
 ## 1.8 Deployments
 
@@ -361,12 +405,6 @@ The Deployment `selector.matchLabels` must match `template.metadata.labels`, and
 ### ⚡ Remember
 
 **Deployment = desired replicas + controlled application updates.**
-
-### 🎯 CKAD Focus
-
-Create, scale, update the image, inspect the ReplicaSets, and roll back. Rollout details are in the Application Deployment chapter.
-
----
 
 ## 1.9 DaemonSets
 
@@ -422,12 +460,6 @@ Then change `kind` to `DaemonSet`, remove Deployment-only fields such as `replic
 **Deployment -> desired number of replicas.**  
 **DaemonSet -> workload on eligible nodes.**
 
-### 🎯 CKAD Focus
-
-Turn a generated Deployment manifest into a DaemonSet quickly, then confirm one Pod per eligible node.
-
----
-
 ## 1.10 Jobs
 
 A Job runs work to completion.
@@ -472,15 +504,20 @@ kubectl logs job/report
 
 Job Pods must use `restartPolicy: Never` or `OnFailure`. With `Never`, each retry creates a new Pod; with `OnFailure`, the same Pod's container is restarted.
 
+### Common Job shapes
+
+| Goal | Settings |
+|---|---|
+| One task | `completions: 1`, `parallelism: 1` (the defaults) |
+| Run 5 tasks, 2 at a time | `completions: 5`, `parallelism: 2` |
+| Parallel workers that coordinate themselves | `parallelism: N`, `completions` unset; the Job completes when a Pod succeeds and all Pods have terminated |
+| Fail fast | `backoffLimit: 0` and/or `activeDeadlineSeconds: 60` |
+
+When a Job fails, `kubectl describe job <n>` shows the reason: `BackoffLimitExceeded` (too many failed Pods) or `DeadlineExceeded` (ran past `activeDeadlineSeconds`). Read the Pod logs with `kubectl logs job/<n>` or `kubectl logs <pod>`.
+
 ### ⚡ Remember
 
 **Job = finish work.**
-
-### 🎯 CKAD Focus
-
-Create a Job with `completions`/`parallelism`/`backoffLimit`, and read its output with `kubectl logs job/<name>`.
-
----
 
 ## 1.11 CronJobs
 
@@ -517,6 +554,15 @@ spec:
 - `suspend` - temporarily stop creating Jobs.
 - `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` - history retention.
 
+- `timeZone` - IANA zone such as `Europe/London` (stable since v1.27). Without it the schedule uses the controller manager's time zone.
+
+| Schedule | Meaning |
+|---|---|
+| `*/5 * * * *` | Every 5 minutes |
+| `0 2 * * 1-5` | 02:00 on weekdays |
+| `30 8 1 * *` | 08:30 on the 1st of each month |
+| `@daily` | Once a day at midnight |
+
 ### Imperative
 
 ```bash
@@ -528,12 +574,6 @@ kubectl get cronjob,job
 ### ⚡ Remember
 
 **CronJob = schedule the creation of Jobs.**
-
-### 🎯 CKAD Focus
-
-Write the schedule correctly (`minute hour day-of-month month day-of-week`), set `concurrencyPolicy`, and test with `--from=cronjob/<name>`.
-
----
 
 ## 1.12 Container images
 
@@ -643,12 +683,6 @@ source -> image build -> tag -> registry -> Kubernetes Pod
 
 **Use versioned image tags; keep image content separate from runtime configuration.**
 
-### 🎯 CKAD Focus
-
-Write a small Dockerfile, build and tag an image, save it to a tar file if asked, and reference it (with `imagePullSecrets` when private) from a Pod.
-
----
-
 ## 1.13 Basic scheduling controls
 
 These topics are useful for understanding scheduling and Pending Pods, even though they are not standalone CKAD blueprint competencies.
@@ -685,13 +719,36 @@ tolerations:
     effect: NoSchedule
 ```
 
+### Affinity at a glance
+
+| Kind | Meaning |
+|---|---|
+| `requiredDuringSchedulingIgnoredDuringExecution` | Hard rule: the Pod stays `Pending` if no node matches |
+| `preferredDuringSchedulingIgnoredDuringExecution` | Soft rule with a `weight` (1-100) |
+| `podAffinity` / `podAntiAffinity` | Place near or away from Pods with given labels, using a `topologyKey` such as `kubernetes.io/hostname` |
+
+`IgnoredDuringExecution` means the rule is checked only when scheduling; already-running Pods are not evicted if node labels change.
+
+### Taint effects and commands
+
+| Effect | Behavior |
+|---|---|
+| `NoSchedule` | New Pods without a toleration are not scheduled |
+| `PreferNoSchedule` | Scheduler tries to avoid the node |
+| `NoExecute` | Also evicts running Pods that do not tolerate the taint |
+
+```bash
+kubectl label node node01 disk=ssd                        # then use nodeSelector: {disk: ssd}
+kubectl taint nodes node01 dedicated=batch:NoSchedule     # add a taint
+kubectl taint nodes node01 dedicated=batch:NoSchedule-    # trailing - removes it
+kubectl describe node node01 | grep -i taint
+```
+
 ### ⚡ Remember
 
 **nodeSelector/affinity = Pod constraints.**  
 **taint = node repels.**  
 **toleration = Pod is allowed past a matching taint.**
-
----
 
 ## 1.14 Imperative kubectl
 
@@ -766,15 +823,31 @@ Indentation errors are the most common YAML mistake; in vim:
 
 Generate and edit instead of typing long manifests from memory.
 
+### More utilities worth knowing
+
+```bash
+kubectl wait --for=condition=Ready pod/web --timeout=60s
+kubectl wait --for=condition=Available deployment/web --timeout=60s
+kubectl diff -f web.yaml                       # what would change
+kubectl apply -f web.yaml --dry-run=server     # validated by the API server
+kubectl get pods -o name                       # pod/web-abc12 ...
+kubectl get all -n dev                         # common kinds only: NOT ConfigMaps, Secrets, PVCs, Ingresses
+
+cat <<EOF | kubectl apply -f -                 # apply YAML typed inline
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quick
+data:
+  k: v
+EOF
+```
+
+`kubectl get all` is a common trap: it does not list every resource kind, so query ConfigMaps, Secrets, PVCs and Ingresses explicitly.
+
 ### ⚡ Remember
 
 **Generate quickly -> edit the required fields -> apply -> verify.**
-
-### 🎯 CKAD Focus
-
-Know which objects have a generator (`run`, `create deployment/job/cronjob/configmap/secret/serviceaccount/role/rolebinding/quota/ingress`, `expose`) and which do not (DaemonSet, PV/PVC, NetworkPolicy, StatefulSet: generate a nearby object or copy from the docs).
-
----
 
 ## 1.15 kubectl output, API discovery and schema help
 
@@ -802,6 +875,19 @@ kubectl get pods --sort-by=.metadata.creationTimestamp
 kubectl get pods -A                 # all namespaces
 ```
 
+### Filtering and extracting fields
+
+```bash
+kubectl get pods --field-selector=status.phase=Running
+kubectl get pods --field-selector spec.nodeName=node01 -A
+kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}'
+kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}'
+kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
+kubectl get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image
+```
+
+Use `-l` for **labels** and `--field-selector` for **fields** such as phase or node name. Write the result to a file with `> /path/file` when the task asks for it.
+
 ### API discovery
 
 ```bash
@@ -821,8 +907,6 @@ kubectl explain pod --recursive
 ### ⚡ Remember
 
 **Do not guess a field when Kubernetes can tell you the schema.**
-
----
 
 ## 1.16 Workload relationships and decision table
 
@@ -848,23 +932,29 @@ flowchart LR
 
 Deployment -> ReplicaSet -> Pods. CronJob -> Job -> Pod. Pick the resource from the requirement **before** writing YAML.
 
-### 🎯 CKAD Focus
-
-Read the requirement ("one per node", "run once", "every night", "stable name") and choose the resource without hesitation.
-
----
-
 # 2. Pod Design
 
 ## 2.1 Single-container vs multi-container Pods
 
 A single-container Pod is the normal default. Multiple containers belong in one Pod when they are tightly coupled and should share lifecycle, network and possibly storage.
 
+### When to use more than one container
+
+Put containers together only when they need to **share a lifecycle** (be scheduled, started and stopped together), **talk over `localhost`**, or **share files through a volume**. If two parts can scale or fail independently, use two Deployments and a Service instead.
+
+| Pattern | Runs | Purpose | Typical example |
+|---|---|---|---|
+| Init container | Before the app, to completion | One-time setup or wait for a dependency | Generate config, wait for a database |
+| Sidecar | Alongside the app | Extend the app | Log shipper, proxy, file sync |
+| Ambassador | Alongside the app | Local proxy to the outside world | Reach a database through `localhost` |
+| Adapter | Alongside the app | Normalize the app's output | Convert metrics to a monitoring format |
+| Ephemeral | Injected into a running Pod | Debugging | `kubectl debug` |
+
+All containers in a Pod are scheduled to the **same node** and share the Pod IP.
+
 ### ⚡ Remember
 
 Do not put unrelated applications in one Pod merely because Kubernetes permits multiple containers.
-
----
 
 ## 2.2 Sidecar pattern
 
@@ -903,12 +993,6 @@ The application writes the file; the sidecar consumes it.
 ### ⚡ Remember
 
 **Sidecar = helper container beside the main application.**
-
-### 🎯 CKAD Focus
-
-Add a second container that shares an `emptyDir` with the first. Check both: `kubectl logs app-with-sidecar -c sidecar`.
-
----
 
 ## 2.3 Init containers
 
@@ -958,12 +1042,6 @@ Typical uses:
 
 **Init container = startup preparation.**
 
-### 🎯 CKAD Focus
-
-Add an `initContainers` entry, share data through a volume, and read init logs with `kubectl logs <pod> -c <init-container>`.
-
----
-
 ## 2.4 Ambassador and adapter patterns
 
 ### Ambassador
@@ -986,11 +1064,18 @@ Example idea:
 application metrics -> adapter -> monitoring format
 ```
 
+### Why they exist
+
+Both patterns keep the main application simple and unaware of its surroundings. The helper is a separate image, so it can be reused, upgraded and owned independently.
+
+- **Ambassador** hides *where* something lives: the app always calls `localhost:5432`, and the ambassador decides which real database (dev, prod, a shard) receives the traffic.
+- **Adapter** hides *how* something is formatted: the app writes its native metrics or logs, and the adapter exposes them in the shape the monitoring system expects.
+
+Mechanically both are just another entry in `spec.containers` that talks to the app over `localhost` or through a shared `emptyDir`, exactly like the sidecar example above. If a task asks for one of these, build it as a second container.
+
 ### ⚡ Remember
 
 Both are **multi-container Pod patterns**. The exact implementation depends on the application.
-
----
 
 ## 2.5 Native sidecars
 
@@ -1009,12 +1094,12 @@ initContainers:
 
 This combines the startup ordering guarantees of init containers with a long-running sidecar lifecycle.
 
+Native sidecars are GA since Kubernetes v1.33 (beta and on by default since v1.29). They start before the main containers, keep running for the life of the Pod, and are stopped after the main containers finish, which also lets a Job's Pod complete cleanly.
+
 ### ⚡ Remember
 
 **Regular init container -> runs to completion.**  
 **Native sidecar -> uses `restartPolicy: Always` and keeps running with the Pod.**
-
----
 
 ## 2.6 Ephemeral containers
 
@@ -1050,12 +1135,6 @@ Compare: `kubectl exec` enters an existing container; `kubectl debug` adds a new
 
 **Init container = before the app. Sidecar = beside the app. Ephemeral container = injected later for debugging.**
 
-### 🎯 CKAD Focus
-
-Use `kubectl debug -it pod/<pod> --image=busybox:1.36 --target=<container>` when the app image has no shell.
-
----
-
 ## 2.7 Container communication inside a Pod
 
 All containers in a Pod share the Pod network namespace.
@@ -1076,7 +1155,9 @@ flowchart LR
     OUT["other Pods / Services"] -->|"Pod IP:8080"| A
 ```
 
----
+### ⚡ Remember
+
+**Same Pod = same network namespace = `localhost`.**
 
 ## 2.8 Shared storage between containers
 
@@ -1093,8 +1174,6 @@ Each container mounts the same volume at a suitable path.
 ### ⚡ Remember
 
 **Same Pod + same volume = shared files.**
-
----
 
 ## 2.9 Pod lifecycle and restart policy
 
@@ -1129,11 +1208,19 @@ spec:
   restartPolicy: Never
 ```
 
+### Three different kinds of "status"
+
+| Level | Values | Where to see it |
+|---|---|---|
+| Pod **phase** | `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown` | `.status.phase` |
+| **Container state** | `Waiting` (with a reason such as `ImagePullBackOff`), `Running`, `Terminated` (with an exit code) | `kubectl describe pod` |
+| Pod **conditions** | `PodScheduled`, `Initialized`, `ContainersReady`, `Ready` | `kubectl describe pod` -> Conditions |
+
+`Ready` is what a Service looks at, so a Pod can be phase `Running` and still receive no traffic. With `restartPolicy: Always` the kubelet restarts an exited container with an exponential back-off (10s, 20s, 40s ... capped at 5 minutes). That waiting period is what you see as `CrashLoopBackOff`.
+
 ### ⚡ Remember
 
 **Pod phase != container state != readiness state.**
-
----
 
 ## 2.10 Self-healing
 
@@ -1150,7 +1237,61 @@ Actual  = 3
 
 This is why controllers are normally preferred over creating individual Pods manually for application workloads.
 
----
+### Try it
+
+```bash
+kubectl create deployment web --image=nginx:1.27 --replicas=3
+kubectl delete pod -l app=web --wait=false   # remove all Pods
+kubectl get pods -w                          # replacements appear
+```
+
+Replacement Pods get **new names and new IPs**, so applications must not depend on one specific Pod. A bare Pod (created with `kubectl run`) has no controller: if you delete it, it stays deleted, and if its node fails it is not rescheduled.
+
+### ⚡ Remember
+
+**Controller = keep actual state equal to desired state.**
+
+## 2.11 Lifecycle hooks and graceful termination
+
+### What it is
+
+When a Pod is deleted, Kubernetes does not simply kill it. It runs a shutdown sequence so the application can finish in-flight work. Lifecycle hooks let you run a command or HTTP call at two points: right after a container starts (`postStart`) and right before it is stopped (`preStop`).
+
+### Termination sequence
+
+1. The Pod is marked `Terminating` and removed from Service endpoints.
+2. The `preStop` hook (if any) runs.
+3. The container receives **SIGTERM**.
+4. Kubernetes waits up to `terminationGracePeriodSeconds` (default **30**); `preStop` time counts against this budget.
+5. Anything still running receives **SIGKILL**.
+
+### Example
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 45
+  containers:
+    - name: web
+      image: nginx:1.27
+      lifecycle:
+        postStart:
+          exec:
+            command: ["sh", "-c", "echo started > /usr/share/nginx/html/started.txt"]
+        preStop:
+          exec:
+            command: ["sh", "-c", "sleep 10"]    # let traffic drain, then SIGTERM is sent
+```
+
+### Notes
+
+- `postStart` runs alongside the container's main process with no ordering guarantee, but the container is not reported `Running` until the hook finishes. If the hook fails, the container is killed and restarted.
+- Keep hooks short and idempotent; a hanging hook delays startup or shutdown.
+- A container started as `sh -c "..."` may not forward SIGTERM to your program. Use `exec` in the script or run the program directly as PID 1.
+- `kubectl delete pod <pod> --grace-period=0 --force` skips the graceful window (use deliberately).
+
+### ⚡ Remember
+
+**preStop -> SIGTERM -> grace period -> SIGKILL.**
 
 # 3. Configuration
 
@@ -1180,12 +1321,6 @@ containers:
 ### ⚡ Remember
 
 **command replaces the entrypoint. args supplies the command's arguments.**
-
-### 🎯 CKAD Focus
-
-Set `command`/`args` in YAML, or use `kubectl run x --image=busybox:1.36 --command -- sleep 3600`. Verify with `kubectl logs`.
-
----
 
 ## 3.2 ConfigMaps
 
@@ -1277,15 +1412,28 @@ spec:
 
 `kubectl logs cfg-demo` should show `env=prod` and the properties file.
 
+### Good to know
+
+- A ConfigMap is limited to 1 MiB. Use volumes or images for large files.
+- `data` holds UTF-8 text; use `binaryData` for binary content.
+- With `--from-file=application.properties` the **file name becomes the key** and the file content the value. Use `--from-file=mykey=path` to choose the key.
+- Mount only selected keys, under names you choose, with `items`:
+
+```yaml
+volumes:
+  - name: config
+    configMap:
+      name: app-files
+      items:
+        - key: application.properties
+          path: app.properties
+```
+
+- Set `immutable: true` on a ConfigMap (or Secret) to block edits. To change values you delete and recreate it, and the API server no longer has to watch it.
+
 ### ⚡ Remember
 
 **ConfigMap = non-sensitive configuration.**
-
-### 🎯 CKAD Focus
-
-Create a ConfigMap (literal or file), inject it as env vars and as a volume, and verify with `kubectl exec` or `kubectl logs`.
-
----
 
 ## 3.3 Secrets
 
@@ -1368,15 +1516,26 @@ kubectl get secret db-creds -o jsonpath='{.data.password}' | base64 -d
 
 Under `data:` values must be base64; under `stringData:` they are plain text.
 
+### Secret types
+
+| Type | Used for | Required keys |
+|---|---|---|
+| `Opaque` (default for `generic`) | Arbitrary key-value data | none |
+| `kubernetes.io/tls` | TLS certificate and key (Ingress, apps) | `tls.crt`, `tls.key` |
+| `kubernetes.io/dockerconfigjson` | Image pull credentials (`docker-registry`) | `.dockerconfigjson` |
+| `kubernetes.io/basic-auth` | Username/password | `username` and/or `password` |
+| `kubernetes.io/service-account-token` | Legacy long-lived ServiceAccount token | managed by Kubernetes |
+
+### Handling Secrets safely
+
+- Base64 only prevents accidental display. Anyone who can `get secret` can decode it, so control access with RBAC.
+- Encryption at rest for etcd is an admin setting, not a CKAD task, but know that it exists.
+- Prefer a `secretKeyRef` or a mounted volume over baking values into an image or a manifest in Git.
+- Mounted Secret files can get tighter permissions with `defaultMode: 0400` on the `secret` volume.
+
 ### ⚡ Remember
 
 **Secret = sensitive data. Base64 != encryption.**
-
-### 🎯 CKAD Focus
-
-Create a Secret imperatively, mount or inject it, and decode a value from an existing Secret.
-
----
 
 ## 3.4 Environment variables
 
@@ -1398,7 +1557,23 @@ Environment variables are loaded into the process when the container starts. Cha
 
 Normal ConfigMap/Secret volume mounts can reflect source changes after propagation; `subPath` mounts do not.
 
----
+### Precedence and useful tricks
+
+- If the same variable appears in `env` and `envFrom`, **`env` wins**. With several `envFrom` sources, the **last** one wins.
+- `envFrom` accepts a prefix: `envFrom: [{prefix: CFG_, configMapRef: {name: app-config}}]`.
+- Later `env` entries can reference earlier ones: `value: "$(DB_HOST):5432"`.
+- Keys that are not valid variable names are skipped by `envFrom`.
+- To pick up a changed ConfigMap/Secret used as env vars: `kubectl rollout restart deployment/<name>`.
+
+| Need | Use |
+|---|---|
+| A few simple values | `env` with `configMapKeyRef` / `secretKeyRef` |
+| Every key of a ConfigMap as variables | `envFrom` |
+| Whole config files, or values that must update without a restart | Volume mount (without `subPath`) |
+
+### ⚡ Remember
+
+**Environment variables are read once, when the container starts.**
 
 ## 3.5 Downward API
 
@@ -1457,12 +1632,6 @@ volumes:
 
 **Downward API = Pod self-knowledge.**
 
-### 🎯 CKAD Focus
-
-Expose Pod name, namespace, node or IP as env vars using `fieldRef`, and verify with `kubectl exec <pod> -- env`.
-
----
-
 ## 3.6 Resource requests
 
 A request is used by the scheduler when deciding whether a node has enough available capacity.
@@ -1477,8 +1646,6 @@ resources:
 ### ⚡ Remember
 
 **Request = scheduling promise.**
-
----
 
 ## 3.7 Resource limits
 
@@ -1523,11 +1690,18 @@ kubectl set resources deployment/web --requests=cpu=100m,memory=128Mi --limits=c
 kubectl get pod resource-demo -o jsonpath='{.status.qosClass}'
 ```
 
+### Units (a classic trap)
+
+| Resource | Notation |
+|---|---|
+| CPU | `1` = `1000m` = one core; `250m` = a quarter core |
+| Memory | `128Mi` = 128 x 1024 x 1024 bytes; `128M` = 128 x 1000 x 1000 bytes |
+| Memory (wrong) | `128m` means 0.128 bytes (millibytes): it is valid syntax but almost certainly not what you meant |
+| Ephemeral storage | `ephemeral-storage: 1Gi` limits writable-layer and log space |
+
 ### ⚡ Remember
 
 **Request -> scheduling. Limit -> runtime ceiling.**
-
----
 
 ## 3.8 QoS classes
 
@@ -1544,8 +1718,6 @@ The class appears in `kubectl get pod <pod> -o jsonpath='{.status.qosClass}'`.
 ### ⚡ Remember
 
 QoS affects behavior under resource pressure; it is not the same thing as scheduling requests.
-
----
 
 ## 3.9 LimitRange
 
@@ -1580,8 +1752,6 @@ spec:
 ### ⚡ Remember
 
 **LimitRange = per-container namespace defaults/bounds.**
-
----
 
 ## 3.10 ResourceQuota
 
@@ -1635,6 +1805,20 @@ Kubernetes can authenticate clients using mechanisms such as client certificates
 
 Authentication occurs before authorization.
 
+Kubernetes has **no `User` object**: a human identity is whatever the credential says (for a client certificate, the CN is the user name and the O fields are groups). **ServiceAccounts** are the only identity Kubernetes stores as API objects, which is why Pods use them. A request with no valid credential is treated as anonymous and is normally denied later.
+
+Every API request passes three gates in order:
+
+```text
+Authentication (who?) -> Authorization (allowed?) -> Admission (acceptable/defaulted?) -> etcd
+```
+
+`401 Unauthorized` means authentication failed. `403 Forbidden` means you are known but not permitted (usually RBAC).
+
+### ⚡ Remember
+
+**Authentication = who you are. Authorization = what you may do.**
+
 ---
 
 ## 4.2 KubeConfig
@@ -1652,11 +1836,41 @@ kubectl config set-context --current --namespace=dev
 
 A context combines connection and identity information and can include a namespace.
 
+### Structure
+
+```yaml
+apiVersion: v1
+kind: Config
+clusters:
+  - name: prod-cluster
+    cluster:
+      server: https://10.0.0.10:6443
+      certificate-authority-data: <base64>
+users:
+  - name: dev-user
+    user:
+      client-certificate-data: <base64>
+      client-key-data: <base64>
+contexts:
+  - name: dev@prod
+    context:
+      cluster: prod-cluster
+      user: dev-user
+      namespace: dev
+current-context: dev@prod
+```
+
+A **context = cluster + user + optional namespace**. `use-context` only changes `current-context`.
+
+```bash
+kubectl config view --minify                    # only the active context
+kubectl --kubeconfig=/path/to/config get pods   # use another file for one command
+export KUBECONFIG=/path/a:/path/b               # merge several files
+```
+
 ### ⚡ Remember
 
 Before every task, verify **current context + namespace**.
-
----
 
 ## 4.3 ServiceAccounts
 
@@ -1699,12 +1913,6 @@ Every namespace has a `default` ServiceAccount that Pods use when `serviceAccoun
 
 **ServiceAccount = identity. RBAC = permissions.**
 
-### 🎯 CKAD Focus
-
-Create a ServiceAccount, assign it to a Pod or Deployment, and disable token automount when asked.
-
----
-
 ## 4.4 Authorization
 
 Authorization answers:
@@ -1726,6 +1934,25 @@ flowchart LR
 | ClusterRole | Cluster | Cluster-scoped resources, or reusable permission set |
 | RoleBinding | One namespace | Grants a Role **or ClusterRole** inside that namespace |
 | ClusterRoleBinding | Cluster | Grants a ClusterRole in all namespaces |
+
+### Reading a rule
+
+```yaml
+rules:
+  - apiGroups: ["apps"]                    # "" = core group (pods, services, configmaps, secrets)
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["app-config"]          # restrict to one named object
+    verbs: ["get"]
+```
+
+Common verbs: `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`. Sub-resources have their own entries (`pods/log`, `pods/exec`). Find a resource's API group and verbs with `kubectl api-resources -o wide`.
+
+### ⚡ Remember
+
+**RBAC is additive: there are no deny rules. No matching rule means no access.**
 
 ---
 
@@ -1777,8 +2004,6 @@ kubectl create rolebinding read-pods \
 
 **Role = permission definition. RoleBinding = attachment.**
 
----
-
 ## 4.6 ClusterRole and ClusterRoleBinding
 
 A ClusterRole can define permissions for cluster-scoped resources or permissions that are usable across namespaces.
@@ -1821,8 +2046,6 @@ Resources from a named group use `resource.group`, for example `--resource=deplo
 
 Do not equate **ClusterRole** with automatically cluster-wide effective access. The binding determines where the permission applies.
 
----
-
 ## 4.7 Verify RBAC
 
 Never assume an RBAC change worked.
@@ -1851,12 +2074,6 @@ kubectl set serviceaccount deployment/web app-sa -n dev
 
 **Test the effective permission, not just the YAML.**
 
-### 🎯 CKAD Focus
-
-Given a "Forbidden" error or a requirement, create the Role/RoleBinding (or ClusterRole/ClusterRoleBinding) imperatively and prove it with `kubectl auth can-i --as=...`.
-
----
-
 ## 4.8 Admission control
 
 Admission runs after authentication/authorization and before the object is persisted.
@@ -1876,8 +2093,6 @@ Relevant built-in/policy mechanisms include ResourceQuota, LimitRanger, ServiceA
 ### ⚡ Remember
 
 An object can be authenticated and authorized and still be rejected during admission.
-
----
 
 ## 4.9 Pod Security Admission
 
@@ -1914,17 +2129,25 @@ The hardened SecurityContext example in the next sections satisfies `restricted`
 
 When a Pod is rejected with a PodSecurity message, inspect the exact security requirement and fix the Pod accordingly.
 
-### 🎯 CKAD Focus
-
-Read a `violates PodSecurity` message, add the missing SecurityContext fields, and know how the namespace labels enforce a level.
-
----
-
 ## 4.10 Validating vs mutating admission
 
 **Validating** admission checks and can reject.
 
 **Mutating** admission can modify/default an incoming object before persistence. (Order: see the admission diagram above.)
+
+### Where you meet them
+
+| Mechanism | Type | What it does |
+|---|---|---|
+| ServiceAccount admission | Mutating | Sets the `default` ServiceAccount and token mount when unspecified |
+| DefaultStorageClass | Mutating | Fills in the default `storageClassName` on a PVC |
+| LimitRanger | Mutating + validating | Injects default requests/limits, then rejects values outside min/max |
+| ResourceQuota | Validating | Rejects objects that would exceed the namespace quota |
+| Pod Security Admission | Validating | Rejects Pods that violate the namespace's level |
+| ValidatingAdmissionPolicy | Validating | Rejects objects that fail a CEL expression |
+| Webhooks | Either | Call an external service that mutates or validates |
+
+The error text tells you who rejected the object (`violates PodSecurity`, `exceeded quota`, `admission webhook ... denied the request`). Fix the object to satisfy the rule; more RBAC permissions do not bypass admission.
 
 ### ⚡ Remember
 
@@ -1996,12 +2219,6 @@ kubectl exec <pod> -- id
 
 Know **which level owns the field** and which container-level values override Pod-level values.
 
-### 🎯 CKAD Focus
-
-Set `runAsUser`/`runAsNonRoot`/`fsGroup` at Pod level and `allowPrivilegeEscalation`/`readOnlyRootFilesystem`/`capabilities` at container level; confirm with `kubectl exec <pod> -- id`.
-
----
-
 ## 4.12 Linux capabilities and privilege
 
 Linux capabilities split privileged operations into smaller permissions.
@@ -2024,11 +2241,11 @@ securityContext:
 
 Use `privileged: true` only when the task actually requires it.
 
+Examples of what capabilities gate: `NET_BIND_SERVICE` (listen on ports below 1024 as non-root), `NET_ADMIN` (change network configuration), `SYS_TIME` (set the system clock). The Pod Security `restricted` level requires dropping `ALL` and only allows adding back `NET_BIND_SERVICE`; `privileged: true` is blocked by both `baseline` and `restricted`.
+
 ### ⚡ Remember
 
 **Least privilege is the goal.**
-
----
 
 ## 4.13 CRDs, Custom Resources and Operators
 
@@ -2110,12 +2327,6 @@ kubectl get crd databases.example.com -o yaml
 
 **CRD = resource type. CR = object. Operator = controller/reconciliation logic.**
 
-### 🎯 CKAD Focus
-
-Discover CRDs (`kubectl get crd`), inspect a kind with `kubectl explain`, and create/list/edit Custom Resources. Building an Operator is out of scope.
-
----
-
 # 5. Storage & State Persistence
 
 ## 5.1 Container storage basics
@@ -2123,6 +2334,43 @@ Discover CRDs (`kubectl get crd`), inspect a kind with `kubectl explain`, and cr
 A container's writable layer belongs to that container instance. Data stored only there can disappear when the container is replaced.
 
 Kubernetes volumes provide a filesystem with a different lifecycle.
+
+### Volume types you will meet
+
+| Volume | Lifetime | Typical use |
+|---|---|---|
+| `emptyDir` | The Pod | Scratch space, sharing files between containers |
+| `configMap` / `secret` | The object | Inject config files or credentials |
+| `downwardAPI` | The Pod | Expose Pod metadata as files |
+| `projected` | The Pod | Combine several sources (ConfigMap, Secret, token) in one mount |
+| `hostPath` | The node | Read/write a node directory; practice or node agents only |
+| `persistentVolumeClaim` | Independent of the Pod | Durable application data |
+
+`hostPath` ties a Pod to one node's filesystem and is blocked by the Pod Security `baseline` and `restricted` levels, so avoid it in real workloads.
+
+### Projected volume: several sources in one directory
+
+```yaml
+volumes:
+  - name: all-in-one
+    projected:
+      sources:
+        - configMap:
+            name: app-config
+        - secret:
+            name: db-creds
+        - downwardAPI:
+            items:
+              - path: labels
+                fieldRef:
+                  fieldPath: metadata.labels
+```
+
+Every source appears as files under the single mount path. Keys must not collide.
+
+### ⚡ Remember
+
+**The container filesystem is disposable. A volume is data with a lifetime you choose.**
 
 ---
 
@@ -2160,8 +2408,6 @@ volumes:
 
 **emptyDir = shared scratch space for a Pod.**
 
----
-
 ## 5.3 Persistent Volumes
 
 A PersistentVolume (PV) represents persistent storage available to the cluster.
@@ -2197,7 +2443,9 @@ spec:
 | `Released` | PVC deleted, PV not yet reclaimed |
 | `Failed` | Automatic reclamation failed |
 
----
+### ⚡ Remember
+
+**A PV is real storage and is cluster-scoped: it has no namespace.**
 
 ## 5.4 Persistent Volume Claims
 
@@ -2225,8 +2473,6 @@ A PVC can bind to a compatible PV when the storage class, capacity and access mo
 ### ⚡ Remember
 
 **PV = storage resource. PVC = storage request.**
-
----
 
 ## 5.5 PV -> PVC -> Pod chain
 
@@ -2285,28 +2531,22 @@ kubectl get pv,pvc          # PV and PVC should both show Bound
 kubectl exec app -- sh -c 'echo hi > /data/test.txt && ls /data'
 ```
 
-### 🎯 CKAD Focus
-
-Create a PV, a PVC that binds to it, and a Pod that mounts the PVC; verify `Bound` and that the data path works.
-
----
-
 ## 5.6 Access modes
 
-Common access modes:
+Access modes describe how a volume can be mounted:
 
-- `ReadWriteOnce` (RWO)
-- `ReadOnlyMany` (ROX)
-- `ReadWriteMany` (RWX)
-- `ReadWriteOncePod` (RWOP)
+| Mode | Short | Meaning |
+|---|---|---|
+| `ReadWriteOnce` | RWO | Read-write by **one node** (several Pods on that node can share it) |
+| `ReadOnlyMany` | ROX | Read-only by many nodes |
+| `ReadWriteMany` | RWX | Read-write by many nodes (needs NFS/CephFS-style storage) |
+| `ReadWriteOncePod` | RWOP | Read-write by exactly **one Pod** in the whole cluster |
 
-Support depends on the storage implementation.
+A PVC binds only to a PV that offers the requested mode, so a mismatch is a classic cause of a `Pending` PVC. The mode is a capability, not a restriction inside the Pod; use `readOnly: true` on the mount when the app must not write. Support depends on the storage implementation.
 
 ### ⚡ Remember
 
 Do not assume an arbitrary storage backend supports every access mode.
-
----
 
 ## 5.7 StorageClass
 
@@ -2388,21 +2628,26 @@ prevents a default StorageClass from being selected for that PVC.
 
 **StorageClass = provisioning policy/class, not the storage data itself.**
 
-### 🎯 CKAD Focus
-
-Create a StorageClass and a PVC that references it, know the difference between `Retain` and `Delete`, and recognise `WaitForFirstConsumer`.
-
----
-
 ## 5.8 Dynamic provisioning
 
 With dynamic provisioning, a PVC can cause a compatible PV/backing storage to be created automatically through the StorageClass provisioner.
+
+```mermaid
+flowchart LR
+    POD[Pod] -->|claimName| PVC["PVC (storageClassName: fast)"]
+    PVC --> SC["StorageClass fast"] --> PROV["Provisioner / CSI driver"] --> PV["New PV created automatically"]
+    PV -->|binds| PVC
+```
+
+You never write a PV by hand. With `reclaimPolicy: Delete` the PV and the underlying disk disappear when the PVC is deleted, so use `Retain` for data you cannot lose. Verify with `kubectl get pvc,pv,storageclass`.
 
 ### PVC stuck in Pending
 
 See the **PVC Pending** entry in the Troubleshooting chapter for the symptom -> cause -> fix table.
 
----
+### ⚡ Remember
+
+**PVC + StorageClass = a PV created for you.**
 
 ## 5.9 StatefulSets, Headless Services and storage
 
@@ -2493,12 +2738,6 @@ By default, PVCs created by a StatefulSet are **not** deleted when Pods are scal
 
 **Deployment = interchangeable replicas. StatefulSet = stable name + stable per-Pod storage + ordered management.**
 
-### 🎯 CKAD Focus
-
-Write a StatefulSet with `serviceName` and `volumeClaimTemplates` next to a headless Service, then verify Pod names, PVCs and DNS.
-
----
-
 # 6. Application Deployment
 
 ## 6.1 Deployment strategies at a glance
@@ -2531,6 +2770,10 @@ flowchart LR
 | Recreate | Deployment `strategy.type` | Yes | `kubectl rollout undo` |
 | Blue/Green | Pattern: 2 Deployments + Service selector | No | Switch selector back |
 | Canary | Pattern: 2 Deployments + shared Service selector | No | Scale canary to 0 |
+
+### ⚡ Remember
+
+**Pick the strategy from the requirement: downtime acceptable -> Recreate; gradual replacement -> RollingUpdate; instant switch -> blue/green; small traffic share -> canary.**
 
 ---
 
@@ -2588,12 +2831,6 @@ strategy:
 
 **RollingUpdate replaces old Pods gradually.**
 
-### 🎯 CKAD Focus
-
-Update an image, watch `rollout status`, tune `maxSurge`/`maxUnavailable`, and confirm with `kubectl get rs`.
-
----
-
 ## 6.3 Recreate strategy and rollout controls
 
 `Recreate` stops the old Pods before creating the new ones.
@@ -2615,11 +2852,15 @@ kubectl rollout history deployment/web --revision=2
 kubectl rollout undo deployment/web --to-revision=2
 ```
 
+### When to choose Recreate
+
+Use it when two versions must never run together: a schema change the old code cannot read, a `ReadWriteOnce` volume only one Pod may mount, or a licence that allows a single instance. The trade-off is downtime between the last old Pod stopping and the first new Pod becoming Ready.
+
+`rollout pause` is useful with either strategy: make several edits (image, env, resources) while paused, then `rollout resume` to apply them as a single rollout.
+
 ### ⚡ Remember
 
 **RollingUpdate = overlap possible. Recreate = old version goes away before new version starts.**
-
----
 
 ## 6.4 Rollbacks and revision reasoning
 
@@ -2645,12 +2886,6 @@ kubectl rollout history deployment/web
 ### ⚡ Remember
 
 `rollout undo` returns to the previous revision; add `--to-revision=<n>` when the task names one.
-
-### 🎯 CKAD Focus
-
-Read the history, inspect a revision with `--revision=<n>`, and roll back to the exact revision asked for.
-
----
 
 ## 6.5 Blue/Green deployment
 
@@ -2726,12 +2961,6 @@ kubectl get pods -l version=green -o wide     # endpoint IPs should match these 
 
 **Service selector = traffic switch.**
 
-### 🎯 CKAD Focus
-
-Create both versions, point the Service at one, patch the selector to cut over, and verify the endpoints.
-
----
-
 ## 6.6 Canary deployment
 
 Canary sends a smaller share of traffic to a new version while the old version remains in service.
@@ -2803,12 +3032,6 @@ kubectl scale deployment web-canary --replicas=0   # abort the canary
 ### ⚡ Remember
 
 **Blue/green = switch versions. Canary = gradually increase the new version's share.**
-
-### 🎯 CKAD Focus
-
-Build the two-Deployment pattern with one shared Service selector, and adjust replica counts to shift the traffic share.
-
----
 
 ## 6.7 Helm fundamentals
 
@@ -2883,15 +3106,32 @@ or:
 helm install web bitnami/nginx -f values.yaml
 ```
 
+### Chart anatomy and values
+
+```text
+mychart/
+  Chart.yaml        # name, chart version, appVersion
+  values.yaml       # default values
+  templates/        # Go-templated manifests (deployment.yaml, service.yaml, ...)
+  charts/           # dependencies
+```
+
+Templates read values such as `{{ .Values.replicaCount }}`. `-f` files are applied in order and `--set` overrides them all.
+
+```bash
+helm show values bitnami/nginx > values.yaml        # start from the defaults, edit, then use -f
+helm install web bitnami/nginx -f values.yaml --set replicaCount=2
+helm get values web            # only your overrides
+helm get values web -a         # all values including defaults
+helm get manifest web          # the rendered YAML that was installed
+helm upgrade web bitnami/nginx --reset-values       # discard earlier overrides
+```
+
+Release state is stored in the release's namespace, so pass `-n` whenever the task names one. `helm rollback` creates a **new** revision that copies the old one, so `helm history` keeps growing.
+
 ### ⚡ Remember
 
 **Chart -> install -> release.**
-
-### 🎯 CKAD Focus
-
-Add a repo, search, inspect values, install with `--set` or `-f`, upgrade, roll back, and uninstall. Always pass `-n <namespace>` when the task names one.
-
----
 
 ## 6.8 Kustomize
 
@@ -3027,15 +3267,28 @@ kubectl apply -k overlays/dev
 kubectl delete -k overlays/dev
 ```
 
+### More useful fields
+
+```yaml
+labels:
+  - pairs:
+      env: dev
+    includeSelectors: true
+commonAnnotations:
+  owner: platform
+secretGenerator:
+  - name: db-creds
+    literals:
+      - password=S3cr3t
+```
+
+- Generators append a **content hash** to the name (for example `app-config-7b9f2k`) and rewrite references inside the same kustomization, so changing the data rolls the Pods. Add `generatorOptions: {disableNameSuffixHash: true}` when a task needs a fixed name.
+- `labels:` is the newer, more controllable form of `commonLabels:`. Adding selector labels with `includeSelectors: true` can conflict with an existing Deployment selector (immutable), so use it deliberately.
+- `kubectl kustomize` only renders; nothing changes in the cluster until `kubectl apply -k`.
+
 ### ⚡ Remember
 
 **Base = common manifests. Overlay = environment-specific differences.**
-
-### 🎯 CKAD Focus
-
-Create a base and an overlay (`resources: - ../../base` plus a patch, image or replica change), render it with `kubectl kustomize`, then `kubectl apply -k`.
-
----
 
 ## 6.9 Helm vs Kustomize
 
@@ -3047,11 +3300,16 @@ Create a base and an overlay (`resources: - ../../base` plus a patch, image or r
 | Releases | Rendered manifests |
 | Strong for reusable packaged applications | Strong for environment-specific customization |
 
+### When to use which
+
+- Use **Helm** to install third-party or reusable packaged software (databases, ingress controllers), when you want one-command upgrade and rollback with release history, or when many settings are driven by values.
+- Use **Kustomize** to adapt plain manifests you already own for each environment (dev/prod) without templates. It is built into `kubectl` (`-k`).
+- They combine: `helm template` output can be applied directly or patched with Kustomize.
+- Helm keeps release state in the cluster (release Secrets); Kustomize is stateless and only renders YAML.
+
 ### ⚡ Remember
 
 Both are named in the CKAD deployment competencies. Learn their **purpose and workflow**, not just command syntax.
-
----
 
 # 7. Observability & Application Maintenance
 
@@ -3075,11 +3333,13 @@ readinessProbe:
   timeoutSeconds: 2
 ```
 
+### Why it matters
+
+Without a readiness probe a container counts as ready the moment it starts, so a Service can send requests to an app that is still loading. During a rolling update the Deployment also waits for new Pods to become Ready before removing old ones, so a good readiness probe is what makes an update zero-downtime. A failing readiness probe never restarts the container; it only takes the Pod out of the Service's endpoints until the probe passes again.
+
 ### ⚡ Remember
 
 **Readiness controls traffic eligibility.**
-
----
 
 ## 7.2 Liveness probes
 
@@ -3121,8 +3381,6 @@ livenessProbe:
 
 **Liveness can trigger a restart.**
 
----
-
 ## 7.3 Startup probes
 
 A startup probe gives a slow-starting application time to initialize.
@@ -3147,8 +3405,6 @@ This gives roughly 300 seconds of startup checks before failure, assuming the de
 ### ⚡ Remember
 
 **Startup = initialization gate.**
-
----
 
 ## 7.4 Probe mechanisms and defaults
 
@@ -3189,6 +3445,13 @@ Useful defaults:
 | `successThreshold` | 1 |
 
 `successThreshold` must be `1` for liveness and startup probes.
+
+### Timing math
+
+- Time to declare failure is roughly `initialDelaySeconds + failureThreshold x periodSeconds` (each attempt is limited by `timeoutSeconds`).
+- Default liveness: 3 failures x 10 s, so about 30 s before a restart.
+- Startup budget is `failureThreshold x periodSeconds` (for example 30 x 10 = 300 s).
+- For a slow-starting app prefer a **startup probe** over a large `initialDelaySeconds`: once the app is up, failures are detected quickly again.
 
 ### gRPC example
 
@@ -3245,12 +3508,6 @@ A probe that points at the wrong path or port fails on every check: a wrong live
 **Readiness = should it receive traffic?**  
 **Liveness = should it keep running?**
 
-### 🎯 CKAD Focus
-
-Add or fix a readiness, liveness or startup probe (path, port, thresholds) quickly, and verify with `describe`, the READY column and EndpointSlices.
-
----
-
 ## 7.5 Container logs
 
 ### Common commands
@@ -3277,12 +3534,6 @@ kubectl logs pod-name > /tmp/app.log
 
 For a crashed container, try **`--previous`**.
 
-### 🎯 CKAD Focus
-
-Read current and `--previous` logs, select a container with `-c`, and save output to a file when asked.
-
----
-
 ## 7.6 Monitoring with CLI tools
 
 When Metrics Server is installed:
@@ -3303,12 +3554,6 @@ kubectl get pods -w
 ### ⚡ Remember
 
 **`kubectl top` = metrics, not logs.**
-
-### 🎯 CKAD Focus
-
-Find the top CPU/memory consumer (`kubectl top pods --sort-by=memory -A`) and check node usage.
-
----
 
 ## 7.7 `kubectl describe` and events
 
@@ -3340,8 +3585,6 @@ Useful event reasons include:
 ### ⚡ Remember
 
 When behavior is unexpected, inspect the **object plus its events**.
-
----
 
 ## 7.8 Debugging in Kubernetes
 
@@ -3395,12 +3638,6 @@ kubectl port-forward svc/web 8080:80       # test through the Service
 
 **`exec` = enter an existing container. `debug` = add a debugging environment or create a debug copy.**
 
-### 🎯 CKAD Focus
-
-Use `describe` + events first, then `logs`, then `exec`/`debug`. Use a temporary Pod to test Service DNS and connectivity.
-
----
-
 ## 7.9 API deprecations
 
 API versions can be deprecated and removed between Kubernetes releases.
@@ -3446,12 +3683,6 @@ kubectl get endpointslices
 
 **Know the current API version before editing an old manifest.**
 
-### 🎯 CKAD Focus
-
-Fix a manifest that fails with "no matches for kind ... in version ...": find the current group/version with `api-resources`/`explain`, update `apiVersion`, and fix renamed fields.
-
----
-
 # 8. Services & Networking
 
 ## 8.1 Pod networking
@@ -3461,6 +3692,15 @@ Pods receive Pod IPs and participate in the cluster network.
 Within one Pod, containers share the network namespace.
 
 Between Pods, use Pod networking or, for stable application access, a Service.
+
+### The Kubernetes network model
+
+- Every Pod gets its own IP address.
+- Any Pod can reach any other Pod by IP, on any node, **without NAT**.
+- Agents on a node (such as the kubelet) can reach all Pods on that node.
+- The **CNI plugin** (Calico, Cilium, Flannel, ...) implements this. NetworkPolicy enforcement also depends on the CNI.
+
+Because Pod IPs change whenever Pods are recreated, applications should connect to a **Service** name, not a Pod IP.
 
 ### ⚡ Remember
 
@@ -3524,15 +3764,30 @@ kubectl get svc,endpointslices
 kubectl port-forward svc/web 8080:80
 ```
 
+### Named ports and multiple ports
+
+```yaml
+# In the Pod / Deployment template
+ports:
+  - name: http
+    containerPort: 8080
+
+# In the Service
+spec:
+  ports:
+    - name: web
+      port: 80
+      targetPort: http      # the container port NAME
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+```
+
+A named `targetPort` lets the container port number change without editing the Service. `containerPort` is informational (it does not open or block anything), so a wrong `targetPort` is the real failure. Other useful fields: `sessionAffinity: ClientIP` (stick a client to one Pod) and `externalTrafficPolicy: Local` (NodePort/LoadBalancer: preserve the client IP).
+
 ### ⚡ Remember
 
 **`port` != `targetPort` != `nodePort`.**
-
-### 🎯 CKAD Focus
-
-Create a Service (usually with `kubectl expose`), set the correct `targetPort`, and verify that endpoints exist.
-
----
 
 ## 8.3 ClusterIP
 
@@ -3545,7 +3800,15 @@ spec:
 
 Typical use: service-to-service communication within the cluster.
 
----
+### How it works
+
+The ClusterIP is a **virtual IP** that no network interface owns. `kube-proxy` (or the CNI's replacement for it) programs rules on every node that rewrite traffic sent to the Service IP and port to the IP and `targetPort` of one ready Pod. Cluster DNS maps the Service name to the ClusterIP, so clients use `web` instead of an address. Because the IP is virtual you usually cannot `ping` it; test with `curl` or `wget` against the port.
+
+Only **ready** Pods receive traffic: a Pod that fails its readiness probe is removed from the Service's EndpointSlices.
+
+### ⚡ Remember
+
+**ClusterIP = internal virtual IP + DNS name.**
 
 ## 8.4 NodePort
 
@@ -3574,7 +3837,19 @@ The default Kubernetes NodePort range is commonly `30000-32767`.
 kubectl expose deployment web --port=80 --target-port=8080 --type=NodePort
 ```
 
----
+### How it works
+
+A NodePort Service is a ClusterIP Service **plus** the same port opened on every node. `<any-node-IP>:30080` is forwarded to the Service and on to a ready Pod, even if that Pod runs on another node.
+
+```text
+client -> <node-ip>:30080 -> Service (ClusterIP:80) -> Pod:8080
+```
+
+If you omit `nodePort`, Kubernetes picks a free one in the range; read it from `kubectl get svc web` (shown as `80:31234/TCP`). In CKAD tasks, `curl <node-ip>:<nodePort>` or `kubectl port-forward` is the usual test.
+
+### ⚡ Remember
+
+**NodePort = ClusterIP + a port opened on every node.**
 
 ## 8.5 LoadBalancer
 
@@ -3587,7 +3862,11 @@ spec:
 
 The actual external behavior depends on the cluster environment/provider.
 
----
+A LoadBalancer Service builds on NodePort: the cloud provider creates an external load balancer that targets the node ports and writes its address to `EXTERNAL-IP`. On clusters without that integration (kubeadm, kind, minikube without `minikube tunnel`) `EXTERNAL-IP` stays `<pending>`; use NodePort or `kubectl port-forward` there. One load balancer per Service gets expensive, which is one reason to put an Ingress in front of many Services.
+
+### ⚡ Remember
+
+**LoadBalancer = NodePort + an external load balancer (needs provider support).**
 
 ## 8.6 ExternalName Service
 
@@ -3605,7 +3884,9 @@ spec:
 
 Pods can then connect to `external-db` (or `external-db.<namespace>.svc.cluster.local`).
 
----
+### ⚡ Remember
+
+**ExternalName = a DNS alias: no selector, no endpoints, no proxying.**
 
 ## 8.7 Service selectors, endpoints and EndpointSlices
 
@@ -3634,8 +3915,6 @@ Check:
 
 No endpoints usually means **selector, readiness or Pod availability** should be checked before blaming the client.
 
----
-
 ## 8.8 Service discovery
 
 Kubernetes provides DNS names for Services.
@@ -3652,7 +3931,9 @@ Applications should normally use Service DNS names rather than hard-coded Pod IP
 kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- nslookup web.dev
 ```
 
----
+### ⚡ Remember
+
+**Same namespace: `web`. Other namespace: `web.<namespace>`.**
 
 ## 8.9 NetworkPolicies
 
@@ -3822,11 +4103,6 @@ kubectl run tmp --rm -it --restart=Never --labels=app=frontend --image=busybox:1
 
 **Which Pods are selected? -> which direction? -> which sources/destinations? -> which ports?**
 
-### 🎯 CKAD Focus
-
-Write default-deny, an allow rule by Pod and by namespace (AND vs OR), and an egress rule that keeps DNS working; then prove it with a test Pod.
----
-
 ## 8.10 Ingress
 
 Ingress defines HTTP/HTTPS routing to Services. It only works if an **Ingress controller** (for example ingress-nginx) is running in the cluster.
@@ -3891,12 +4167,6 @@ kubectl get ingressclass
 
 Ingress is not a replacement for a Service.
 
-### 🎯 CKAD Focus
-
-Create an Ingress with host and/or path rules that point to existing Services (correct port), then confirm the backends resolve in `kubectl describe ingress`.
-
----
-
 ## 8.11 Host-based and path-based routing
 
 ### Host-based
@@ -3915,7 +4185,49 @@ example.com/    -> web-service
 
 Choose the rule structure from the requirement and validate it with `kubectl describe ingress`.
 
----
+### Host rules example
+
+```yaml
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 80
+    - host: www.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-service
+                port:
+                  number: 80
+```
+
+### `pathType` behavior
+
+| `pathType` | Matches | Example with `path: /api` |
+|---|---|---|
+| `Exact` | The exact path only, case-sensitive | `/api` yes; `/api/` and `/api/v1` no |
+| `Prefix` | Whole path segments split by `/` | `/api`, `/api/`, `/api/v1` yes; `/apix` no |
+| `ImplementationSpecific` | Decided by the Ingress controller | varies |
+
+When several paths match, the **longest** wins and `Exact` beats `Prefix`. A rule with no `host` matches every host. Test without DNS by sending the Host header: `curl -H 'Host: api.example.com' http://<ingress-ip>/`.
+
+If the backend expects `/` but the Ingress path is `/api`, a controller-specific annotation rewrites the path (for ingress-nginx: `nginx.ingress.kubernetes.io/rewrite-target`). Rewriting is controller behavior, not core Kubernetes.
+
+### ⚡ Remember
+
+**Host = which site. Path = which page. Both end at a Service and port.**
 
 ## 8.12 Ingress troubleshooting
 
@@ -3945,8 +4257,6 @@ Check the IngressClass/controller as well as the backend Service.
 ### ⚡ Remember
 
 An Ingress problem does not automatically mean the Pod is broken.
-
----
 
 # 9. Troubleshooting
 
@@ -3978,12 +4288,6 @@ kubectl get events
 ### ⚡ Remember
 
 Do not change random fields before understanding the failure.
-
-### 🎯 CKAD Focus
-
-For a broken object, follow the symptom-specific tables below: identify the failing object, read its events, then fix the exact field that the message names.
-
----
 
 ## 9.2 Pending Pod
 
@@ -4053,6 +4357,8 @@ kubectl describe pod <pod>             # Last State, Exit Code, probe events
 |---|---|---|
 | `configmap "x" not found` / `secret "x" not found` | Referenced object missing or in another namespace | Create it in the Pod's namespace or fix the name |
 | `couldn't find key K in ConfigMap/Secret` | Wrong `key` in `configMapKeyRef`/`secretKeyRef` | Fix the key or add it to the object |
+
+| `container has runAsNonRoot and image will run as root` (or `image has non-numeric user ... cannot verify user is non-root`) | `runAsNonRoot: true` but the image runs as root or a named user | Set a numeric `runAsUser` (for example `1000`) or use an image with a numeric non-root `USER` |
 
 The kubelet retries automatically once the object exists.
 
@@ -4282,6 +4588,21 @@ Use `describe` to confirm the actual reason rather than relying only on the exit
 
 ---
 
+## 9.17 Evicted Pods
+
+**Symptom:** `STATUS Evicted` (Pod phase `Failed`), often several at once.
+
+**Inspect:**
+
+```bash
+kubectl describe pod <pod>          # Reason: Evicted, e.g. "The node was low on resource: memory"
+kubectl describe node <node>        # Conditions: MemoryPressure / DiskPressure
+```
+
+**Interpretation and fix:** the kubelet evicts Pods to protect a node under resource pressure, starting with `BestEffort` Pods, then `Burstable` Pods using more than their requests, and `Guaranteed` Pods last (see QoS classes). Set realistic requests and limits, and let the controller recreate the Pods. Evicted Pods remain listed as `Failed` records until you remove them with `kubectl delete pod <pod>`. This differs from `OOMKilled`, where one container exceeded **its own** memory limit.
+
+---
+
 # 10. Final CKAD Revision Sheet
 
 ## Essential commands
@@ -4397,6 +4718,29 @@ flowchart TD
     C -->|"Running and Ready"| P9["Service selector/targetPort, NetworkPolicy, Ingress, RBAC"]
 ```
 
+## Common exam traps
+
+| Trap | What goes wrong | Prevention |
+|---|---|---|
+| Wrong context or namespace | The object exists, but not where the task asked | Set both first; add `-n` to every command |
+| `kubectl run x -- sleep 3600` without `--command` | Values are passed as `args`, not the command | Add `--command` when you mean the command |
+| Deployment selector != template labels | `apply` is rejected | Start from generated YAML |
+| Wrong Service `targetPort` | Endpoints exist but connections fail | `targetPort` = the port the app listens on |
+| PVC without `storageClassName` on a cluster with a default class | PVC stays `Pending` or binds elsewhere | Same class on PV and PVC, or `""` on the PVC |
+| ConfigMap changed, env vars unchanged | Env vars are read at start | `kubectl rollout restart` |
+| `subPath` mount of a ConfigMap | File never updates | Mount the whole directory |
+| Job with `restartPolicy: Always` | Job is rejected | Use `Never` or `OnFailure` |
+| NetworkPolicy AND vs OR | Policy too open or too closed | One `from` item = AND; separate items = OR |
+| Egress default-deny with no DNS rule | Name lookups time out | Allow UDP/TCP 53 |
+| RoleBinding subject without a namespace | Binding does not match the ServiceAccount | `--serviceaccount=<ns>:<name>` |
+| Kustomize patch uses the prefixed name | Patch does not match | Use the **base** name |
+| Helm command without `-n` | Release "disappears" | `-n <ns>` or `helm list -A` |
+| Generated YAML never applied | Nothing exists | `apply`, then verify |
+| Editing an immutable field | `edit` or `apply` fails | `kubectl replace --force -f`, or delete and recreate |
+| Memory written as `128m` | Millibytes, not mebibytes | Use `128Mi` |
+| Ingress without `pathType` or with old field names | Rejected by `networking.k8s.io/v1` | Use `pathType` and `service.port.number` |
+| `kubectl get all` used as a full inventory | ConfigMaps, Secrets, PVCs, Ingresses are missing | Query those kinds explicitly |
+
 ## Mental model
 
 ```text
@@ -4415,6 +4759,7 @@ SECURITY : ServiceAccount -> RBAC ;  SecurityContext ;  admission (PSA, quota) ;
 - [ ] Generate YAML with `--dry-run=client -o yaml`; use `kubectl explain` for any field you are unsure of.
 - [ ] Create and verify: Pod, Deployment (scale, update, roll back), DaemonSet, Job, CronJob.
 - [ ] Build a multi-container Pod (sidecar) and an init container; debug with `kubectl debug`.
+- [ ] Add `postStart`/`preStop` hooks and set `terminationGracePeriodSeconds`.
 - [ ] Create ConfigMap and Secret, and consume each as env vars and as volumes.
 - [ ] Set requests/limits, a LimitRange and a ResourceQuota; read `describe quota`.
 - [ ] Write a ServiceAccount + Role + RoleBinding and prove it with `auth can-i --as`.
@@ -4435,3 +4780,14 @@ For any task, think in this order:
 **Context -> resource -> selector/labels -> spec -> dependencies -> verify -> troubleshoot.**
 
 The exam is performance-based, so command speed and the ability to diagnose a broken resource matter as much as knowing definitions.
+
+### Exam-day tactics
+
+- Read the whole task first; note the **context, namespace, resource names** and any file path where the answer must be saved.
+- Do quick, high-weight tasks first; flag long ones and come back.
+- Generate YAML with `--dry-run=client -o yaml`, and copy examples from the docs for objects with no generator (PV/PVC, NetworkPolicy, StatefulSet).
+- Always verify: `get`, `describe`, `logs`, `auth can-i`, or a `curl`/`wget` from a temporary Pod.
+- Change only the object the task names; do not recreate unrelated resources.
+- Leave a few minutes at the end to re-check the namespace of each answer.
+
+---
