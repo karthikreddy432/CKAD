@@ -27,7 +27,7 @@ These notes follow the official CKAD curriculum (Kubernetes **v1.35** per the Li
 
 Chapter 10 is the revision sheet (with common exam traps).
 
-The notes are application-developer focused. CKA-only administration (control-plane upgrades, etcd backup/restore, cluster bootstrapping) is excluded.
+The notes are application-developer focused. CKA-only administration (control-plane upgrades, etcd backup/restore, cluster bootstrapping) is excluded. If a task reads like a Linux sysadmin task (kernel modules, swap, certificate rotation on the control plane), it almost certainly belongs to CKA, not CKAD.
 
 ### Exam format at a glance
 
@@ -445,6 +445,17 @@ kubectl get pods -l app=node-agent -o wide   # one Pod per eligible node
 
 To also run on tainted nodes (for example control-plane nodes), add a matching `tolerations` entry in the Pod template.
 
+```yaml
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+```
+
 ### YAML generation shortcut
 
 If speed matters, one practical approach is to generate a Deployment manifest and adapt it carefully:
@@ -512,6 +523,30 @@ Job Pods must use `restartPolicy: Never` or `OnFailure`. With `Never`, each retr
 | Run 5 tasks, 2 at a time | `completions: 5`, `parallelism: 2` |
 | Parallel workers that coordinate themselves | `parallelism: N`, `completions` unset; the Job completes when a Pod succeeds and all Pods have terminated |
 | Fail fast | `backoffLimit: 0` and/or `activeDeadlineSeconds: 60` |
+
+#### Work-queue pattern (parallel workers, completion via success)
+
+When the application decides when it has finished (for example it consumed all queue items), set `completions` unset and `parallelism` to the desired worker count. The Job completes when **any** Pod succeeds and **all** Pods have terminated:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: queue-workers
+spec:
+  parallelism: 4
+  completions: unset
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c", "process items until queue empty; exit 0"]
+```
+
+This is the standard pattern when the work is "process N items, any worker can pick any item."
 
 When a Job fails, `kubectl describe job <n>` shows the reason: `BackoffLimitExceeded` (too many failed Pods) or `DeadlineExceeded` (ran past `activeDeadlineSeconds`). Read the Pod logs with `kubectl logs job/<n>` or `kubectl logs <pod>`.
 
@@ -750,6 +785,58 @@ kubectl describe node node01 | grep -i taint
 **taint = node repels.**  
 **toleration = Pod is allowed past a matching taint.**
 
+### Topology spread constraints
+
+Topology spread controls how Pods are distributed across topology domains (typically zones, regions, or hosts). It is the modern answer to "spread my Pods evenly across zones / hosts."
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname   # or topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway     # or DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app: web
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app: web
+```
+
+| Field | Meaning |
+|---|---|
+| `maxSkew` | Allowed difference between the most-populated and least-populated domain |
+| `topologyKey` | Node label whose value defines the domain (`kubernetes.io/hostname`, `topology.kubernetes.io/zone`, `topology.kubernetes.io/region`) |
+| `whenUnsatisfiable: DoNotSchedule` | Hard rule: stay `Pending` if the constraint cannot be met |
+| `whenUnsatisfiable: ScheduleAnyway` | Soft rule: best-effort spread, do not block scheduling |
+| `labelSelector` | Which existing Pods count toward the spread calculation (usually the workload's own labels) |
+
+### Pod priority and preemption
+
+`priorityClassName` lets a Pod be more (or less) important than others when the scheduler runs out of capacity.
+
+```yaml
+spec:
+  priorityClassName: high-priority
+```
+
+System classes shipped with Kubernetes include `system-cluster-critical` and `system-node-critical` (used by core cluster components). User-defined PriorityClass objects are namespaced-cluster-scoped (cluster-wide, but in a namespace):
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "Used for the web tier"
+```
+
+Higher `value` wins when the scheduler preempts lower-priority Pods to make room. A Pod without a `priorityClassName` uses the `globalDefault` PriorityClass, or zero if none is set.
+
 ## 1.14 Imperative kubectl
 
 Imperative commands save time and are especially useful for YAML generation.
@@ -822,6 +909,70 @@ Indentation errors are the most common YAML mistake; in vim:
 ```
 
 Generate and edit instead of typing long manifests from memory.
+
+### Autoscale, wait, patch at a glance
+
+These three commands are heavily used in CKAD scenarios.
+
+#### `kubectl autoscale` (Horizontal Pod Autoscaler)
+
+```bash
+kubectl autoscale deployment web --min=2 --max=10 --cpu-percent=80
+kubectl get hpa
+```
+
+Generates an HPA resource targeting the Deployment. CPU-based autoscaling needs the metrics-server to be installed. See §1.17 for the YAML form.
+
+#### `kubectl wait`
+
+Wait for a specific condition before continuing (useful in scripts and after `apply`):
+
+```bash
+kubectl wait --for=condition=Ready       pod/web           --timeout=60s
+kubectl wait --for=condition=Available  deployment/web    --timeout=60s
+kubectl wait --for=jsonpath='{.status.phase}'=Running pod/web --timeout=30s
+kubectl wait --for=delete               pod/web           --timeout=60s
+```
+
+A timed-out `wait` exits non-zero, which is why a script can branch on it.
+
+#### `kubectl patch`
+
+Three patch types map to three on-disk formats:
+
+| Flag | Format | Use when |
+|---|---|---|
+| `--type=merge` (default) | JSON merge patch (RFC 7396) | Replacing values; arrays are replaced wholesale |
+| `--type=strategic` | Strategic merge | Lists merged by `name` (containers, volumes, ports, env) |
+| `--type=json` | JSON 6902 | Precise list-element edits; must be valid JSON 6902 |
+
+Examples:
+
+```bash
+# JSON merge (default): change a single field
+kubectl patch deployment web -p '{"spec":{"replicas":4}}'
+
+# Strategic merge: add an env var without losing existing ones
+kubectl patch deployment web --type=strategic -p '{
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [{
+          "name": "app",
+          "env": [{"name": "FEATURE_X", "value": "enabled"}]
+        }]
+      }
+    }
+  }
+}'
+
+# JSON 6902: replace an element in a list by index
+kubectl patch svc web --type=json -p '[
+  {"op":"replace","path":"/spec/ports/0/port","value":8080}
+]'
+```
+
+The Kustomize `patches:` form mirrors the same three semantics (strategic merge by default, JSON 6902 when the patch starts with `- op:`).
 
 ### More utilities worth knowing
 
@@ -932,6 +1083,101 @@ flowchart LR
 
 Deployment -> ReplicaSet -> Pods. CronJob -> Job -> Pod. Pick the resource from the requirement **before** writing YAML.
 
+## 1.17 Horizontal Pod Autoscaler (HPA)
+
+A Horizontal Pod Autoscaler (HPA) scales the replica count of a Deployment, StatefulSet or ReplicaSet based on observed metrics (most commonly CPU utilization). The HPA controller runs in `kube-system` and reads metrics from the metrics-server.
+
+### Imperative
+
+```bash
+kubectl autoscale deployment web --min=2 --max=10 --cpu-percent=80
+kubectl get hpa
+kubectl describe hpa web
+```
+
+### Declarative
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+```
+
+`autoscaling/v2` is the current stable API; it is required to use `behavior` and modern metric types. `autoscaling/v1` only supports CPU and is implicitly converted.
+
+### Important rules
+
+- Every container in the target must have `resources.requests.cpu` set, otherwise utilization is undefined and the HPA cannot compute a desired replica count (`<unknown>` / `0%` in `kubectl get hpa`).
+- The metrics-server must be running. Verify with `kubectl top pods`; if it errors, HPA cannot read metrics.
+- HPA does not change `spec.replicas` directly; it writes the desired count and the Deployment's ReplicaSet controller reconciles.
+- Rollout of a new HPA `maxReplicas` lower than the current replica count does not delete Pods by itself; the deployment controller scales the Deployment down at its own pace.
+
+### ⚡ Remember
+
+**HPA = loop on a metric. It needs requests set on the target containers and metrics-server installed.**
+
+## 1.18 PodDisruptionBudget (PDB)
+
+A PodDisruptionBudget limits the number of Pods of a workload that can be **voluntarily** unavailable at the same time (for example during a node drain or a cluster upgrade). It is a guardrail, not a controller: the eviction API refuses to remove Pods that would violate the budget.
+
+### Imperative
+
+```bash
+kubectl create poddisruptionbudget web-pdb \
+  --selector=app=web \
+  --min-available=2
+```
+
+### Declarative
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb
+spec:
+  minAvailable: 2          # OR: maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: web
+```
+
+Only one of `minAvailable` / `maxUnavailable` may be set; both may be expressed as a count or a percentage string (for example `"50%"`).
+
+### Important rules
+
+- The PDB `selector` must match the **Pod labels** of the target workload, not the workload's own selector. Pods owned by a Deployment carry `pod-template-hash`, plus the labels from the Pod template.
+- A PDB is only enforced against **voluntary** disruptions. `kubectl delete pod`, a node failure, or a hardware-level OOM kill are involuntary and bypass the budget.
+- `policy/v1` is the current stable API; `policy/v1beta1` was removed in 1.25.
+
+### ⚡ Remember
+
+**PDB = "no more than N Pods of this workload may be voluntarily down at once."**
+
 # 2. Pod Design
 
 ## 2.1 Single-container vs multi-container Pods
@@ -990,6 +1236,11 @@ spec:
 
 The application writes the file; the sidecar consumes it.
 
+```bash
+kubectl logs app-with-sidecar -c sidecar       # tail the log file the sidecar is following
+kubectl logs app-with-sidecar -c app            # confirm the app is still writing
+```
+
 ### ⚡ Remember
 
 **Sidecar = helper container beside the main application.**
@@ -1029,7 +1280,17 @@ kubectl get pod web-init          # Init:0/1 -> PodInitializing -> Running
 kubectl exec web-init -c web -- cat /usr/share/nginx/html/index.html
 ```
 
-A "wait for a dependency" init container is a loop such as `until nslookup db; do sleep 2; done`. Multiple init containers run **one after another, in order**.
+A "wait for a dependency" init container is a loop such as `until nslookup db; do sleep 2; done`. Multiple init containers run **one after another, in order**. Complete example:
+
+```yaml
+initContainers:
+  - name: wait-for-db
+    image: busybox:1.36
+    command:
+      - sh
+      - -c
+      - "until nslookup db; do echo waiting for db; sleep 2; done"
+```
 
 Typical uses:
 
@@ -1237,12 +1498,12 @@ Actual  = 3
 
 This is why controllers are normally preferred over creating individual Pods manually for application workloads.
 
-### Try it
+### Example: replacement Pods get new names and IPs
 
 ```bash
 kubectl create deployment web --image=nginx:1.27 --replicas=3
 kubectl delete pod -l app=web --wait=false   # remove all Pods
-kubectl get pods -w                          # replacements appear
+kubectl get pods -w                          # replacements appear with new names
 ```
 
 Replacement Pods get **new names and new IPs**, so applications must not depend on one specific Pod. A bare Pod (created with `kubectl run`) has no controller: if you delete it, it stays deleted, and if its node fails it is not rescheduled.
@@ -1898,7 +2159,15 @@ When API access is unnecessary, set this in the Pod spec (or on the ServiceAccou
 automountServiceAccountToken: false
 ```
 
-Since Kubernetes 1.24, a long-lived token Secret is not automatically created for every ServiceAccount. `kubectl create token` can request a short-lived token. Pods receive a projected, expiring token, mounted at `/var/run/secrets/kubernetes.io/serviceaccount` unless automount is disabled.
+Since Kubernetes 1.24, a long-lived token Secret is not automatically created for every ServiceAccount. `kubectl create token` can request a short-lived token. Pods receive a **projected** (mounted via a `projected` token volume), **expiring** token at `/var/run/secrets/kubernetes.io/serviceaccount` unless automount is disabled. The token is automatically rotated by kubelet before its expiry.
+
+Request a token for an external client (CI, script) with a custom audience and TTL:
+
+```bash
+kubectl create token app-sa -n dev --audience=https://my-api --duration=1h
+```
+
+`--duration` requires the API server to be configured with a max TTL (typically 1h or longer); longer durations are rejected.
 
 Attach an image pull Secret to a ServiceAccount so every Pod using it can pull private images:
 
@@ -2544,6 +2813,15 @@ Access modes describe how a volume can be mounted:
 
 A PVC binds only to a PV that offers the requested mode, so a mismatch is a classic cause of a `Pending` PVC. The mode is a capability, not a restriction inside the Pod; use `readOnly: true` on the mount when the app must not write. Support depends on the storage implementation.
 
+### `volumeMode`
+
+| `volumeMode` | Meaning |
+|---|---|
+| `Filesystem` (default) | Mounted as a directory; kubelet formats the volume on first use |
+| `Block` | Exposed as a raw block device; the application reads/writes at the device level (databases sometimes need this) |
+
+`kubectl describe pvc` shows both `accessModes` and `volumeMode`. A `Filesystem` PVC binding to a `Block` PV (or vice versa) is a common `Pending` cause.
+
 ### ⚡ Remember
 
 Do not assume an arbitrary storage backend supports every access mode.
@@ -2876,7 +3154,7 @@ Prefer an explicit revision when the task specifies which revision to restore.
 
 ### Change cause
 
-Do not rely on the old `--record` habit; it is deprecated. Record change information with the annotation that `rollout history` displays:
+Do not rely on the old `--record` habit; it was **removed in Kubernetes 1.21**. Record change information with the annotation that `rollout history` displays:
 
 ```bash
 kubectl annotate deployment/web kubernetes.io/change-cause="upgrade to nginx 1.28"
@@ -3118,6 +3396,39 @@ mychart/
 
 Templates read values such as `{{ .Values.replicaCount }}`. `-f` files are applied in order and `--set` overrides them all.
 
+#### Template syntax at a glance
+
+Templates are Go-templated YAML. The most common reference is `.Values`, with helpers for built-ins:
+
+```yaml
+# templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-web
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.appName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}
+    spec:
+      containers:
+        - name: web
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          port: {{ .Values.service.port }}
+```
+
+Render without installing:
+
+```bash
+helm template web bitnami/nginx > rendered.yaml
+helm template web ./mychart -f my-values.yaml > rendered.yaml
+```
+
 ```bash
 helm show values bitnami/nginx > values.yaml        # start from the defaults, edit, then use -f
 helm install web bitnami/nginx -f values.yaml --set replicaCount=2
@@ -3250,6 +3561,35 @@ patches:
 
 Patch `metadata.name` and `target.name` refer to the **base** name, before any `namePrefix`.
 
+### Patch types: strategic merge vs JSON 6902
+
+Two patch formats appear in `kustomization.yaml`:
+
+| Form | Field | Behavior |
+|---|---|---|
+| Strategic merge patch | `patches:` (path or inline) with regular YAML | Merges by field semantics (lists merged by `name`/`kind`); familiar `kubectl patch --type=strategic` style |
+| JSON 6902 patch | `patches:` (path or inline) starting with `- op:` and using JSON pointers | Exact operations (`replace`, `add`, `remove`); familiar `kubectl patch --type=json` style |
+
+A patch written in JSON 6902 form looks like:
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: web
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: "100m"
+```
+
+Rule of thumb: use strategic-merge for small structural changes (labels, resources, env), and JSON 6902 for precise list-element edits where strategic merge would otherwise be ambiguous. The `kubectl patch` flags mirror this: `--type=merge` (default) is JSON merge, `--type=strategic` does field-level merge, `--type=json` requires the patch to be valid JSON 6902.
+
 ### ConfigMap generator
 
 ```yaml
@@ -3336,6 +3676,18 @@ readinessProbe:
 ### Why it matters
 
 Without a readiness probe a container counts as ready the moment it starts, so a Service can send requests to an app that is still loading. During a rolling update the Deployment also waits for new Pods to become Ready before removing old ones, so a good readiness probe is what makes an update zero-downtime. A failing readiness probe never restarts the container; it only takes the Pod out of the Service's endpoints until the probe passes again.
+
+### Readiness gates
+
+A **readiness gate** is a Pod-level condition that must be `True` (added by something external) before the Pod can be marked Ready. Common exam use: hold a Pod out of the Service endpoints until its PVC is bound, or until a node agent has registered it.
+
+```yaml
+spec:
+  readinessGates:
+    - conditionType: www.example.com/feature-initialized
+```
+
+`PodScheduled`, `Initialized`, `ContainersReady`, and `Ready` are reserved and cannot be used as gates. Gates are evaluated by `kubectl get pod -o yaml` (`status.conditions[]`); an external controller (often a CRD operator) sets the condition to `True` to allow the Pod to become Ready. The Pod's `Ready` condition is `True` only when **all** readiness gates are `True` and `ContainersReady` is `True`.
 
 ### ⚡ Remember
 
@@ -3557,7 +3909,7 @@ kubectl get pods -w
 
 ## 7.7 `kubectl describe` and events
 
-`describe` exposes conditions, container state, mounts and related events.
+`describe` exposes conditions, container state, mounts and related events. The full **symptom -> evidence -> fix** mapping for each failure state lives in Chapter 9; this section only lists the commands and event reasons that are useful to recognize on sight.
 
 ```bash
 kubectl describe pod web
@@ -3574,17 +3926,17 @@ kubectl get events --sort-by=.lastTimestamp            # newest last
 kubectl get events --field-selector involvedObject.name=web
 ```
 
-Useful event reasons include:
+Useful event reasons to recognize (their fixes are in Chapter 9):
 
-- `FailedScheduling`
-- `FailedMount`
-- `BackOff`
-- `Unhealthy`
-- image pull failures
+- `FailedScheduling` - resources, taints, nodeSelector/affinity, unbound PVC
+- `FailedMount` - missing ConfigMap, Secret or PVC
+- `BackOff` - container repeatedly crashing
+- `Unhealthy` - probe failure
+- `FailedPull`, `ErrImagePull` - image name, tag, or registry credentials
 
 ### ⚡ Remember
 
-When behavior is unexpected, inspect the **object plus its events**.
+When behavior is unexpected, inspect the **object plus its events**, then jump to the matching row in the Troubleshooting decision tree.
 
 ## 7.8 Debugging in Kubernetes
 
@@ -4257,6 +4609,154 @@ Check the IngressClass/controller as well as the backend Service.
 ### ⚡ Remember
 
 An Ingress problem does not automatically mean the Pod is broken.
+
+## 8.13 Capstone: a realistic web tier
+
+A single annotated reference showing how the major resources fit together. Each object can be generated with the standard kubectl commands, edited, and applied.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: dev
+data:
+  APP_ENV: dev
+  LOG_LEVEL: info
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: dev
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: dev
+  labels:
+    app: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      serviceAccountName: web
+      containers:
+        - name: web
+          image: nginx:1.27
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: web-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: dev
+spec:
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+  namespace: dev
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: dev
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: web
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web
+  namespace: dev
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+What this stack gives you:
+
+- The Deployment runs three Pods (HPA can grow to ten).
+- The Service selects those Pods by `app: web`; the HPA scales the Deployment.
+- The PDB keeps at least two Pods available during a voluntary disruption.
+- The NetworkPolicy lets any Pod in any namespace connect to the app on port 8080, and lets the app reach DNS.
+- The ConfigMap supplies non-sensitive configuration; the HPA reads CPU from `resources.requests.cpu`.
+- The ServiceAccount is the Pod's identity in the API; the SecurityContext is the `restricted` profile.
 
 # 9. Troubleshooting
 
