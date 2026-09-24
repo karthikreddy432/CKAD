@@ -254,6 +254,46 @@ kubectl delete namespace dev                # deletes EVERYTHING inside it
 
 A Service in another namespace is reached as `<service>.<namespace>` (see Service discovery in Chapter 8). ConfigMaps and Secrets cannot be referenced across namespaces.
 
+### Why namespaces exist
+
+Three practical reasons shape almost every CKAD task that involves namespaces:
+
+- **Multi-tenancy.** Several teams or environments share a cluster; namespaces give each a separate name and RBAC scope. `dev` and `prod` are typical names in the exam.
+- **Resource isolation.** `LimitRange` and `ResourceQuota` apply per namespace (see §3.9, §3.10), so you can let `dev` consume a lot and cap `prod`.
+- **Name uniqueness.** Two namespaces can both contain a `web` Service without conflict; the *fully qualified* name (`web.dev.svc.cluster.local`) is unique cluster-wide.
+
+### DNS suffix per namespace
+
+The namespace name is also a DNS suffix. From any Pod:
+
+```text
+<service>             # same namespace
+<service>.<namespace> # any namespace (recommended for clarity)
+<service>.<ns>.svc.cluster.local   # fully qualified
+```
+
+So a Pod in `dev` calling `db.prod` resolves to the `db` Service in `prod`, not a same-namespace `db` even if one exists. The `search` path in the Pod's `/etc/resolv.conf` lists the current namespace first, then `svc.cluster.local`, which is why the short name works inside the same namespace.
+
+```mermaid
+flowchart LR
+    subgraph dev["namespace dev"]
+        PA["Pod app"] -->|"resolves web"| SA["Service web (dev)"]
+    end
+    subgraph prod["namespace prod"]
+        SP["Service web (prod)"]
+    end
+    PA -->|"resolves web.prod"| SP
+```
+
+### Default namespace gotcha
+
+If a task says "in the `dev` namespace" and you forget `-n dev`, the object is created in `default` and most tasks silently fail verification. Two habits that prevent this:
+
+```bash
+kubectl config set-context --current --namespace=dev   # one-shot, saves -n on every command
+kubectl get pods --all-namespaces                       # when unsure where something lives
+```
+
 ### ⚡ Remember
 
 Always know which namespace the task is using. `-n <namespace>` is often the difference between changing the right object and the wrong one.
@@ -528,6 +568,22 @@ Job Pods must use `restartPolicy: Never` or `OnFailure`. With `Never`, each retr
 
 When the application decides when it has finished (for example it consumed all queue items), set `completions` unset and `parallelism` to the desired worker count. The Job completes when **any** Pod succeeds and **all** Pods have terminated:
 
+```mermaid
+flowchart LR
+    Q[Work queue] --> W1[Worker 1]
+    Q --> W2[Worker 2]
+    Q --> W3[Worker 3]
+    Q --> W4[Worker 4]
+    W1 -.->|"item"| Q
+    W2 -.->|"item"| Q
+    W3 -.->|"item"| Q
+    W4 -.->|"item"| Q
+    W2 -->|"all done, exit 0"| DONE[Job complete]
+    W1 -->|"still running when W2 succeeds"| STOP[Terminated by Job controller]
+    W3 --> STOP
+    W4 --> STOP
+```
+
 ```yaml
 apiVersion: batch/v1
 kind: Job
@@ -605,6 +661,19 @@ kubectl create cronjob cleanup --image=busybox:1.36 --schedule="0 0 * * *" -- ec
 kubectl create job manual-run --from=cronjob/cleanup   # trigger it once, now
 kubectl get cronjob,job
 ```
+
+### How a CronJob becomes a Pod
+
+```mermaid
+flowchart LR
+    SCH["schedule (cron)"] --> CJ["CronJob controller in kube-system"]
+    CJ -->|"next due time"| NEWJ["Creates a new Job object"]
+    NEWJ --> J["Job controller reconciles"]
+    J --> POD["Pod(s) (restartPolicy: Never/OnFailure)"]
+    NEWJ --> HIST["successfulJobsHistoryLimit / failedJobsHistoryLimit keep recent Jobs"]
+```
+
+A CronJob does not run Pods directly. It creates a Job for each scheduled time, and the Job controller creates the Pod. That is why `kubectl get cronjob,job` and `kubectl logs job/<name>` are the right commands when something is wrong: the failure is usually in the Job's Pod, not the CronJob itself.
 
 ### ⚡ Remember
 
@@ -763,6 +832,27 @@ tolerations:
 | `podAffinity` / `podAntiAffinity` | Place near or away from Pods with given labels, using a `topologyKey` such as `kubernetes.io/hostname` |
 
 `IgnoredDuringExecution` means the rule is checked only when scheduling; already-running Pods are not evicted if node labels change.
+
+### How the scheduler combines rules
+
+A scheduler decision is the intersection of several filters, not a single rule. For any candidate node the scheduler evaluates, in order:
+
+```mermaid
+flowchart TD
+    S[Scheduler picks a Pod] --> F1{Node has enough<br/>free CPU/memory<br/>for requests?}
+    F1 -->|no| SKIP1[Skip node]
+    F1 -->|yes| F2{Pod tolerates<br/>all NoSchedule taints<br/>on the node?}
+    F2 -->|no| SKIP2[Skip node]
+    F2 -->|yes| F3{nodeSelector and<br/>required nodeAffinity match?}
+    F3 -->|no| SKIP3[Skip node]
+    F3 -->|yes| F4{Required pod (anti)affinity<br/>satisfied?}
+    F4 -->|no| SKIP4[Skip node]
+    F4 -->|yes| F5{Topology spread<br/>within maxSkew?}
+    F5 -->|no - DoNotSchedule| SKIP5[Stay Pending]
+    F5 -->|yes / soft| OK[Bind Pod to this node]
+```
+
+If a Pod is `Pending` with `FailedScheduling` events, walk this diagram in reverse: read the event message to find which filter rejected the node. `taints`, `nodeAffinity`, `Insufficient cpu`, and `unbound PVC` are the four messages you will see most.
 
 ### Taint effects and commands
 
@@ -1087,6 +1177,17 @@ Deployment -> ReplicaSet -> Pods. CronJob -> Job -> Pod. Pick the resource from 
 
 A Horizontal Pod Autoscaler (HPA) scales the replica count of a Deployment, StatefulSet or ReplicaSet based on observed metrics (most commonly CPU utilization). The HPA controller runs in `kube-system` and reads metrics from the metrics-server.
 
+```mermaid
+flowchart LR
+    MS["metrics-server (kubelet -> metrics API)"] --> HPA["HPA controller in kube-system"]
+    HPA -->|writes desired replicas| DEP["Deployment spec.replicas"]
+    DEP --> RS["ReplicaSet controller reconciles"]
+    RS --> PODS["Pod count"]
+    PODS -->|kubelet reports CPU| MS
+```
+
+The HPA is a **control loop**: it polls metrics every 15 seconds by default, compares the average against the target, and writes a new desired count. The Deployment's own controller does the actual Pod creation or deletion, which is why HPA never edits Pods directly.
+
 ### Imperative
 
 ```bash
@@ -1197,6 +1298,20 @@ Put containers together only when they need to **share a lifecycle** (be schedul
 | Ephemeral | Injected into a running Pod | Debugging | `kubectl debug` |
 
 All containers in a Pod are scheduled to the **same node** and share the Pod IP.
+
+```mermaid
+flowchart LR
+    subgraph POD["Pod - one IP, one lifecycle, one node"]
+        direction TB
+        IC["Init container(s) - run to completion, in order"]
+        APP["Main container(s)"]
+        SC["Sidecar / Ambassador / Adapter - long-running alongside"]
+        IC -->|success| APP
+        SC -.->|shared localhost / emptyDir| APP
+    end
+```
+
+The order in the picture is also the **startup order**: init containers finish first, then main containers and any long-running sidecars start together. A regular init container and a native sidecar (see §2.5) both live in `initContainers`; the difference is `restartPolicy: Always`.
 
 ### ⚡ Remember
 
@@ -1520,6 +1635,25 @@ When a Pod is deleted, Kubernetes does not simply kill it. It runs a shutdown se
 
 ### Termination sequence
 
+```mermaid
+sequenceDiagram
+    participant API as API server
+    participant EP as EndpointSlice
+    participant POD as Pod
+    participant H as preStop hook
+    participant C as Container
+    API->>EP: remove Pod from endpoints
+    API->>POD: mark Terminating
+    POD->>H: run preStop (if defined)
+    POD->>C: send SIGTERM
+    Note over C: application drains in-flight work
+    alt exits within terminationGracePeriodSeconds
+        C-->>POD: exit 0
+    else grace period elapses
+        POD->>C: send SIGKILL
+    end
+```
+
 1. The Pod is marked `Terminating` and removed from Service endpoints.
 2. The `preStop` hook (if any) runs.
 3. The container receives **SIGTERM**.
@@ -1643,6 +1777,27 @@ containers:
 ```
 
 For normal ConfigMap volume mounts, file content can update after propagation delay. A `subPath` mount does not receive later ConfigMap updates.
+
+### Four ways to consume a ConfigMap (or Secret)
+
+```mermaid
+flowchart TD
+    CM[ConfigMap] --> M1["env (single key)<br/>configMapKeyRef.name + key"]
+    CM --> M2["envFrom (all keys)<br/>configMapRef.name"]
+    CM --> M3["volume mount (whole files)<br/>volumes[].configMap.name"]
+    CM --> M4["volume mount with items (selected keys, renamed)<br/>volumes[].configMap.items"]
+    M1 --> P1[Each key becomes one env var at container start]
+    M2 --> P2[Every key exported as env var; invalid-name keys skipped]
+    M3 --> P3[Each key becomes a file under mountPath; updates propagate]
+    M4 --> P4[Only listed keys mounted, with chosen filenames; updates propagate]
+```
+
+Rule of thumb:
+
+- Need **one** value -> `env.valueFrom.configMapKeyRef`.
+- Need **all** values as env vars -> `envFrom.configMapRef`.
+- Need **whole files** or values that can change without a restart -> volume mount (no `subPath`).
+- Need only **some** files under custom names -> `items:` in the volume.
 
 ### Complete Pod using both forms
 
@@ -1818,6 +1973,25 @@ Environment variables are loaded into the process when the container starts. Cha
 
 Normal ConfigMap/Secret volume mounts can reflect source changes after propagation; `subPath` mounts do not.
 
+### Mental model: env vs file vs both
+
+```mermaid
+flowchart LR
+    A[Application needs config] --> Q1{Updates without restart?}
+    Q1 -->|yes| V["Mount as a volume (no subPath)"]
+    Q1 -->|no - restart is fine| Q2{One key or whole file?}
+    Q2 -->|whole file| V2["envFrom configMapRef / secretRef"]
+    Q2 -->|one key, want type safety| E["env.valueFrom with configMapKeyRef / secretKeyRef"]
+    V --> N["File appears in container; kubelet refreshes on update (with delay)"]
+    V2 --> N2["All keys exported as env vars at start"]
+    E --> N3["Single env var at start"]
+    N2 -.->|"change requires"| R["kubectl rollout restart"]
+    N3 -.->|"change requires"| R
+    N -.->|"change picked up after ~ kubelet sync period"| OK[No restart needed]
+```
+
+Choose env vars when the application reads them at startup and you are happy to roll on change. Choose a volume mount when the app watches the file (Nginx, Java `-Dconfig.file`, log shippers), or when you need the new value to take effect without a redeploy.
+
 ### Precedence and useful tricks
 
 - If the same variable appears in `env` and `envFrom`, **`env` wins**. With several `envFrom` sources, the **last** one wins.
@@ -1904,6 +2078,12 @@ resources:
     memory: "128Mi"
 ```
 
+### Why a request is a "promise"
+
+The scheduler treats the request as the Pod's guaranteed share. The kubelet reserves that amount on the node so other Pods cannot claim it, even if the workload is currently idle. This is also what the **eviction manager** and **HPA** read: a HPA's `target.averageUtilization` is calculated against `requests.cpu`, not real CPU usage.
+
+If a container has no request, the scheduler assumes zero. That makes the Pod `BestEffort` (see §3.8) and the first to be evicted under node pressure.
+
 ### ⚡ Remember
 
 **Request = scheduling promise.**
@@ -1925,6 +2105,19 @@ resources:
 - Memory is **incompressible** -> exceeding the memory limit can cause `OOMKilled`.
 
 If only a limit is specified for a container, Kubernetes can default the request to the same value for that resource.
+
+### How requests and limits flow
+
+```mermaid
+flowchart LR
+    R["resources.requests.cpu/memory"] --> S["Scheduler: pick a node with enough free capacity"]
+    R --> H["HPA: target utilization = current / request"]
+    R --> E["Eviction manager: which Pods to remove under pressure"]
+    L["resources.limits.cpu"] --> T["Throttle (CPU shares are capped)"]
+    L2["resources.limits.memory"] --> K["OOMKilled when exceeded"]
+```
+
+The same `requests` value is used by three different components. The same `limits` value is enforced by the kernel cgroup on the node. That is why a misconfigured request (too small -> HPA stays at 0%; too large -> Pods stay `Pending`) has more impact than a misconfigured limit.
 
 ### Complete example
 
@@ -1975,6 +2168,17 @@ Kubernetes assigns a Pod a QoS class from its resource configuration:
 | **BestEffort** | No requests or limits on any container | Evicted first |
 
 The class appears in `kubectl get pod <pod> -o jsonpath='{.status.qosClass}'`.
+
+```mermaid
+flowchart TD
+    A[For every container in the Pod] --> Q1{All have cpu + memory requests AND limits, with requests == limits?}
+    Q1 -->|yes| G[Guaranteed - last to evict]
+    Q1 -->|no| Q2{Any container has at least one request or limit?}
+    Q2 -->|yes| B[Burstable - middle]
+    Q2 -->|no| BE[BestEffort - first to evict]
+```
+
+A common exam scenario: a task sets only `limits.memory` and not `requests.memory`. By default the request is **not** set, so the Pod is `Burstable`. If a `LimitRange` is also active in the namespace, it can default a request equal to the limit, which can push the Pod to `Guaranteed`. The QoS class is computed per-Pod using the **least-favorable** container, so a single `BestEffort` container makes the whole Pod `BestEffort`.
 
 ### ⚡ Remember
 
@@ -2178,6 +2382,31 @@ kubectl set serviceaccount deployment/web app-sa
 
 Every namespace has a `default` ServiceAccount that Pods use when `serviceAccountName` is not set.
 
+### Token lifecycle (1.24+)
+
+Before Kubernetes 1.24, every ServiceAccount automatically got a long-lived Secret holding a bearer token. That is gone. Modern Pods receive a **projected**, **short-lived** token mounted at `/var/run/secrets/kubernetes.io/serviceaccount`, and kubelet rotates it before it expires.
+
+```mermaid
+sequenceDiagram
+    participant U as kubectl / CI
+    participant API as kube-apiserver
+    participant SA as ServiceAccount app-sa
+    participant POD as Pod
+    Note over SA,POD: Pod starts with serviceAccountName: app-sa
+    API->>POD: project token (audience=https://kubernetes.default.svc, TTL ~1h)
+    POD->>API: call API with bearer token
+    Note over API,POD: token expires -> kubelet requests a new projected token -> seamless rotation
+    U->>API: kubectl create token app-sa --duration=1h
+    API-->>U: short-lived token (audience, TTL chosen at request)
+```
+
+Practical consequences for the exam:
+
+- You no longer see a Secret named after the ServiceAccount. `kubectl get secret -n dev` no longer surfaces a token Secret automatically.
+- `automountServiceAccountToken: false` on the Pod or ServiceAccount removes the projected mount entirely - the Pod cannot reach the API at all.
+- For external clients (CI, scripts), `kubectl create token` is the supported way; long-lived tokens are no longer the default.
+- Image pull Secrets still use the regular Secret mechanism; they are unrelated to API tokens.
+
 ### ⚡ Remember
 
 **ServiceAccount = identity. RBAC = permissions.**
@@ -2189,6 +2418,19 @@ Authorization answers:
 > **What are you allowed to do?**
 
 RBAC expresses permissions with Roles/ClusterRoles and attaches them to identities using Bindings.
+
+```mermaid
+flowchart LR
+    REQ["API request: (user, verb, resource, namespace)"] --> LOOK[Authorization: collect all rules bound to the user]
+    LOOK --> R1[Role bindings in the namespace]
+    LOOK --> R2[ClusterRole bindings (role-wide or namespace-wide)]
+    R1 --> UNION{Any rule allows this (verb, resource, namespace)?}
+    R2 --> UNION
+    UNION -->|yes| OK[Allowed]
+    UNION -->|no| NO[403 Forbidden]
+```
+
+The decision is a union: every binding that names the user is collected, and if any rule in any of them matches the (verb, resource, namespace, optional resourceName) tuple, the request is allowed. There is no notion of "deny" rules - if a single binding allows, the request is allowed.
 
 ```mermaid
 flowchart LR
@@ -2349,7 +2591,7 @@ Admission runs after authentication/authorization and before the object is persi
 
 ```mermaid
 flowchart LR
-    REQ[API request] --> AUTHN["Authentication: who are you?"] --> AUTHZ["Authorization: allowed?"] --> MUT[Mutating admission] --> VAL[Validating admission] --> ETCD[(Persisted in etcd)]
+    REQ[API request] --> AUTHN["Authentication: who are you?"] --> AUTHZ["Authorization: allowed?"] --> MUT["Mutating admission (defaults, webhooks, ServiceAccount, LimitRanger...)"] --> VAL["Validating admission (quota, PodSecurity, ValidatingAdmissionPolicy, webhooks...)"] --> ETCD[(Persisted in etcd)]
 ```
 
 Admission can:
@@ -2358,6 +2600,8 @@ Admission can:
 - **validate and reject** an object (validating runs after mutation)
 
 Relevant built-in/policy mechanisms include ResourceQuota, LimitRanger, ServiceAccount, Pod Security Admission, ValidatingAdmissionPolicy (CEL rules) and external validating/mutating webhooks.
+
+The order matters: a mutating webhook can add a default `serviceAccountName` or storage class, and a validating webhook then runs against the **post-mutation** object. Built-in mutating plugins (`ServiceAccount`, `DefaultStorageClass`, `LimitRanger`) run before built-in validating plugins (`ResourceQuota`, `PodSecurity`), so a Pod that violates Pod Security can be rejected even if the request came in without a SecurityContext.
 
 ### ⚡ Remember
 
@@ -2791,6 +3035,16 @@ spec:
 
 The relationship is:
 
+```mermaid
+flowchart LR
+    SC["StorageClass (defines a provisioner + reclaim policy)"] -.->|"dynamic provisioning"| PV
+    PV["PersistentVolume (cluster-scoped, real storage)"] <-->|"binds on capacity / accessMode / class match"| PVC["PersistentVolumeClaim (request, namespaced)"]
+    PVC -->|"mounted by"| POD["Pod (volumeMount)"]
+    PV2["(or pre-created PV)"] -.->|"can bind if match"| PVC
+```
+
+The match checks three things: `storageClassName`, `accessModes`, and that PV `capacity >= PVC.resources.requests.storage`. Volume mode (`Filesystem` vs `Block`) and `volumeBindingMode` (`Immediate` vs `WaitForFirstConsumer`) also matter; a mismatch is a typical `Pending` cause (see §9.14).
+
 ```text
 PV <-binds-> PVC <-mounted by-> Pod
 ```
@@ -2942,10 +3196,19 @@ A **headless Service** (`clusterIP: None`) has no virtual IP; DNS returns the in
 
 ```mermaid
 flowchart TD
-    HS["Headless Service db (clusterIP: None)"] -.->|"DNS db-0.db, db-1.db"| P0
-    STS[StatefulSet db] --> P0["Pod db-0"] --> PVC0["PVC data-db-0"] --> PV0[PV] --> S0[(Storage)]
-    STS --> P1["Pod db-1"] --> PVC1["PVC data-db-1"] --> PV1[PV] --> S1[(Storage)]
+    subgraph HS["Headless Service db - clusterIP: None"]
+        DNS["DNS: db-0.db.dev.svc.cluster.local<br/>db-1.db.dev.svc.cluster.local<br/>db-2.db.dev.svc.cluster.local"]
+    end
+    HS -.->|"returns A records per Pod"| CLIENT["Client resolves db-0.db, db-1.db, db-2.db explicitly"]
+    CLIENT --> P0["Pod db-0"] --> PVC0["PVC data-db-0"] --> PV0[PV] --> S0[(Storage)]
+    CLIENT --> P1["Pod db-1"] --> PVC1["PVC data-db-1"] --> PV1[PV] --> S1[(Storage)]
+    CLIENT --> P2["Pod db-2"] --> PVC2["PVC data-db-2"] --> PV2[PV] --> S2[(Storage)]
+    STS["StatefulSet db (serviceName: db)"] --> P0
+    STS --> P1
+    STS --> P2
 ```
+
+The key difference from a normal Service: a headless Service does **not** load-balance. The client is expected to know which Pod it wants (`db-0.db`, `db-1.db`) and reach it directly. That is why most database clients (PostgreSQL, MySQL) work well with a headless Service: they can target a primary, fail over to a replica, and reconnect to a stable name.
 
 ### Complete example
 
@@ -3081,6 +3344,36 @@ strategy:
 | `minReadySeconds` | 0 |
 | `revisionHistoryLimit` | 10 |
 | `progressDeadlineSeconds` | 600 |
+
+### How the two parameters interact
+
+The Deployment controller computes the upper and lower bound for **total** Pod count at any moment:
+
+```mermaid
+flowchart LR
+    subgraph OLD["Old ReplicaSet v1"]
+        O1[v1] --- O2[v1] --- O3[v1]
+    end
+    OLD -->|scale up by maxSurge| MID["Mix: 3 x v1 + 1 x v2 (maxSurge=1, maxUnavailable=0)"]
+    MID --> MID2["Mix: 2 x v1 + 2 x v2"]
+    MID2 --> MID3["Mix: 1 x v1 + 3 x v2"]
+    MID3 --> NEW["New ReplicaSet v2 (3 pods)"]
+```
+
+The "current" pod count is constrained by:
+
+```text
+desired - maxUnavailable <= current <= desired + maxSurge
+```
+
+So with `replicas: 3` and the defaults (`maxSurge: 25%`, `maxUnavailable: 25%`) the rollout is allowed to run between `3` and `4` Pods, replacing one at a time. Common presets:
+
+| Preset | Trade-off |
+|---|---|
+| `maxSurge: 1`, `maxUnavailable: 0` | Strict zero-downtime: always run >= `replicas` Pods, but temporarily need cluster room for `replicas + 1` |
+| `maxSurge: 0`, `maxUnavailable: 1` | No extra capacity needed, but `replicas - 1` is briefly serving traffic |
+| `maxSurge: 25%`, `maxUnavailable: 25%` | Default; balanced |
+| `maxSurge: 0`, `maxUnavailable: 0` | **Rejected** - the controller would have no room to make progress |
 
 ### Commands
 
@@ -3777,7 +4070,18 @@ flowchart TD
     L -->|yes| RST
     ACT --> R{Readiness fails?}
     R -->|yes| REM[Pod removed from Service endpoints]
+    R -->|no| TRAF[Pod receives Service traffic]
 ```
+
+The three probes answer three different questions and have different consequences:
+
+| Probe | Question answered | Fail action | Run time |
+|---|---|---|---|
+| `startupProbe` | Has the app finished initializing? | Restart (after `failureThreshold`) | Until first success, then disabled |
+| `livenessProbe` | Is the app still healthy? | Restart | For the whole Pod life |
+| `readinessProbe` | Can it accept traffic right now? | Remove from Service endpoints (no restart) | For the whole Pod life |
+
+The probes share the same `httpGet`/`exec`/`tcpSocket`/`grpc` mechanism and the same timing fields, but a single failure in liveness eventually causes a Pod restart, while a single failure in readiness only pauses traffic.
 
 Each probe uses one mechanism:
 
@@ -4081,11 +4385,18 @@ spec:
 
 ```mermaid
 flowchart LR
-    C[Client] -->|"Service port 80"| S[Service web]
+    C[Client Pod] -->|"dns: web.dev.svc -> ClusterIP"| S[Service web]
     S -->|"selector: app=web"| E{"Ready Pods (endpoints)"}
     E -->|"targetPort 8080"| P1["Pod A"]
     E -->|"targetPort 8080"| P2["Pod B"]
+    KP[kube-proxy on each node] -.->|programs DNAT rules| S
 ```
+
+The flow has three stages:
+
+1. **Name resolution.** CoreDNS returns the Service's ClusterIP for the name `web` (or `web.dev` from another namespace).
+2. **DNAT to a Pod.** `kube-proxy` on the node intercepts the connection to the ClusterIP (which no interface owns) and rewrites the destination to one of the ready Pods' IPs and the `targetPort`.
+3. **Forward.** The connection reaches the chosen Pod. If the Pod is no longer ready, kube-proxy drops it from the EndpointSlice and the next connection goes to a different Pod.
 
 ### Port meanings
 
@@ -4303,6 +4614,28 @@ Rules to keep in mind:
 - A Pod selected by no policy is unrestricted. Once a policy selects it for `Ingress` (or `Egress`), only what is allowed is permitted in that direction.
 - Policies are **additive**: the union of all allow rules applies. There are no deny rules.
 - `policyTypes` says which directions the policy governs; list `Egress` explicitly to restrict egress.
+
+### How the "no policy vs one policy vs many policies" rules combine
+
+```mermaid
+flowchart TD
+    P[Pod about to send/receive traffic] --> Q{Any NetworkPolicy selects this Pod?}
+    Q -->|no, in this direction| OK[Allowed]
+    Q -->|yes, but no rule allows this traffic| DEN[Denied - timeout]
+    Q -->|yes, and at least one rule allows it| ALLOW[Allowed]
+    subgraph ADD["Additive: any matching allow wins"]
+        P1[Policy A allows frontend in ns X] --> ALLOW
+        P2[Policy B allows 10.0.0.0/16] --> ALLOW
+    end
+```
+
+The mental model:
+
+- "No policy" means "no restrictions" for that Pod, in that direction.
+- "One policy" means "the union of its allow rules" - anything not matched is denied.
+- "Multiple policies" mean "the union of all their allow rules across all selecting policies" - still no explicit deny.
+
+That is why a "default-deny-all" policy plus several "allow" policies is the standard pattern: the deny is implicit (anything not explicitly allowed by any allow rule), and individual allows compose across policies.
 
 ### Default deny all ingress and egress
 
@@ -4801,6 +5134,22 @@ kubectl describe node <node>        # Allocatable vs Allocated resources
 kubectl get nodes --show-labels
 ```
 
+```mermaid
+flowchart TD
+    A[Pod Pending] --> B[describe pod - read events]
+    B --> C{Event text?}
+    C -->|Insufficient cpu / memory| R[Sum of requests > node free capacity - lower requests, scale down, or add nodes]
+    C -->|untolerated taint| T[Add a toleration matching the taint]
+    C -->|didn't match nodeSelector / affinity| N[Fix selector or label the right node]
+    C -->|unbound immediate PVC| P[See PVC Pending section]
+    C -->|no nodes match at all| X[Check node Ready status and kubelet]
+    R --> V[Verify: pod scheduled]
+    T --> V
+    N --> V
+    P --> V
+    X --> V
+```
+
 | Event text (interpretation) | Likely cause | Fix |
 |---|---|---|
 | `Insufficient cpu` / `Insufficient memory` | Requests larger than any node's free capacity | Lower `resources.requests` or free capacity |
@@ -4912,7 +5261,21 @@ kubectl get endpointslices -l kubernetes.io/service-name=<svc>
 kubectl exec <pod> -- wget -qO- localhost:<port>/<probe-path>
 ```
 
+```mermaid
+flowchart LR
+    P[Pod is Running] -->|probe fails| R[Ready condition: False]
+    R -->|kube-proxy watches| ES[EndpointSlice: Pod removed]
+    ES -->|Service has no endpoints| NX[Connection times out or 'no endpoints']
+    P -->|probe eventually passes| OK[Ready: True -> EndpointSlice adds Pod]
+```
+
 **Interpretation and fix:** the readiness probe fails because its path/port/command does not match what the application serves, or the app is not up yet. Fix the probe (or the app), or increase `initialDelaySeconds` / add a startup probe.
+
+Common, easy-to-miss causes:
+
+- The container listens on a different port than `targetPort` of the Service (so the Service sends traffic into a closed port - symptom is connection refused, not a probe failure).
+- The probe path returns 4xx/5xx because the route is not registered yet (startup vs readiness confusion - use a `startupProbe` for slow apps).
+- The app is healthy but on `localhost` only; the readiness probe must reach the same port the Service forwards to.
 
 **Remember:** Running != Ready.
 
