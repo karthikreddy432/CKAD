@@ -1095,7 +1095,7 @@ kubectl annotate pod web owner=platform
 
 ```bash
 kubectl edit deployment web                                  # opens live object in the editor
-kubectl patch deployment web -p '{"spec":{"replicas":4}}'
+kubectl patch deployment web --type=merge -p '{"spec":{"replicas":4}}'
 kubectl apply -f web.yaml                                    # declarative create/update
 kubectl replace --force -f pod.yaml                          # delete + recreate (immutable field changed)
 kubectl delete pod web --grace-period=0 --force              # fast delete (use deliberately)
@@ -1168,15 +1168,15 @@ Three patch types map to three on-disk formats:
 
 | Flag | Format | Use when |
 |---|---|---|
-| `--type=merge` (default) | JSON merge patch (RFC 7396) | Replacing values; arrays are replaced wholesale |
-| `--type=strategic` | Strategic merge | Lists merged by `name` (containers, volumes, ports, env) |
+| `--type=strategic` (default) | Strategic merge | Lists merged by `name` (containers, volumes, ports, env); not supported for CRDs |
+| `--type=merge` | JSON merge patch (RFC 7396) | Replacing values; arrays are replaced wholesale; required for CRDs |
 | `--type=json` | JSON 6902 | Precise list-element edits; must be valid JSON 6902 |
 
 Examples:
 
 ```bash
-# JSON merge (default): change a single field
-kubectl patch deployment web -p '{"spec":{"replicas":4}}'
+# JSON merge patch: change a single field (works fine here even though strategic is the default)
+kubectl patch deployment web --type=merge -p '{"spec":{"replicas":4}}'
 
 # Strategic merge: add an env var without losing existing ones
 kubectl patch deployment web --type=strategic -p '{
@@ -2539,14 +2539,14 @@ kubectl describe rs <replicaset> -n dev      # quota errors for Deployment Pods
 
 ### Order of operations: `LimitRange` -> `ResourceQuota` -> Pod
 
-When a Pod is created in a namespace with both a `LimitRange` and a `ResourceQuota`, the API server applies them in this order:
+When a Pod is created in a namespace with both a `LimitRange` and a `ResourceQuota`, the API server applies them in this order (mutating admission runs before validating admission, see §4.8):
 
-1. The Pod is **validated** for missing required fields. If the quota requires `requests.cpu`/`limits.memory` and they are absent, the Pod is rejected immediately.
-2. The `LimitRange` defaults (and minimum/maximum constraints) are applied: missing `requests`/`limits` are filled in from the LimitRange's `defaultRequest`/`default`.
-3. The new values are checked against the `ResourceQuota`: if the namespace has no remaining quota, the Pod is rejected.
+1. The `LimitRange` (a mutating admission plugin) applies its defaults and min/max constraints first: missing `requests`/`limits` are filled in from `defaultRequest`/`default`, and the LimitRange itself rejects values outside `min`/`max`.
+2. The resulting, now-complete Pod is checked against the `ResourceQuota` (a validating admission plugin). If the quota requires `requests.cpu`/`limits.memory` and either the Pod or the LimitRange did not supply them, the Pod is rejected here.
+3. If the namespace has no remaining quota for the requested amounts, the Pod is rejected.
 4. If accepted, the resources count against the quota's `Used`.
 
-The practical consequence: a missing `requests` field is fine if a LimitRange provides a default; it is fatal if a quota requires it and no LimitRange exists.
+The practical consequence: a missing `requests` field is fine if a LimitRange provides a default, because that default is filled in **before** the quota check runs; it is only fatal if a quota requires the field and no LimitRange supplies it.
 
 ### ⚡ Remember
 
@@ -4025,7 +4025,7 @@ Prefer an explicit revision when the task specifies which revision to restore.
 
 ### Change cause
 
-Do not rely on the old `--record` habit; it was **removed in Kubernetes 1.21**. Record change information with the annotation that `rollout history` displays:
+Do not rely on the old `--record` habit; it has been deprecated for a long time and most current `kubectl` builds reject it outright with `unknown flag: --record`. Record change information with the annotation that `rollout history` displays:
 
 ```bash
 kubectl annotate deployment/web kubernetes.io/change-cause="upgrade to nginx 1.28"
@@ -4494,7 +4494,7 @@ patches:
             cpu: "100m"
 ```
 
-Rule of thumb: use strategic-merge for small structural changes (labels, resources, env), and JSON 6902 for precise list-element edits where strategic merge would otherwise be ambiguous. The `kubectl patch` flags mirror this: `--type=merge` (default) is JSON merge, `--type=strategic` does field-level merge, `--type=json` requires the patch to be valid JSON 6902.
+Rule of thumb: use strategic-merge for small structural changes (labels, resources, env), and JSON 6902 for precise list-element edits where strategic merge would otherwise be ambiguous. The `kubectl patch` flags mirror this: `--type=strategic` (the default) does field-level merge, `--type=merge` is a plain JSON merge patch, `--type=json` requires the patch to be valid JSON 6902.
 
 ### ConfigMap generator
 
@@ -5508,12 +5508,14 @@ A **timeout** is the NetworkPolicy fingerprint; "connection refused" means the S
 
 - Forgetting `policyTypes`. A policy with only `ingress:` rules is implicitly `policyTypes: [Ingress]`, but adding an `egress:` block without listing `Egress` in `policyTypes` makes the egress rule inert.
 - A `namespaceSelector` without a `kubernetes.io/metadata.name` match. Every namespace has this label; use it instead of a custom `team: platform` label that some namespaces may not have.
-- A policy that selects all Pods (`podSelector: {}`) and lists an empty `from:` list. The implicit deny applies to the whole namespace, including CoreDNS egress. Either narrow the selector or add the DNS egress allow first.
+- A policy that selects all Pods (`podSelector: {}`) with `policyTypes: [Ingress]` and an empty `from:` list. This denies all **incoming** traffic to every Pod in the namespace, but it does **not** touch egress or DNS lookups — those are only affected by a policy whose `policyTypes` includes `Egress`. Do not "fix" a broken DNS lookup by editing an ingress-only deny-all; check for a separate egress-denying policy instead.
 - Setting `podSelector: {}` and forgetting this also selects Pods in other namespaces via the policy's own namespace. `podSelector` is intra-namespace; use `namespaceSelector` for cross-namespace selection.
 
 ## 8.10 Ingress
 
 Ingress defines HTTP/HTTPS routing to Services. It only works if an **Ingress controller** (for example ingress-nginx) is running in the cluster.
+
+**Note (as of late 2025/2026):** the Kubernetes project announced that ingress-nginx is being retired, with best-effort maintenance ending March 2026 and no further releases or security fixes after that. Existing deployments keep working and the CKAD `Ingress` API itself is unaffected, but if you are setting up a practice cluster now, any Ingress controller (ingress-nginx, Traefik, HAProxy, or a Gateway API implementation) demonstrates the same `Ingress` object behavior this section covers — you don't need to chase this news for exam purposes, just don't be surprised if newer tutorials point you elsewhere.
 
 ```mermaid
 flowchart LR
