@@ -257,49 +257,57 @@ Removal from Service endpoints and the SIGTERM happen close together but aren't 
 
 ## 5. Config and Secrets: how real projects actually do it
 
-`ConfigMap` and `Secret` are the Kubernetes-facing mechanism, but the **runtime source of truth** for sensitive values is often an external secrets manager. The important production question is not "how do I write a Secret YAML?" but **"where should the secret live, how does the Pod authenticate, and how does the application receive updates?"**
+`ConfigMap` and `Secret` are the Kubernetes-facing mechanisms, but production systems usually separate **where a value is stored**, **how a workload proves its identity**, and **how the application consumes the value**.
 
-### The real-world picture
+The key question is not just "how do I create a Secret?" It is:
+
+> **Where is the source of truth, how does the Pod authenticate, how does the secret reach the application, and what happens when it rotates?**
+
+### 5.1 The real production model
 
 ```mermaid
 flowchart LR
-    STORE["External secret store\nAzure Key Vault / AWS Secrets Manager /\nGCP Secret Manager / Vault"] --> ID["Workload identity\nServiceAccount → cloud identity"]
-    ID --> SYNC["ESO\nor Secrets Store CSI Driver"]
-    SYNC --> POD["Pod"]
-    POD --> APP["Application"]
+    DEV["Developer / Git\nHelm / manifests"] --> CI["CI/CD\nGitHub Actions"]
+    CI --> DEPLOY["Deployment / GitOps\nArgo CD / Flux"]
+    DEPLOY --> POD["Kubernetes Pod"]
+
+    VAULT["External secret store\nAzure Key Vault / AWS Secrets Manager / Vault"]
+    ID["Workload identity\nServiceAccount → cloud identity"]
+
+    ID --> VAULT
+    POD --> ID
+    VAULT --> DELIVERY{"Secret delivery"}
+    DELIVERY --> ESO["ESO\nExternal Secrets Operator"]
+    ESO --> KSEC["Kubernetes Secret"]
+    KSEC --> ENV["env / envFrom\nsecretKeyRef"]
+    DELIVERY --> CSI["Secrets Store\nCSI Driver"]
+    CSI --> FILE["Mounted file\n/tmp or /mnt/secrets-store"]
+    ENV --> APP["Application"]
+    FILE --> APP
+    POD --> APP
 ```
 
-A raw Kubernetes `Secret` value is base64-encoded, not encrypted by that encoding, and Kubernetes stores Secret data unencrypted at rest unless the cluster is configured for encryption at rest. RBAC also determines who can read the Secret. So committing a real `Secret` manifest or Helm values file to Git is not made safe by base64 encoding. citeturn169954search6
-
-### 5.1 The four patterns you should recognize
-
-| Pattern | Where the source of truth lives | What reaches the Pod | What you'll usually use it for |
-|---|---|---|---|
-| **Kubernetes Secret** | Kubernetes | Env vars or mounted Secret volume | Simple clusters, labs, non-external integrations |
-| **External Secrets Operator (ESO)** | External secret manager | A normal Kubernetes `Secret` | Teams that want a Kubernetes Secret API (`secretKeyRef`, `envFrom`) while sourcing values externally |
-| **Secrets Store CSI Driver** | External secret manager | Files mounted into the Pod | Runtime secret/key/cert files without requiring a Kubernetes `Secret` object |
-| **Sealed Secrets** | Encrypted manifest in Git | Kubernetes `Secret` after controller decrypts | GitOps workflows where an encrypted Secret resource is committed to the repo |
-
-The CSI Driver can also **optionally sync** mounted content into a Kubernetes `Secret`; that changes the security/data-flow picture, so don't describe CSI as "never creates Kubernetes Secrets." citeturn169954search1turn169954search3
-
-### 5.2 The key decision: does the application need a file or an environment variable?
-
-This is one of the most important practical distinctions.
+This gives you four separate boundaries:
 
 ```text
-Need a mounted file?
-    └── Secrets Store CSI Driver → external secret → file
+Git / CI/CD
+  → ships configuration and application versions
 
-Need envFrom / secretKeyRef?
-    └── Kubernetes Secret
-          ↑
-          ├── manually created
-          └── or synced by ESO
+External secret manager
+  → owns sensitive runtime values
+
+Kubernetes
+  → supplies workload identity and Pod lifecycle
+
+Application
+  → consumes the secret as an env var or file
 ```
 
-The Secrets Store CSI Driver's native flow is **mounting secret material into a CSI volume**. It can optionally sync that material into a Kubernetes Secret, but the Pod must mount the CSI volume for the sync to occur. citeturn169954search1turn169954search5
+Do not assume that every company uses every box. The point is to recognize the patterns and understand where the trust boundaries are.
 
-So this:
+### 5.2 Kubernetes Secret: the native baseline
+
+A Kubernetes `Secret` is useful even when the actual source of truth is elsewhere because applications commonly already consume it through `env`, `envFrom`, or a Secret volume.
 
 ```yaml
 envFrom:
@@ -307,49 +315,116 @@ envFrom:
       name: orders-api-secrets
 ```
 
-expects a **Kubernetes Secret**.
+or one specific key:
 
-It does not directly mean:
-
-```text
-Azure Key Vault → envFrom
+```yaml
+env:
+  - name: DB_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: orders-api-secrets
+        key: DB_PASSWORD
 ```
 
-For an external store with direct runtime mounting:
+A Secret's data is base64-encoded in the API representation; **base64 is encoding, not encryption**. Kubernetes can encrypt Secret data at rest when encryption at rest is configured. Access is still controlled by RBAC, so a user or workload with permission to read Secrets can retrieve them. Never treat a committed Secret manifest as safe merely because its values look like base64.
 
-```text
-Azure Key Vault
-      ↓
-Azure provider
-      ↓
-Secrets Store CSI Driver
-      ↓
-/mnt/secrets-store/db-password
-      ↓
-Application
+```mermaid
+flowchart LR
+    S["Kubernetes Secret"] --> E["env / envFrom"]
+    S --> V["Secret volume"]
+    E --> APP["Application"]
+    V --> APP
 ```
 
-### 5.3 A realistic Azure example
+### 5.3 The four patterns you should recognize
 
-A common AKS pattern is:
+| Pattern | Source of truth | What reaches the Pod | Typical use |
+|---|---|---|---|
+| **Kubernetes Secret** | Kubernetes | Env vars or Secret volume | Simple clusters, labs, native Kubernetes consumption |
+| **External Secrets Operator (ESO)** | External secret manager | Kubernetes `Secret` | Existing workloads already built around `secretKeyRef` / `envFrom` |
+| **Secrets Store CSI Driver** | External secret manager | Mounted files; optional Secret sync | Certificates, keys, credentials, or apps that can read a file |
+| **Sealed Secrets** | Encrypted object stored in Git | Kubernetes `Secret` after controller decrypts | GitOps repositories that need an encrypted Secret manifest |
 
-```text
-Azure Key Vault
-   │
-   │ secret: orders-db-password
-   ▼
-Azure Key Vault provider
-   │
-   │ authenticated using workload identity / managed identity
-   ▼
-Secrets Store CSI Driver
-   │
-   ▼
-orders-api Pod
-   └── /mnt/secrets-store/db-password
+The important distinction is that **ESO and CSI Driver do not solve exactly the same problem**.
+
+```mermaid
+flowchart TD
+    STORE["Azure Key Vault / AWS Secrets Manager / Vault"] --> CH{"How should Kubernetes consume it?"}
+    CH -->|"As a Kubernetes Secret"| ESO["External Secrets Operator"]
+    ESO --> KS["Kubernetes Secret"]
+    KS --> POD1["Pod\nenvFrom / secretKeyRef / volume"]
+    CH -->|"As mounted secret material"| CSI["Secrets Store CSI Driver"]
+    CSI --> POD2["Pod\nmounted file"]
+    CH -->|"Encrypted manifest in Git"| SEALED["Sealed Secrets"]
+    SEALED --> KS2["Kubernetes Secret"]
 ```
 
-The `SecretProviderClass` defines **which Key Vault objects to fetch** and the Pod references that `SecretProviderClass` through a CSI volume. The CSI Driver documentation currently lists Azure, AWS, GCP, Vault and other providers. citeturn169954search0turn169954search5
+A CSI Driver deployment **can optionally sync** mounted content into a Kubernetes Secret. Therefore, the accurate statement is not "CSI never creates Kubernetes Secrets"; it is "CSI's native delivery model is a mounted CSI volume, with optional Secret synchronization." 
+
+### 5.4 The key decision: file or environment variable?
+
+This is one of the most useful production questions to ask before choosing the mechanism.
+
+```text
+Application needs an environment variable?
+    │
+    ├── Already has a Kubernetes Secret
+    │       └── env / envFrom / secretKeyRef
+    │
+    └── Secret lives externally
+            └── ESO → Kubernetes Secret → env / envFrom / secretKeyRef
+
+Application can consume a file?
+    │
+    └── Secrets Store CSI Driver → mounted file
+```
+
+The CSI Driver's native flow is:
+
+```mermaid
+sequenceDiagram
+    participant K as Kubelet
+    participant CSI as Secrets Store CSI Driver
+    participant P as Azure Key Vault Provider
+    participant KV as Azure Key Vault
+    participant APP as Application
+
+    K->>CSI: Mount CSI volume for Pod
+    CSI->>P: Fetch objects from SecretProviderClass
+    P->>KV: Authenticate using workload identity
+    KV-->>P: Secret / key / certificate
+    P-->>CSI: Secret content
+    CSI-->>K: Mounted secret files
+    K->>APP: /mnt/secrets-store/* available
+```
+
+The provider-specific details differ by cloud, but the operational shape remains the same: **identity → external store → CSI driver → Pod filesystem**. The upstream driver documents the mount flow and optional Kubernetes Secret synchronization. 
+
+### 5.5 Azure Key Vault + AKS: the pattern to know
+
+For an Azure environment, make this your concrete mental model:
+
+```mermaid
+flowchart LR
+    AKS["AKS Pod"] --> SA["Kubernetes ServiceAccount"]
+    SA --> WI["Microsoft Entra Workload ID\n/ managed identity"]
+    WI --> RBAC["Azure role / Key Vault permission"]
+    RBAC --> KV["Azure Key Vault"]
+    KV --> PROVIDER["Azure Key Vault provider"]
+    PROVIDER --> CSI["Secrets Store CSI Driver"]
+    CSI --> MOUNT["Pod filesystem\n/mnt/secrets-store"]
+    MOUNT --> APP["Application"]
+```
+
+The reason this architecture is important is that the Pod does **not** need a long-lived Azure client secret just to retrieve another secret. AKS supports integrating the Azure Key Vault provider for the Secrets Store CSI Driver, and Azure documents Microsoft Entra Workload ID as a way for workloads to obtain Azure tokens without storing a long-lived Azure credential inside the Pod. 
+
+At the cluster level, the Azure Key Vault provider can be enabled on AKS and used with a `SecretProviderClass`. Exact installation and identity configuration depend on the AKS setup and platform standards, so treat the following as the **shape to understand**, not a copy-paste production manifest. 
+
+### 5.6 `SecretProviderClass`: the mapping object
+
+Think of `SecretProviderClass` as the declaration that answers:
+
+> **Which external store should I use, and which objects should this Pod request?**
 
 Conceptually:
 
@@ -369,7 +444,7 @@ spec:
           objectType: secret
 ```
 
-Then the Deployment mounts it:
+Then the Deployment connects that class to a CSI volume:
 
 ```yaml
 spec:
@@ -392,267 +467,433 @@ spec:
               secretProviderClass: orders-api-secrets
 ```
 
-The important idea is the **chain**, not memorizing provider-specific YAML:
+The relationship to memorize is:
 
-```text
-ServiceAccount / workload identity
-        ↓
-permission to read external secret
-        ↓
-SecretProviderClass
-        ↓
-CSI volume
-        ↓
-secret file in Pod
+```mermaid
+flowchart TD
+    SPC["SecretProviderClass\norders-api-secrets"] -->|"defines"| OBJECTS["Key Vault objects\norders-db-password"]
+    POD["Pod"] -->|"references"| VOL["CSI volume"]
+    VOL -->|"uses"| SPC
+    SPC --> PROVIDER["Azure provider"]
+    PROVIDER --> KV["Azure Key Vault"]
 ```
 
-For Azure specifically, current Azure Workload Identity documentation describes federating a Kubernetes ServiceAccount token with an Azure identity so the workload can obtain Azure tokens without putting a long-lived Azure credential into the Pod. citeturn339531search3turn339531search8
+The `SecretProviderClass` and the Pod need to line up correctly. A common troubleshooting failure is a typo or wrong namespace/name, causing the volume mount to fail before the application starts. The Azure provider documentation uses this same overall pattern. 
 
-### 5.4 CSI Driver vs ESO: the production choice you'll actually discuss
+### 5.7 ESO: when you need `envFrom` / `secretKeyRef`
 
-```text
-External Secrets Operator
-
-Azure Key Vault
-      ↓
-     ESO
-      ↓
-Kubernetes Secret
-      ↓
-env / envFrom / secretKeyRef / Secret volume
-      ↓
-Pod
-```
-
-versus:
-
-```text
-Secrets Store CSI Driver
-
-Azure Key Vault
-      ↓
-     CSI Driver
-      ↓
-mounted file in Pod
-      ↓
-Application
-```
-
-A practical rule:
-
-| If the application/team wants... | Usually think about... |
-|---|---|
-| Existing apps that already consume `secretKeyRef` / `envFrom` | **ESO** |
-| Secret/key/certificate files mounted directly into the workload | **CSI Driver** |
-| Encrypted Secret manifests stored in Git | **Sealed Secrets** |
-| A simple cluster with no external secret manager | **Kubernetes Secret** |
-
-Neither ESO nor CSI is automatically "better"; they produce different operational models. ESO's normal model is to reconcile an external secret into a Kubernetes `Secret`; its current API includes refresh behavior such as periodic synchronization. citeturn169954search10turn169954search11
-
-### 5.5 Rotation: the detail that causes real incidents
-
-Secret rotation is where the architecture matters.
-
-Suppose:
-
-```text
-01:00  DB_PASSWORD = old
-02:00  DB_PASSWORD rotated in Azure Key Vault
-```
-
-With CSI-mounted files, the driver can re-fetch and update the mounted content when secret rotation is enabled. The current CSI Driver implementation uses kubelet republish calls and a rotation polling interval; the feature is still documented as **alpha**, so teams should validate the version and operational behavior they run. citeturn169954search8turn169954search4
-
-But **environment variables are different**:
-
-```text
-External Secret changes
-        ↓
-Kubernetes Secret changes
-        ↓
-Existing container environment variable
-        X
-        │
-        └── does NOT magically change
-```
-
-A Pod that consumed the value as an environment variable needs a restart/rollout to receive the new value. The CSI Driver documentation explicitly calls this out for synced Kubernetes Secrets used as environment variables. citeturn169954search8
-
-So in production, always ask:
-
-> **How does the application consume the secret, and what happens when the secret rotates?**
-
-A password mounted as a file can be updated without recreating the Pod; an env var normally requires a new container process. Whether the application can notice a changed file and safely reload it is an application concern.
-
-### 5.6 Why workload identity matters
-
-Avoid the anti-pattern:
-
-```text
-Pod
- ├── AZURE_CLIENT_SECRET=...
- └── reads Key Vault
-```
-
-The Pod now needs a long-lived credential just to retrieve the real secret.
-
-Prefer:
-
-```text
-Kubernetes ServiceAccount
-        ↓
-Workload identity / managed identity
-        ↓
-Azure identity
-        ↓
-Key Vault permission
-        ↓
-secret
-```
-
-The same principle applies to AWS and GCP: **the workload gets an identity, and that identity gets permission to read only the secrets it needs.**
-
-This separates:
-
-```text
-"Who is this workload?"
-        from
-"What secret may this workload read?"
-```
-
-That's an important production security boundary.
-
-### 5.7 GitHub Actions is a different secret boundary
-
-Do not mix up **CI/CD secrets** and **runtime application secrets**.
-
-```text
-GitHub Actions secret
-        ↓
-GitHub workflow
-        ↓
-deploy / cloud API / registry authentication
-```
-
-versus:
-
-```text
-Azure Key Vault
-        ↓
-workload identity
-        ↓
-Kubernetes Pod
-        ↓
-application runtime secret
-```
-
-A GitHub Actions secret is not directly consumable by:
+Suppose the application already expects:
 
 ```yaml
 envFrom:
   - secretRef:
-      name: db-secret
+      name: orders-api-secrets
 ```
 
-`envFrom` is reading a Kubernetes `Secret`. A pipeline can create/update that Kubernetes Secret, but that introduces another synchronization path and means the CI system is handling the runtime secret.
+You can keep that application contract and move the source of truth outside Kubernetes:
 
-A cleaner runtime pattern is often:
+```mermaid
+flowchart LR
+    KV["Azure Key Vault"] --> ESO["External Secrets Operator"]
+    ID["Workload identity"] --> ESO
+    ESO --> KS["Kubernetes Secret\norders-api-secrets"]
+    KS --> POD["Pod"]
+    POD --> ENV["envFrom / secretKeyRef"]
+    ENV --> APP["Application"]
+```
+
+This is useful because the application does not need to know that Azure Key Vault exists. The operator reconciles the external value into the Kubernetes Secret API that the workload already understands.
+
+The trade-off is important: once the value has been synchronized into a Kubernetes Secret, the secret now exists **inside the Kubernetes control plane as well**. That means Kubernetes RBAC, audit, backup/export tooling, and Secret access policies now matter too.
+
+A practical rule:
 
 ```text
-GitHub Actions
-   └── deploys application manifests
+Need a Kubernetes Secret API for the workload?
+    → ESO
 
-Azure Key Vault
-   └── owns runtime secrets
-
-Kubernetes
-   └── runs workload and provides identity
-
-CSI / ESO
-   └── connects the workload to the secret store
+Want the external secret mounted directly as a file?
+    → CSI Driver
 ```
 
-This keeps deployment credentials and application credentials in separate trust boundaries.
+### 5.8 CSI Driver can sync to a Kubernetes Secret — but understand the extra hop
 
-### 5.8 A real incident to remember
+Some designs need the CSI Driver's external-store integration **and** a Kubernetes Secret because an application only understands environment variables.
 
-**Symptom:** "We rotated the database password in Key Vault, but the application still uses the old password."
+The flow becomes:
 
-Debug it by asking:
+```mermaid
+flowchart LR
+    KV["Azure Key Vault"] --> CSI["Secrets Store CSI Driver"]
+    CSI --> FILE["CSI-mounted file"]
+    CSI --> KS["Optional synced Kubernetes Secret"]
+    KS --> ENV["Pod env / envFrom"]
+    ENV --> APP["Application"]
+```
+
+The extra step is significant: the application gets an environment variable from the Kubernetes Secret, not directly from Key Vault. The upstream CSI documentation explicitly treats Secret synchronization and environment-variable use as optional features. 
+
+Use this pattern deliberately rather than assuming it is the default.
+
+### 5.9 Secret rotation: where real outages happen
+
+A secret changing in the external store does **not** automatically mean every application process immediately starts using the new value.
+
+```mermaid
+sequenceDiagram
+    participant KV as Azure Key Vault
+    participant CSI as CSI / ESO
+    participant K as Kubernetes
+    participant APP as Application
+
+    KV->>KV: Rotate DB password
+    CSI->>KV: Poll / reconcile
+    KV-->>CSI: New value
+    CSI->>K: Update mounted content
+    CSI->>K: Optional update of Kubernetes Secret
+
+    alt Application reads mounted file
+        K-->>APP: New file content becomes available
+        APP->>APP: Must notice/reload the file
+    else Application uses environment variable
+        K-->>APP: Existing process keeps old env var
+        APP->>APP: Restart / rollout required
+    end
+```
+
+The current upstream CSI documentation says rotation updates mounted content and, when configured, the synced Kubernetes Secret; it **does not restart application Pods**. For environment variables sourced from a Kubernetes Secret, the Pod must be restarted to get the updated value. 
+
+On AKS, Microsoft documents the same operational distinction: applications consuming mounted files can react to updated mounted content, while applications using a Kubernetes Secret through environment variables need a Pod restart to pick up the new value. 
+
+The practical production question is therefore:
+
+> **Can the application reload a rotated secret without a restart?**
+
+Examples:
 
 ```text
-1. Where is the source of truth?
-2. Is the Pod reading a file or an env var?
-3. Is rotation enabled?
-4. Did the external provider return the new version?
-5. If using ESO, did the Kubernetes Secret reconcile?
-6. If using env vars, was the Deployment restarted?
-7. Does the application's DB client actually reload the value?
+TLS certificate file
+  → application watches/reloads the file
+
+DB password as environment variable
+  → restart the process / perform a rollout
+
+API token in a file
+  → application must reopen/read the new value
 ```
 
-For CSI:
+Also distinguish **secret-store rotation** from **application credential rotation**. Changing a password in Key Vault does not help if the application cannot reconnect with the new credential.
 
-```bash
-kubectl exec <pod> -- cat /mnt/secrets-store/db-password
+### 5.10 The identity chain: authenticate without shipping credentials
+
+Avoid this:
+
+```text
+Pod
+ ├── AZURE_CLIENT_ID=...
+ ├── AZURE_CLIENT_SECRET=...
+ └── reads Key Vault
 ```
 
-For a Kubernetes Secret:
+The Pod now needs a long-lived credential merely to retrieve the real secret.
 
-```bash
-kubectl get secret <name>
-kubectl describe secret <name>
-```
-
-Do not print real secret values into logs or incident tickets.
-
-### 5.9 The practical mental model
+Prefer:
 
 ```mermaid
 flowchart TD
-    APP["Application needs a secret"] --> Q{"What delivery model?"}
-
-    Q -->|"Env var / existing Secret API"| K["Kubernetes Secret"]
-    K --> ESO["Optional: ESO syncs from\nAzure Key Vault / AWS Secrets Manager / Vault"]
-    ESO --> K
-
-    Q -->|"File mounted into Pod"| CSI["Secrets Store CSI Driver"]
-    CSI --> EXT["External secret store"]
-
-    K --> APP2["Application"]
-    CSI --> APP3["Mounted secret file"]
-
-    ID["Workload identity / managed identity"] --> EXT
+    POD["Application Pod"] --> SA["ServiceAccount"]
+    SA --> FED["Workload identity federation"]
+    FED --> AAD["Microsoft Entra identity"]
+    AAD --> PERM["Least-privilege permission"]
+    PERM --> KV["Azure Key Vault"]
+    KV --> SECRET["Only required secret"]
 ```
 
-What you should be able to explain in a real review:
+The important production principle is:
+
+```text
+Identity answers: "Who is this workload?"
+Authorization answers: "What may this workload read?"
+Secret store answers: "What is the current secret value?"
+```
+
+Do not solve a permissions problem by giving the workload broad access to the vault or cluster. The identity should have only the permissions required for that workload.
+
+### 5.10.1 Azure Workload Identity: the concrete wiring
+
+For AKS, it helps to see the actual pieces that connect a Kubernetes ServiceAccount to an Azure managed identity.
+
+```mermaid
+flowchart LR
+    SA["Kubernetes ServiceAccount\norders-api"] --> ANN["ServiceAccount annotation\nclient-id / identity mapping"]
+    ANN --> FED["OIDC federation\nAKS issuer + service account subject"]
+    FED --> UAMI["User-assigned managed identity"]
+    UAMI --> ROLE["Key Vault data-plane role\nleast privilege"]
+    ROLE --> KV["Azure Key Vault"]
+```
+
+The concrete relationship is:
+
+```text
+Pod
+  ↓
+serviceAccountName: orders-api
+  ↓
+Microsoft Entra Workload ID federation
+  ↓
+User-assigned managed identity
+  ↓
+Azure RBAC / Key Vault permission
+  ↓
+Key Vault secret
+```
+
+A current Azure example uses a `ServiceAccount` plus a Pod label that opts the workload into Workload ID, and a `SecretProviderClass` with `usePodIdentity: "false"` and the managed identity `clientID`. urlAzure Workload Identity + Key Vault CSI configurationhttps://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-identity-access
+
+The exact identity wiring is platform-owned in many companies, so as an application engineer you may only be asked to provide the **ServiceAccount name**, while the platform team owns the federated credential and Key Vault role assignment.
+
+A useful troubleshooting split is:
+
+```text
+CSI mount fails before the app starts
+  → SecretProviderClass / identity / provider / Key Vault permission problem
+
+CSI mount succeeds but app cannot authenticate
+  → application path / format / reload / credential problem
+```
+
+### 5.10.2 Azure managed identity vs Workload Identity
+
+You'll encounter both terms in AKS documentation and existing clusters.
+
+```mermaid
+flowchart TD
+    CH["How does the Pod obtain Azure identity?"] --> WI["Microsoft Entra Workload ID\nOIDC federation from ServiceAccount"]
+    CH --> MI["User-assigned managed identity\nattached to Azure infrastructure / add-on"]
+    WI --> KV["Azure Key Vault"]
+    MI --> KV
+```
+
+For new designs, understand **Workload ID** as the Pod-to-Azure federation model: the Kubernetes workload proves its identity through the AKS OIDC issuer, and Azure exchanges that for a token for the federated managed identity. Existing environments may instead use the AKS Key Vault provider add-on's managed identity path. Azure documents both access methods, so the correct choice depends on the cluster's platform architecture. urlAzure Key Vault CSI identity access methodshttps://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-identity-access
+
+Do not mix these concepts:
+
+```text
+Managed identity
+→ Azure identity object
+
+Workload identity
+→ federation mechanism that lets a Kubernetes workload use an Azure identity
+```
+
+### 5.11 GitHub Actions secrets are a different boundary
+
+GitHub Actions secrets are primarily **CI/CD secrets**:
+
+```mermaid
+flowchart LR
+    GH["GitHub repository / environment secrets"] --> GA["GitHub Actions"]
+    GA --> DEPLOY["Deployment / cloud authentication"]
+    DEPLOY --> AKS["AKS"]
+```
+
+Runtime application secrets are a different flow:
+
+```mermaid
+flowchart LR
+    KV["Azure Key Vault"] --> WI["Workload identity"]
+    WI --> CSI["CSI Driver / ESO"]
+    CSI --> POD["Kubernetes Pod"]
+    POD --> APP["Application"]
+```
+
+Therefore this is **not** valid:
+
+```yaml
+envFrom:
+  - githubSecret:
+      name: DB_PASSWORD
+```
+
+`envFrom.secretRef` refers to a **Kubernetes Secret**.
+
+A GitHub workflow can create or update a Kubernetes Secret, but then the pipeline is handling the runtime secret and you have introduced another synchronization path:
+
+```text
+Azure Key Vault
+      ↓
+GitHub Actions
+      ↓
+Kubernetes Secret
+      ↓
+Pod
+```
+
+That can be a valid design for a particular organization, but it is different from the direct runtime pattern:
+
+```text
+Azure Key Vault
+      ↓
+Workload identity
+      ↓
+CSI / ESO
+      ↓
+Pod
+```
+
+The useful separation to remember is:
+
+```text
+GitHub Actions secrets
+→ secrets needed by CI/CD
+
+Azure Key Vault / external manager
+→ secrets needed by applications at runtime
+```
+
+### 5.12 Real incident: "We rotated the password but the app still fails"
+
+Use this troubleshooting flow instead of guessing:
+
+```mermaid
+flowchart TD
+    A["Application authentication failure"] --> B{"Where is the source of truth?"}
+    B -->|"Azure Key Vault / external store"| C{"How does Pod consume it?"}
+    B -->|"Kubernetes Secret"| D["Check Kubernetes Secret reconciliation/update"]
+
+    C -->|"Mounted file"| E["Check CSI mount content"]
+    C -->|"Environment variable"| F["Check Pod restart / rollout"]
+
+    E --> G{"Did the new value arrive?"}
+    G -->|No| H["Check identity, permissions, provider, SecretProviderClass"]
+    G -->|Yes| I["Check whether app reloads file"]
+
+    F --> J{"Was a new container started?"}
+    J -->|No| K["Restart / rollout"]
+    J -->|Yes| L["Check application configuration and DB connectivity"]
+
+    D --> M["Check ESO/CSI reconciliation and Secret data"]
+```
+
+Useful checks:
+
+```bash
+kubectl get pods -n <namespace>
+kubectl describe pod <pod> -n <namespace>
+kubectl logs <pod> -n <namespace>
+kubectl get events -n <namespace> --sort-by=.lastTimestamp
+```
+
+For CSI-mounted content, verify the **existence and metadata of the mount** without printing production credentials into your terminal history, logs, screenshots, or incident tickets:
+
+```bash
+kubectl exec <pod> -- ls -la /mnt/secrets-store
+```
+
+For a Kubernetes Secret, inspect metadata and keys without exposing the decoded value:
+
+```bash
+kubectl describe secret <name> -n <namespace>
+```
+
+Also inspect the identity and authorization path. A secret can be perfectly healthy in Key Vault while the Pod still cannot read it because the workload identity, role assignment, namespace/ServiceAccount mapping, or provider configuration is wrong.
+
+### 5.13 Production anti-patterns to recognize
+
+| Anti-pattern | Why it hurts | Better pattern |
+|---|---|---|
+| Real password committed in Git | Secret is exposed to repository history and anyone with repo access | External secret manager or encrypted-secret workflow |
+| Assuming base64 means encryption | It does not | Enable encryption at rest and control RBAC |
+| Long-lived Azure client secret inside every Pod | Large credential blast radius and rotation burden | Workload identity / managed identity |
+| Giving every workload access to the whole vault | One compromised workload can read unrelated secrets | Least-privilege identity and secret permissions |
+| Putting runtime secrets in Helm `values.yaml` | Easy to leak through Git and release configuration | Reference a Secret or external-secret object instead |
+| Assuming secret rotation restarts Pods | CSI/ESO do not automatically restart your application | Design explicit reload or rollout behavior |
+| Using env vars when the app needs live rotation | Existing process keeps the old environment | File mount + application reload, or controlled restart |
+| Debugging by printing secret values | Creates another copy of the credential | Inspect metadata/mount paths without revealing values |
+
+### 5.14 The practical decision tree
+
+```mermaid
+flowchart TD
+    START["Application needs sensitive configuration"] --> Q1{"Is external secret management required?"}
+
+    Q1 -->|No| KSEC["Kubernetes Secret"]
+    Q1 -->|Yes| Q2{"Does the app expect envFrom / secretKeyRef?"}
+
+    Q2 -->|Yes| ESO["ESO → Kubernetes Secret"]
+    Q2 -->|No| Q3{"Can the app consume a mounted file?"}
+    Q3 -->|Yes| CSI["CSI Driver → mounted file"]
+    Q3 -->|No| Q4["Consider CSI Secret sync → Kubernetes Secret\nor change application consumption model"]
+
+    KSEC --> Q5{"How does the workload authenticate?"}
+    ESO --> Q5
+    CSI --> Q5
+    Q4 --> Q5
+
+    Q5 -->|"Cloud secret store"| WI["Workload identity / managed identity"]
+    Q5 -->|"Kubernetes-only"| RBAC["Kubernetes RBAC + encryption at rest"]
+
+    WI --> ROT["Define rotation + reload/restart behavior"]
+    RBAC --> ROT
+    ROT --> APP["Application"]
+```
+
+### 5.15 What you should be able to explain in a production review
 
 ```text
 Kubernetes Secret
-→ where it lives
-→ who can read it
-→ env vs volume behavior
+→ native Kubernetes credential/config mechanism
+→ base64 is not encryption
+→ RBAC and encryption-at-rest matter
 
 ESO
-→ external store → Kubernetes Secret
-→ refresh/reconcile
+→ external secret store → Kubernetes Secret
+→ good fit when workloads already use secretKeyRef / envFrom
+→ the value now exists in Kubernetes too
 
-CSI Driver
+Secrets Store CSI Driver
 → external store → mounted file
-→ SecretProviderClass
-→ workload identity
-→ optional Secret sync
+→ SecretProviderClass selects what to fetch
+→ workload identity controls access
+→ optional sync to Kubernetes Secret
+
+Azure Key Vault + AKS
+→ Key Vault is the runtime source of truth
+→ Microsoft Entra Workload ID / managed identity authenticates the workload
+→ Azure provider + CSI Driver delivers the secret
 
 Rotation
-→ files can update
-→ env vars need a new container process
+→ external value changes
+→ mounted file can update
+→ application must reload it
+→ environment variables require a new container process
 
 GitHub Actions
-→ CI/CD credentials
-→ not a runtime secret store for Pods
+→ CI/CD secret boundary
+→ not directly consumable by envFrom
+→ avoid using CI as an unnecessary runtime-secret relay
 ```
 
-The current Secrets Store CSI Driver documentation supports the core CSI flow, optional Kubernetes Secret syncing, and secret rotation; provider support includes Azure, AWS, GCP and Vault. citeturn169954search3turn169954search1turn169954search8
+**The mental model:**
 
-For further implementation details, use the official driver documentation for [usage](https://secrets-store-csi-driver.sigs.k8s.io/getting-started/usage), [syncing to Kubernetes Secrets](https://secrets-store-csi-driver.sigs.k8s.io/topics/sync-as-kubernetes-secret), and [rotation](https://secrets-store-csi-driver.sigs.k8s.io/topics/secret-auto-rotation).
+```mermaid
+flowchart LR
+    SOURCE["Secret source of truth"] --> ID["Workload identity"]
+    ID --> DELIVERY["ESO or CSI Driver"]
+    DELIVERY --> CONSUME["Kubernetes Secret or mounted file"]
+    CONSUME --> APP["Application"]
+    APP --> ROTATE["Rotation / reload / restart"]
+    ROTATE --> SOURCE
+```
+
+Once you understand that loop, provider-specific YAML becomes implementation detail rather than something you have to memorize line by line.
+
+### 5.16 Official references for the Azure-focused implementation
+
+- Azure Key Vault provider for Secrets Store CSI Driver on AKS: <https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-driver>
+- Azure Key Vault provider configuration and rotation options: <https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-configuration-options>
+- Secrets Store CSI Driver usage and optional Secret synchronization: <https://secrets-store-csi-driver.sigs.k8s.io/getting-started/usage>
+- Secrets Store CSI Driver rotation: <https://secrets-store-csi-driver.sigs.k8s.io/topics/secret-auto-rotation>
 
 ---
 
