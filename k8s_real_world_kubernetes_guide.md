@@ -77,11 +77,16 @@ spec:
             requests: {cpu: "100m", memory: "128Mi"}
             limits: {memory: "256Mi"}                      # no CPU limit - see §3
           readinessProbe:
-            httpGet: {path: /healthz, port: 8080}
+            httpGet: {path: /readyz, port: 8080}           # "can I take traffic?" - see §4
             periodSeconds: 5
           livenessProbe:
-            httpGet: {path: /healthz, port: 8080}
+            httpGet: {path: /livez, port: 8080}            # "am I stuck?" - separate endpoint on purpose
             periodSeconds: 10
+          securityContext:                                  # see §7 - near-free hardening
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
 ---
 apiVersion: v1
 kind: Service
@@ -135,6 +140,10 @@ kubectl apply -f file.yaml                          # create or update from YAML
 kubectl rollout status deployment/<name>            # is my deploy done yet
 kubectl rollout undo deployment/<name>               # PANIC BUTTON: roll back
 kubectl top pods                                     # who's eating CPU/memory right now
+kubectl rollout restart deployment/<n>              # restart Pods gracefully (e.g. after a ConfigMap/Secret change)
+kubectl auth can-i list pods -n <ns> --as=system:serviceaccount:<ns>:<sa>   # prove an RBAC permission
+kubectl cordon <node>                                # stop new Pods landing on a node
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data   # evict Pods for maintenance (respects PDBs)
 kubectl debug <pod> -it --image=busybox --target=<container>  # attach a debug shell to a distroless/scratch container
 kubectl get svc <name>                              # does the Service exist, what's its selector
 kubectl get endpointslice -l kubernetes.io/service-name=<name>  # which Pod IPs is the Service actually routing to
@@ -253,9 +262,58 @@ flowchart LR
 
 Removal from Service endpoints and the SIGTERM happen close together but aren't strictly ordered, so a container that exits instantly on SIGTERM can still drop a few in-flight requests. The fix most real apps use: catch SIGTERM, keep serving for a few seconds while finishing existing requests, *then* shut down - and raise `terminationGracePeriodSeconds` if your requests can legitimately run longer than the 30-second default.
 
+A `preStop` delay is the usual way to buy that time without touching application code:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 45     # must exceed the preStop delay + your app's drain time
+  containers:
+    - name: orders-api
+      lifecycle:
+        preStop:
+          exec: {command: ["sleep", "5"]}   # keep serving while endpoint removal propagates
+```
+
+`exec` + `sleep` needs a `sleep` binary in the image; on distroless images use a recent cluster's native `preStop` `sleep` action instead, or handle the delay inside the app.
+
+```mermaid
+sequenceDiagram
+    participant K as kubelet
+    participant E as Endpoints / proxies
+    participant C as Container
+    K->>E: Pod marked terminating (removal begins)
+    K->>C: preStop hook runs (sleep 5)
+    Note over C,E: Still serving while endpoint<br/>removal propagates
+    K->>C: SIGTERM
+    C->>C: Finish in-flight requests, exit
+    K->>C: SIGKILL only if grace period expires
+```
+
 ---
 
 ## 5. Config and Secrets: how real projects actually do it
+
+`ConfigMap` is for non-sensitive config; `Secret` is for sensitive values. A native `Secret` is only base64-encoded, not encrypted by default, so real setups keep the source of truth in a secrets manager (Azure Key Vault, AWS Secrets Manager, Vault) and bring values into the cluster in one of two ways:
+
+```mermaid
+flowchart LR
+    SM["Secrets manager\n(Key Vault etc.)"] -->|"CSI driver mounts as files"| FILE["Pod volume"]
+    SM -->|"External Secrets Operator syncs"| KS["Kubernetes Secret"]
+    KS --> ENV["envFrom / secretKeyRef"]
+    KS --> FILE
+    ID["Workload identity\n(no stored credentials)"] -.->|"authenticates"| SM
+    FILE --> APP["Application"]
+    ENV --> APP
+```
+
+The rules that matter most:
+
+- **Files vs env vars:** mounted files (without `subPath`) pick up rotated values; env vars are read once at container start, so a rotation needs a `kubectl rollout restart`. This is where most "we rotated the password but the app still fails" incidents come from.
+- **No credentials to fetch credentials:** use workload identity so the Pod authenticates to the secrets manager without a stored secret.
+- **Never commit secret values** to Git or plaintext Helm values; reference a Secret by name instead.
+- **Lock down who can read Secrets** with RBAC, and enable encryption at rest for etcd.
+
+The subsections below cover the Azure wiring in detail: 5.1 production model, 5.2 native Secret baseline, 5.3 patterns, 5.4 file vs env decision, 5.5 to 5.7 Key Vault / SecretProviderClass / ESO, 5.8 to 5.9 sync and rotation, 5.10 identity chain, 5.11 GitHub Actions, 5.12 incident, 5.13 anti-patterns, 5.14 decision tree, 5.15 review questions, 5.16 references.
 
 `ConfigMap` and `Secret` are the Kubernetes-facing mechanisms, but production systems usually separate **where a value is stored**, **how a workload proves its identity**, and **how the application consumes the value**.
 
@@ -917,6 +975,17 @@ strategy:
     maxSurge: 1            # allow one extra Pod temporarily while rolling
 ```
 
+With `maxSurge: 1` and `maxUnavailable: 0` on 3 replicas, one rollout step looks like this:
+
+```mermaid
+flowchart LR
+    S0["3 old Pods Ready"] --> S1["Start 1 new Pod\n(maxSurge: 1, so 4 total)"]
+    S1 --> S2["New Pod passes readiness"]
+    S2 --> S3["Terminate 1 old Pod\n(never below 3 Ready)"]
+    S3 --> S4["Repeat until\n3 new Pods"]
+    S2 -.->|"readiness never passes"| STUCK["Rollout stalls;\nold Pods keep serving"]
+```
+
 Kubernetes' own default is `maxUnavailable: 25%, maxSurge: 25%`. The tradeoff to understand: `maxUnavailable` is how much serving capacity may temporarily disappear during a rollout, and `maxSurge` is how many extra Pods may temporarily exist. For latency- or capacity-sensitive user-facing services, many teams tighten this to `maxUnavailable: 0` (the old Pod isn't removed until the new one is confirmed ready, so a bad deploy fails to progress instead of reducing capacity) - but that's a workload/platform decision, not a universal setting, and it costs a bit of extra capacity headroom during every deploy.
 
 **`kubectl rollout undo` is one of the most useful incident commands you have** - but only when the recent rollout is actually the cause. If a deploy went out shortly before things broke, roll back first and investigate after; if the timing doesn't line up (a downstream DB is down, DNS is broken, a NetworkPolicy just changed), rolling back your app won't fix an incident it didn't cause, so confirm the correlation before reaching for it.
@@ -944,6 +1013,8 @@ flowchart LR
 
 This tells the eviction API: "don't voluntarily evict my Pods below this threshold." It's real protection during a planned node drain or cluster upgrade, but it does nothing if a node simply dies out from under you, and it doesn't govern your own Deployment's rolling update - that's `maxUnavailable`/`maxSurge` instead. It's still cheap, commonly-used insurance for a replicated service that matters for uptime; it just isn't a general disruption shield.
 
+One trap: don't set `minAvailable` equal to the replica count (or `maxUnavailable: 0`). Then no Pod can ever be voluntarily evicted, and `kubectl drain` or a cluster upgrade hangs on that workload indefinitely.
+
 ### Availability is a combination, not one setting
 
 No single object gives you high availability - it's the sum of several:
@@ -958,6 +1029,29 @@ flowchart LR
 ```
 
 That last one is easy to miss: 3 replicas that all happen to land on the same node give you zero real redundancy if that node fails. A `topologySpreadConstraint` on the Deployment's Pod template tells the scheduler to spread replicas across nodes or availability zones instead of letting them cluster together - worth adding once you actually care about surviving a single node or zone going down.
+
+```yaml
+# in the Deployment's Pod template spec
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone      # use kubernetes.io/hostname for per-node spread
+    whenUnsatisfiable: ScheduleAnyway              # DoNotSchedule is stricter and can leave Pods Pending
+    labelSelector:
+      matchLabels: {app: orders-api}
+```
+
+```mermaid
+flowchart LR
+    subgraph BAD["No spread: scheduler may pack one node"]
+        N1["node-1: pod-a, pod-b, pod-c"]
+        N2["node-2: empty"]
+    end
+    subgraph GOOD["With topologySpreadConstraints"]
+        Z1["zone-a: pod-a"]
+        Z2["zone-b: pod-b"]
+        Z3["zone-c: pod-c"]
+    end
+```
 
 ---
 
@@ -987,7 +1081,46 @@ subjects:
 roleRef: {kind: Role, name: deployer, apiGroup: rbac.authorization.k8s.io}
 ```
 
+```mermaid
+flowchart LR
+    SA["ServiceAccount ci-bot\n(who)"] --> RB["RoleBinding ci-deployer\n(links who to what)"]
+    RB --> R["Role deployer\n(verbs on resources)"]
+    R --> RES["deployments in namespace\ncheckout only"]
+```
+
 The real-world rule: **least privilege, per namespace.** A CI pipeline for `checkout` should not be able to touch the `payments` namespace. If you ever see a ServiceAccount with a `ClusterRoleBinding` granting cluster-admin "to make things easier," that's a red flag, not a shortcut.
+
+### Pod-level security: securityContext, Pod Security Admission and ServiceAccounts
+
+RBAC controls who may create things; `securityContext` controls what the running container is allowed to do. Both matter, and Pod Security Admission (PSA) enforces a floor per namespace:
+
+```mermaid
+flowchart TD
+    A["Pod spec submitted"] --> B["Authentication + RBAC\nmay you create this?"]
+    B --> C["Pod Security Admission\nnamespace label: enforce=baseline or restricted"]
+    C -->|"violates policy"| X["Rejected at admission"]
+    C -->|"passes"| D["Pod runs with its securityContext\nnon-root, no escalation, read-only FS, dropped caps"]
+```
+
+```yaml
+# namespace: warn first, then enforce
+metadata:
+  name: checkout
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted      # shows what would break under 'restricted'
+---
+# Pod template spec
+spec:
+  serviceAccountName: orders-api            # a dedicated SA per workload, not 'default'
+  automountServiceAccountToken: false       # most apps never call the Kubernetes API
+  imagePullSecrets: [{name: registry-creds}]   # for private registries
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+```
+
+The container-level fields (`allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`) are in the §1 example. If a read-only root filesystem breaks the app, mount an `emptyDir` at the specific path it writes to (usually `/tmp`) instead of dropping the setting. The `restricted` PSA level requires most of the above, so a Pod written this way passes it.
 
 ---
 
@@ -1020,6 +1153,7 @@ spec:
 
 **What actually matters in practice:**
 - HPA is only as good as your `resources.requests` (§3) - CPU/memory utilization percentages are calculated against the request, so an unset or wrong request makes the HPA scale on nonsense.
+- **If an HPA manages a Deployment, omit `spec.replicas` from the Deployment manifest** (and from your Helm template, see §12). Otherwise every `apply` or GitOps sync resets the replica count and fights the HPA.
 - Choose `minReplicas` based on your actual availability needs, not a fixed number - 2-3 is a common starting point for a replicated user-facing service so scaling down never removes your redundancy entirely, but a batch-style internal service might reasonably go lower.
 - HPA can scale on more than CPU/memory - it also supports custom and external metrics (queue depth, requests-per-second) via the metrics APIs. **Metrics Server** is the common way to supply the basic CPU/memory numbers, but it's not the only source, and knowing that helps when someone mentions scaling on a custom metric.
 - Two related autoscalers you'll hear about but rarely configure yourself: the **Cluster Autoscaler** (adds/removes *nodes* when Pods can't be scheduled) and the **Vertical Pod Autoscaler** (adjusts a Pod's requests/limits over time) - these are usually a platform team's concern, but knowing they exist explains "why did a new node just appear" or "why did my Pod's memory request change overnight."
@@ -1036,6 +1170,7 @@ kind: Job
 metadata: {name: db-migrate}
 spec:
   backoffLimit: 2                # retry twice on failure, then give up
+  ttlSecondsAfterFinished: 3600  # auto-delete the finished Job and its Pods after 1 hour
   template:
     spec:
       restartPolicy: Never
@@ -1050,6 +1185,7 @@ metadata: {name: nightly-report}
 spec:
   schedule: "0 2 * * *"           # standard cron syntax
   timeZone: "Asia/Kolkata"         # be explicit - without this, it uses the controller-manager's timezone, which surprises people
+  concurrencyPolicy: Forbid        # skip a run if the previous one is still going
   jobTemplate:
     spec:
       template:
@@ -1060,7 +1196,14 @@ spec:
               image: registry.example.com/reporting:2.0.0
 ```
 
-**Where you'll actually meet these:** a `Job` run from a Helm hook to migrate the database before a Deployment rolls out (see §12), a nightly `CronJob` for cleanup/reporting, or a one-off `Job` you launch by hand to backfill data. The real-world gotcha: a `CronJob` that overruns its schedule can stack up concurrent runs unless you set `concurrencyPolicy: Forbid`.
+```mermaid
+flowchart LR
+    CJ["CronJob nightly-report\nschedule 0 2 * * *"] -->|"creates at each tick"| J["Job"]
+    J -->|"runs to completion"| P["Pod"]
+    CJ -.->|"concurrencyPolicy: Forbid\nskips the tick if the previous Job is still running"| J
+```
+
+**Where you'll actually meet these:** a `Job` run from a Helm hook to migrate the database before a Deployment rolls out (see §12), a nightly `CronJob` for cleanup/reporting, or a one-off `Job` you launch by hand to backfill data. The real-world gotcha: a `CronJob` that overruns its schedule can stack up concurrent runs unless you set `concurrencyPolicy: Forbid` (as in the example above).
 
 ---
 
@@ -1083,7 +1226,7 @@ flowchart LR
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: default-deny, namespace: checkout}
+metadata: {name: default-deny, namespace: payments}
 spec:
   podSelector: {}          # applies to every Pod in this namespace
   policyTypes: [Ingress]
@@ -1101,7 +1244,29 @@ spec:
 
 **What you actually need to know:** a `NetworkPolicy` with an empty `podSelector: {}`, `policyTypes: [Ingress]`, and no `ingress` rules is a **default-deny-ingress** for that namespace - it says nothing about outbound traffic. If you also want to lock down what Pods in the namespace can call *out* to, you add `Egress` to `policyTypes` and write explicit `egress` rules too - "default deny" in general usage often means both, so check which one a given policy actually covers before assuming you're protected.
 
+NetworkPolicy objects are only enforced if the cluster's CNI plugin supports them; on some setups they are accepted by the API and silently do nothing, so test a blocked path once rather than trusting the YAML.
+
 The `namespaceSelector: {matchLabels: {team: checkout}}` example only works if the `checkout` namespace is actually labeled `team: checkout` - namespace labels aren't automatic, so this is a common reason a policy that looks correct still blocks everything: check `kubectl get ns --show-labels` before assuming the label exists.
+
+A default-deny **egress** policy breaks DNS lookups unless you allow them explicitly - the classic "everything times out after I added egress rules" bug:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-egress-allow-dns, namespace: checkout}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+```
+
+(`kubernetes.io/metadata.name` is set automatically on every namespace, so unlike `team: checkout` it needs no manual labeling. Add further `egress` rules for the services the app genuinely calls.)
 
 As an app developer you'll rarely write these from scratch, but you'll frequently need to ask a platform team to add an allow-rule when a new service-to-service call starts mysteriously timing out with everything else looking healthy - that's the first thing to suspect when a Pod is `Running` and passing probes but a specific downstream call never connects.
 
@@ -1127,6 +1292,19 @@ spec:
   storageClassName: fast-ssd     # cloud provider's StorageClass provisions the disk automatically
   resources:
     requests: {storage: 20Gi}
+```
+
+```mermaid
+flowchart LR
+    subgraph DEP["Deployment: interchangeable Pods"]
+        D1["pod-7f9c-x1"] --- V["one shared RWO PVC\ncontention risk"]
+        D2["pod-7f9c-y2"] --- V
+    end
+    subgraph STS["StatefulSet: stable identity per replica"]
+        S0["db-0"] --- P0["PVC data-db-0"]
+        S1["db-1"] --- P1["PVC data-db-1"]
+        S2["db-2"] --- P2["PVC data-db-2"]
+    end
 ```
 
 **The real-world rule of thumb:** a `Deployment` *can* mount a `PersistentVolumeClaim`, so "Deployment + storage" isn't inherently broken. The real question is whether the workload needs **per-replica** stable identity and storage - a fixed, predictable name and its own dedicated disk that follows *that specific replica* across rescheduling, plus ordered startup/shutdown. A Deployment's Pods are interchangeable by design and don't provide that; a `StatefulSet` with a `volumeClaimTemplate` does. Run a database on a Deployment with a shared or naively-attached volume and you can get two replicas fighting over the same disk - that's the failure mode to know about, not storage-on-a-Deployment in general. Most teams don't hand-roll databases on Kubernetes at all - they use a managed cloud database and reserve StatefulSets for things like self-hosted Kafka/Redis/Elasticsearch where an Operator (a controller that knows how to run that specific stateful app) does the hard part.
@@ -1167,6 +1345,7 @@ orders-api-chart/
 ```yaml
 # values.yaml
 replicaCount: 3
+autoscaling: {enabled: false}
 image:
   repository: registry.example.com/orders-api
   tag: "1.4.2"
@@ -1182,12 +1361,16 @@ kind: Deployment
 metadata:
   name: {{ include "orders-api.fullname" . }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}      # omitted when an HPA owns the replica count
+  {{- end }}
   selector:
-    matchLabels: {app: {{ .Chart.Name }}}
+    matchLabels:
+      {{- include "orders-api.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {app: {{ .Chart.Name }}}
+      labels:
+        {{- include "orders-api.selectorLabels" . | nindent 8 }}
     spec:
       containers:
         - name: {{ .Chart.Name }}
@@ -1200,6 +1383,12 @@ spec:
 {{/* templates/_helpers.tpl - reusable naming logic, shared across every template */}}
 {{- define "orders-api.fullname" -}}
 {{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 -}}
+{{- end -}}
+
+{{/* Selector labels include the release name, so two releases of one chart never share a selector */}}
+{{- define "orders-api.selectorLabels" -}}
+app.kubernetes.io/name: {{ .Chart.Name }}
+app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 ```
 
@@ -1276,11 +1465,20 @@ spec:
 
 Hook resources aren't tracked as part of the normal release like everything else in `templates/`, so without a `hook-delete-policy` a fixed-name Job like this can collide with itself on the next upgrade. `before-hook-creation,hook-succeeded` cleans up the previous run before creating a new one and after a successful run - close to the default expectation for a one-shot hook Job.
 
+```mermaid
+flowchart LR
+    U["helm upgrade --install"] --> PRE["pre-upgrade hook Job\n(db-migrate)"]
+    PRE -->|"Job succeeds"| APPLY["Apply rendered manifests"]
+    PRE -->|"Job fails"| FAIL["Release marked failed;\nnothing applied"]
+    APPLY --> ROLL["Deployment rolling update"]
+    ROLL --> POST["post-upgrade hooks (optional)"]
+```
+
 ### Real-world gotchas
 
 - **Secrets don't belong in `values.yaml` in plaintext**, even though it's tempting since it's "just a value." Committed `values-prod.yaml` files with real credentials are a common source of leaks - many production setups reference a `Secret` by name (created via External Secrets Operator, see §5) instead of templating the actual secret value, and practice varies by org, but that's the direction to default toward.
-- Prefer `helm upgrade --install` over `helm install` in CI/CD - it works whether or not the release already exists, which is what makes pipelines idempotent.
-- GitOps tools (ArgoCD/Flux, §0) usually render Helm charts *for* you as part of their sync - you still edit the chart/values in Git, you just rarely type `helm` commands by hand in a mature setup.
+- Prefer `helm upgrade --install` over `helm install` in CI/CD - it works whether or not the release already exists, which is what makes pipelines idempotent. Adding `--atomic --timeout 5m` makes a failed upgrade roll itself back instead of leaving a half-applied release.
+- GitOps tools (ArgoCD/Flux, see the intro) usually render Helm charts *for* you as part of their sync - you still edit the chart/values in Git, you just rarely type `helm` commands by hand in a mature setup.
 
 ---
 
@@ -1320,8 +1518,230 @@ This list is worth more than any other section here - most production fires trac
 | No NetworkPolicy | Any Pod can reach any other Pod/namespace - one compromised service can pivot cluster-wide | Default-deny per namespace, then explicitly allow needed paths |
 | Debugging live in production without checking for a recent deploy first | Incident drags on while a bad rollout keeps causing damage | If the incident correlates with a recent deployment, roll back quickly, then investigate; if it doesn't correlate, rolling back won't fix it |
 | ClusterRoleBinding "just to make it easier" | Blast radius of a mistake or breach is the whole cluster | Scope RBAC to a namespace with the minimum verbs needed |
+| Containers run as root with no `securityContext` | A compromised app starts with root inside the container; fails the `restricted` Pod Security level | `runAsNonRoot`, drop all capabilities, read-only root filesystem (§7) |
+| All replicas land on one node or zone | One node or zone failure takes out every replica | `topologySpreadConstraints` (§6) |
+| HPA plus a hardcoded `replicas` | Every apply or GitOps sync resets the scale and fights the HPA | Omit `replicas` when an HPA manages the Deployment (§8, §12) |
+| PDB `minAvailable` equal to the replica count | Node drains and cluster upgrades hang forever | Always leave at least one Pod evictable (§6) |
+| Egress default-deny without a DNS rule | Everything times out on name lookups | Allow UDP/TCP 53 to kube-dns (§10) |
 
 ---
+
+---
+
+## 15. Scaling on events: KEDA for queue-driven workers
+
+CPU-based HPA is the wrong signal for a worker that pulls from a queue: CPU may stay low while the backlog grows. **KEDA** (on AKS, the managed KEDA add-on) scales a Deployment on external metrics such as Service Bus queue length, Event Hubs consumer lag or Storage queue depth, and can scale to zero.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: orders-worker}
+spec:
+  scaleTargetRef: {name: orders-worker}
+  minReplicaCount: 0                 # scale to zero when the queue is empty
+  maxReplicaCount: 30
+  cooldownPeriod: 300                # seconds of idle before scaling back down
+  triggers:
+    - type: azure-servicebus
+      metadata:
+        queueName: orders
+        messageCount: "50"           # target: about 50 messages per replica
+        namespace: sb-prod.servicebus.windows.net
+      authenticationRef: {name: keda-workload-identity}   # no connection strings in the cluster
+```
+
+```mermaid
+flowchart LR
+    SB["Service Bus queue\n(backlog 1200)"] -->|"KEDA polls length"| KEDA["KEDA operator"]
+    KEDA -->|"HPA target = backlog / 50"| HPA["HPA (managed by KEDA)"]
+    HPA --> DEP["orders-worker Deployment\n0 to 30 replicas"]
+    DEP -->|"consume"| SB
+```
+
+Operational points:
+- Prefer workload identity in `TriggerAuthentication` over connection strings; the scaler then needs only the **Azure Service Bus Data Receiver** role on the queue, not namespace-wide access.
+- Scale-to-zero adds cold start latency. For realtime-adjacent consumers where the first message matters, keep `minReplicaCount: 1`.
+- A worker must handle redelivery and be idempotent, because scaling down mid-message causes the message to reappear after its lock expires.
+- Set `terminationGracePeriodSeconds` to cover your longest message handler, since scale-down sends SIGTERM like any other Pod stop.
+
+---
+
+## 16. AKS access and guardrails: Entra ID, Azure RBAC and Azure Policy
+
+Developers should reach the cluster through Entra ID, not shared kubeconfigs or cluster-admin certificates. With Azure RBAC for Kubernetes authorization enabled, Kubernetes permissions are granted as Azure role assignments, scoped to a namespace:
+
+```bash
+# fetch a kubeconfig for your own Entra identity
+az aks get-credentials --resource-group rg-prod --name aks-prod
+
+# give a team read-write access to one namespace only
+AKS_ID=$(az aks show -g rg-prod -n aks-prod --query id -o tsv)
+az role assignment create \
+  --assignee <group-object-id> \
+  --role "Azure Kubernetes Service RBAC Writer" \
+  --scope "$AKS_ID/namespaces/checkout"
+
+# verify what a user can do
+az aks show -g rg-prod -n aks-prod --query "aadProfile"     # confirm Entra integration is on
+kubectl auth can-i delete pods -n checkout                   # run as the user you are testing
+```
+
+Built-in roles to know: **RBAC Reader**, **RBAC Writer**, **RBAC Admin** (namespace-scoped) and **RBAC Cluster Admin**. Keep Cluster Admin for the platform group only, and keep one break-glass path (`az aks get-credentials --admin`) documented, audited and alert-wired, not used day to day.
+
+```mermaid
+flowchart LR
+    U["Developer\n(Entra group: checkout-devs)"] -->|"az aks get-credentials"| TOKEN["Entra token"]
+    TOKEN --> API["AKS API server"]
+    API --> AZ["Azure RBAC check:\nRBAC Writer on /namespaces/checkout"]
+    AZ -->|"allowed"| OK["kubectl apply in checkout"]
+    AZ -->|"denied"| NO["403 Forbidden"]
+```
+
+### Guardrails with Azure Policy
+
+The Azure Policy add-on for AKS applies Gatekeeper constraints from Azure built-in or custom initiatives. Use it to enforce what §7 describes at cluster scale:
+- Pod Security `baseline` or `restricted` across namespaces, with `audit` first and `deny` once teams have fixed their manifests.
+- Required labels such as `team` and `cost-center`, and no `:latest` image tags.
+- Allowed registries (only your ACR), and no privileged containers or host networking.
+
+Pair it with a `ResourceQuota` and `LimitRange` per namespace (§3) so one team's deploy cannot starve the node pool. Roll policies out in `audit` or `dryrun` mode first and read the compliance report before switching to `deny`; a blanket deny on a shared cluster blocks everyone's deploys at once.
+
+---
+
+## 17. Long-lived connections: WebSockets, SSE and gRPC streams
+
+Realtime workloads hold connections open for minutes or hours, which breaks assumptions that work for short HTTP requests. Three layers can close them, and each has its own timer:
+
+```mermaid
+flowchart LR
+    C["Client\nWebSocket / SSE / gRPC stream"] --> LB["Azure Load Balancer or\nApp Gateway / Gateway API\nidle timeout"]
+    LB --> ING["Ingress controller\nproxy-read-timeout"]
+    ING --> POD["Pod\nterminationGracePeriodSeconds\non rollout or drain"]
+    LB -.->|"idle > timeout: connection dropped silently"| C
+    POD -.->|"SIGTERM: stream must close or drain"| ING
+```
+
+Practical settings and checks:
+- **Idle timeouts.** Azure Load Balancer defaults to 4 minutes idle; the setting is configurable up to 30 minutes on the Standard SKU. For NGINX Ingress, raise `nginx.ingress.kubernetes.io/proxy-read-timeout` and `proxy-send-timeout` (default 60s) for WebSocket paths. For Application Gateway, check the backend request timeout (default 30s). Keep application-level ping/pong or heartbeat frames shorter than the shortest timeout in the path.
+- **Rollouts close streams.** Every rolling update and node drain sends SIGTERM to Pods with open connections. Clients must reconnect with backoff, and the server should send a "reconnect" signal before exiting.
+- **Graceful drain sizing.** Set `terminationGracePeriodSeconds` to at least your longest expected stream lifetime, or close streams deliberately at SIGTERM. A common compromise: give connections 30 to 60 seconds to finish and let clients reconnect elsewhere.
+- **Surge matters.** With `maxUnavailable: 0` and `maxSurge: 1`, a rollout keeps capacity but still moves every connection once per Pod. For large fleets of streams, roll in smaller steps and watch reconnect storms.
+- **gRPC behind L4 load balancing.** HTTP/2 multiplexes many calls over one connection, so a Service (L4) spreads connections, not requests. Use an L7-aware proxy or client-side balancing, or the traffic lands unevenly on a few Pods.
+
+---
+
+## 18. Cluster upgrades and node surge
+
+AKS upgrades the control plane and node pools separately, and the node pool upgrade is where application impact happens: nodes are cordoned, drained and replaced, which evicts your Pods.
+
+```bash
+az aks get-upgrades -g rg-prod -n aks-prod -o table          # available versions for the control plane
+az aks nodepool get-upgrades -g rg-prod --cluster-name aks-prod -n user1 -o table
+az aks nodepool update -g rg-prod --cluster-name aks-prod -n user1 --max-surge 33%   # extra nodes during upgrade
+az aks upgrade -g rg-prod -n aks-prod --kubernetes-version 1.33.x
+```
+
+Before any upgrade, check for deprecated APIs in your manifests and Helm releases, since removed APIs fail at apply time after the upgrade. Tools such as `pluto` or `kubent` scan the repo and cluster for them, and the AKS upgrade notes list what is removed in each minor version.
+
+```mermaid
+flowchart TD
+    A["Pre-upgrade checks\ndeprecated APIs, PDBs, quotas"] --> B["Control plane upgrade"]
+    B --> C["Add surge node\n(max-surge)"]
+    C --> D["Cordon old node"]
+    D --> E["Drain: evict Pods\n(respects PDBs)"]
+    E -->|"PDB blocks drain"| STUCK["Drain stalls:\nfix PDB or workload"]
+    E --> F["Delete old node,\nnext node"]
+    F --> C
+```
+
+Checklist that prevents most upgrade pages:
+- Every production Deployment has at least 2 replicas and a PDB that allows one eviction. A PDB with `minAvailable` equal to the replica count (see §6) stalls the whole upgrade.
+- `max-surge` is set on each node pool. Too low and the drain is slow; too high and quota or subnet IPs can run out mid-upgrade.
+- Pin the target version with `az aks get-upgrades` one minor version at a time. Do not skip minor versions.
+- Test the upgrade in a non-production cluster first, with the same add-ons and policies.
+
+---
+
+## 19. Node provisioning, Spot pools and capacity
+
+**Node autoscaler and Karpenter.** When Pods cannot be scheduled, a node-provisioning component adds capacity. AKS offers the cluster autoscaler on node pools and **node auto-provisioning (NAP)**, which is Karpenter-based and chooses VM sizes for pending Pods. Either way, Pods show `Pending` with `FailedScheduling` events until a node joins, and a node that takes minutes to become Ready delays every scale-out.
+
+```mermaid
+flowchart LR
+    POD["Pending Pod\n(insufficient cpu)"] --> SCHED["Scheduler: no fit"]
+    SCHED --> PROV["Node provisioner\n(autoscaler / NAP)"]
+    PROV -->|"quota or SKU unavailable"| FAIL["Pod stays Pending;\ncheck events and quotas"]
+    PROV -->|"VM created"| READY["Node Ready"]
+    READY --> BIND["Pod bound and started"]
+```
+
+**Spot pools** cut cost for interruptible work such as batch jobs and queue workers, but Azure can evict Spot VMs at short notice. Configure them as a separate node pool:
+
+```bash
+az aks nodepool add -g rg-prod --cluster-name aks-prod -n spotworkers \
+  --priority Spot --eviction-policy Delete --spot-max-price -1 \
+  --enable-cluster-autoscaler --min-count 0 --max-count 20
+```
+
+AKS taints Spot nodes with `kubernetes.azure.com/scalesetpriority=spot:NoSchedule`, so workloads must opt in with a toleration **and** should not carry real-time traffic. Never put a single-replica critical service on Spot.
+
+**Subnet and IP exhaustion.** With Azure CNI, every Pod takes an IP from the node subnet. A full subnet shows up as Pods stuck in `ContainerCreating` with `failed to assign an IP address`, and it blocks scale-out even when nodes have spare CPU. Size subnets for maximum node count times max Pods per node plus upgrade surge, and check the free count before big scale events.
+
+---
+
+## 20. Observability on Azure: where the data lives and the KQL you need
+
+Container Insights ships Kubernetes inventory and logs to a Log Analytics workspace; managed Prometheus stores metrics in Azure Monitor workspaces. For the most common incidents, these queries are the starting point (validate table and column names against your workspace, since schemas evolve):
+
+```kusto
+// Pods restarting in the last hour
+KubePodInventory
+| where TimeGenerated > ago(1h)
+| summarize MaxRestarts = max(ContainerRestartCount) by Namespace, Name
+| where MaxRestarts > 3
+| order by MaxRestarts desc
+
+// Containers last terminated for OOM
+KubePodInventory
+| where TimeGenerated > ago(1h)
+| where ContainerLastStatus has "OOMKilled" or ContainerStatusReason =~ "OOMKilled"
+| project TimeGenerated, Namespace, Name, ContainerName = tostring(ContainerName)
+
+// Nodes not Ready
+KubeNodeInventory
+| where TimeGenerated > ago(15m)
+| summarize arg_max(TimeGenerated, Status) by Computer
+| where Status has "NotReady"
+```
+
+```mermaid
+flowchart TD
+    ALERT["Azure Monitor alert\n(restarts, OOM, NotReady, Pending)"] --> TRIAGE["Open Container Insights\nfor the namespace"]
+    TRIAGE --> KQL["Run KQL above\nto scope the blast radius"]
+    KQL --> KUBECTL["kubectl describe / logs\non the affected Pods"]
+    KUBECTL --> FIX["Fix or roll back"]
+```
+
+Alert on symptoms that page a human: NotReady nodes for more than a few minutes, Pending Pods beyond a threshold, restart spikes per namespace, and OOM counts above baseline. Keep dashboards for trends, and do not page on single restarts, which are often normal.
+
+---
+
+## 21. Runbooks: common platform incidents
+
+These are the first moves for the incidents a DevOps engineer is most often paged for. Each one ends at a decision, not a guess.
+
+| Symptom | First checks | Usual cause | Action |
+|---|---|---|---|
+| Node `NotReady` | `kubectl describe node <n>` (conditions, events); check VMSS health in the portal | Kubelet crash, disk pressure, VM health issue | Cordon and drain if workloads are affected; restart the node or reimage from the node pool |
+| Drain hangs | `kubectl get pdb -A`; `kubectl get pods --field-selector spec.nodeName=<n>` | PDB with no evictable Pods; a Pod with a long grace period | Fix the PDB or the workload; do not force-delete without a decision |
+| CSI volume or secret mount fails | `kubectl describe pod` events; `kubectl get secretproviderclass`; `kubectl logs` for the CSI driver pods in `kube-system` | Workload identity federation or Key Vault access policy wrong; wrong object name | Correct the identity or role assignment, then delete the Pod to remount |
+| Pods Pending, nodes have capacity | `kubectl describe pod` (FailedScheduling); check quota and subnet free IPs | Subnet exhausted; quota reached; taint without toleration | Expand subnet or raise quota; fix tolerations |
+| Traffic drops during a deploy | Readiness probes; `kubectl get endpointslice`; LB and ingress timeouts | Missing readiness probe; short idle timeout on streams | Add probe; raise timeouts (§17) |
+| New deploys fail with "no matches for kind" | `kubectl api-resources`; the manifest's `apiVersion` | Removed API after a cluster upgrade | Migrate the manifest to the supported version (§18) |
+| Developer gets 403 | `az role assignment list --assignee <id> --scope <aks-id>`; `kubectl auth can-i` | Missing RBAC role on the namespace scope | Assign the namespace role; do not grant Cluster Admin |
+
+Two rules for every runbook: write down the change you made and why, and check that the symptom is gone from the same dashboard that raised the alert, not only from `kubectl`.
+
 
 ## The mental model
 
