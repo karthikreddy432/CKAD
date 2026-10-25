@@ -48,6 +48,8 @@ Do not memorize every YAML line. Learn the fields a task is likely to make you c
 
 **Suggested study loop:** read a section → work through its example on a real cluster when practical → use the Final CKAD Revision Sheet for review → run mock questions under a timer.
 
+**Practice tasks:** most numbered sections (1.1 to 9.17) end with a **🧪 Practice task** (pure recall topics have none). The **hint** and the **solution** are collapsed; try the task on a real cluster first, open the hint only if you are stuck, and check the solution last. Replace `<node>`, `<pod>` and similar placeholders with real names from your cluster.
+
 Diagrams are Mermaid. If your viewer does not render Mermaid, each diagram is followed by (or sits next to) a text explanation.
 
 ### Speed patterns that save minutes
@@ -107,6 +109,31 @@ Every component talks to the API server; only the API server talks to etcd.
 **scheduler = placement**  
 **controllers = reconciliation**  
 **kubelet = node execution**
+
+### 🧪 Practice task
+
+**Task:** Find which control-plane components run as Pods in your cluster. Then create a Pod named `web` (image `nginx:1.27`) and, using only `kubectl describe`, show which component assigned it to a node and which node's kubelet started it.
+
+<details>
+<summary>💡 Hint</summary>
+
+Control-plane components usually live in the `kube-system` namespace. The `Events` section at the bottom of `describe` has a `From` column.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get pods -n kube-system -o wide
+kubectl run web --image=nginx:1.27
+kubectl describe pod web          # read the Events table
+```
+
+In `Events`, `Scheduled` comes from `default-scheduler` (placement), and `Pulling` / `Created` / `Started` come from `kubelet` (node execution).
+
+</details>
+
 
 ---
 
@@ -170,9 +197,51 @@ kubectl logs nginx
 - A Pod gets a Pod IP, but that IP is not a stable application endpoint.
 - Pods are ephemeral; controllers normally recreate them when necessary.
 
+### Diagram: what is inside a Pod
+
+```mermaid
+flowchart TB
+    subgraph POD["Pod (one IP, one network namespace)"]
+        C1["container: app"]
+        C2["container: sidecar"]
+        V[("shared volume")]
+        C1 --- V
+        C2 --- V
+        C1 <-->|localhost| C2
+    end
+    OUT["Service or other Pods"] -->|"Pod IP and port"| POD
+```
+
+Containers in one Pod share one IP and can share volumes; they reach each other on `localhost`. Everything outside talks to the Pod's IP.
+
 ### ⚡ Remember
 
 **Pod = shared execution boundary for one or more tightly coupled containers.**
+
+### 🧪 Practice task
+
+**Task:** In a new namespace `dev`, create a Pod `web` using `nginx:1.27`, container port 80, and label `app=web`. Then call it from a temporary `busybox` Pod using the Pod IP.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl run` supports `--port` and `-l`. Get the IP with `-o wide` or `jsonpath`. A throwaway Pod needs `--rm -it --restart=Never`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create namespace dev
+kubectl run web --image=nginx:1.27 --port=80 -l app=web -n dev
+kubectl get pod web -n dev -o wide
+IP=$(kubectl get pod web -n dev -o jsonpath='{.status.podIP}')
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -n dev -- wget -qO- $IP
+```
+
+</details>
+
 
 ## 1.4 YAML resource structure
 
@@ -219,6 +288,31 @@ Do **not** write `core/v1` in a normal manifest.
 ### ⚡ Remember
 
 **What resource? -> what name? -> what desired configuration?**
+
+### 🧪 Practice task
+
+**Task:** Generate (do not create) a Pod manifest for `nginx:1.27` named `once`, save it to `/tmp/once.yaml`, add `restartPolicy: Never` using `kubectl explain` to confirm the field path, then apply it.
+
+<details>
+<summary>💡 Hint</summary>
+
+`--dry-run=client -o yaml` generates YAML. `restartPolicy` sits under `spec`, at the same level as `containers`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run once --image=nginx:1.27 --dry-run=client -o yaml > /tmp/once.yaml
+kubectl explain pod.spec.restartPolicy
+# edit /tmp/once.yaml and add under spec:  restartPolicy: Never
+kubectl apply -f /tmp/once.yaml
+kubectl get pod once -o jsonpath='{.spec.restartPolicy}'
+```
+
+</details>
+
 
 ---
 
@@ -318,6 +412,32 @@ Since Kubernetes 1.22, every namespace automatically carries a label `kubernetes
 
 Always know which namespace the task is using. `-n <namespace>` is often the difference between changing the right object and the wrong one.
 
+### 🧪 Practice task
+
+**Task:** Create namespaces `team-a` and `team-b`. In `team-a` create a Deployment `api` (`nginx:1.27`) exposed by a ClusterIP Service `api` on port 80. From a temporary Pod in `team-b`, reach the Service by its fully qualified name.
+
+<details>
+<summary>💡 Hint</summary>
+
+Cross-namespace DNS form: `<service>.<namespace>.svc.cluster.local`. The short name only works inside the same namespace.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns team-a
+kubectl create ns team-b
+kubectl create deployment api --image=nginx:1.27 -n team-a
+kubectl expose deployment api --port=80 -n team-a
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -n team-b -- \
+  wget -qO- http://api.team-a.svc.cluster.local
+```
+
+</details>
+
+
 ## 1.6 Labels, selectors and annotations
 
 ### Labels
@@ -389,6 +509,36 @@ kubectl annotate pod web owner=platform
 - A Service with no matching Pods shows `Endpoints: <none>`, not an error. Verify Pod labels with `kubectl get pods --show-labels`.
 - A label is a key and a **string value**. `kubectl get pods -l 'env in (dev,qa)'` works; `--field-selector` is for fields, not labels.
 
+### 🧪 Practice task
+
+**Task:** Create three Pods: `p1` (`app=web,env=prod`), `p2` (`app=web,env=dev`), `p3` (`app=db,env=prod`). Then: (a) list `app=web` AND `env=prod`; (b) list Pods where `env in (dev,prod)` and `app!=db`; (c) change `p2` to `env=prod`; (d) remove the `env` label from `p3`; (e) add the annotation `owner=alice` to `p1`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Selectors are comma separated (AND). Use `--overwrite` to change an existing label and `label-` (trailing dash) to remove one.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run p1 --image=nginx:1.27 -l app=web,env=prod
+kubectl run p2 --image=nginx:1.27 -l app=web,env=dev
+kubectl run p3 --image=nginx:1.27 -l app=db,env=prod
+
+kubectl get pods -l app=web,env=prod
+kubectl get pods -l 'env in (dev,prod),app!=db'
+kubectl label pod p2 env=prod --overwrite
+kubectl label pod p3 env-
+kubectl annotate pod p1 owner=alice
+kubectl get pods --show-labels
+```
+
+</details>
+
+
 ## 1.7 ReplicaSets
 
 A ReplicaSet maintains a specified number of matching Pods.
@@ -445,6 +595,51 @@ The Deployment API hides ReplicaSets, but a Deployment's *rollout* is implemente
 
 In normal application deployments, a Deployment manages the ReplicaSet for you (see the relationship diagram in the [workload decision table](#116-workload-relationships-and-decision-table)).
 
+### 🧪 Practice task
+
+**Task:** Create a ReplicaSet `rs-web` with 3 replicas of `nginx:1.27` labeled `app=rs-web`. Delete one Pod and watch it come back, scale the ReplicaSet to 5, then create a standalone Pod with label `app=rs-web` and observe what the ReplicaSet does.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl create` has no ReplicaSet generator; write the YAML (selector must match template labels). The ReplicaSet counts any Pod matching its selector.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: rs-web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rs-web
+  template:
+    metadata:
+      labels:
+        app: rs-web
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+```
+
+```bash
+kubectl apply -f rs.yaml
+kubectl delete pod <one-pod> && kubectl get pods -w
+kubectl scale rs rs-web --replicas=5
+kubectl run extra --image=nginx:1.27 -l app=rs-web
+kubectl get pods        # the RS already has 5, so it deletes a Pod to stay at 5
+```
+
+</details>
+
+
 ## 1.8 Deployments
 
 A Deployment manages replicated stateless application Pods and supports controlled updates.
@@ -497,9 +692,49 @@ The Deployment `selector.matchLabels` must match `template.metadata.labels`, and
 - Forgetting that a failed `rollout` leaves the Deployment in a half-upgraded state: the new ReplicaSet exists, the old one is still around, and the next `rollout` command (including `rollout undo`) replaces the bad ReplicaSet. Check `kubectl describe deploy` for `Progressing: False` and the reason.
 - `kubectl rollout restart` creates a new revision **without** changing the template. Use it to pick up new ConfigMap/Secret env values (the env was frozen at process start).
 
+### Diagram: Deployment, ReplicaSets and Pods
+
+```mermaid
+flowchart LR
+    D["Deployment web"] --> RS2["ReplicaSet v2 (new, scaling up)"]
+    D -.-> RS1["ReplicaSet v1 (old, scaling down)"]
+    RS2 --> P3["Pod"]
+    RS2 --> P4["Pod"]
+    RS1 --> P1["Pod"]
+```
+
+A Deployment never runs Pods itself. Each template change creates a new ReplicaSet; a rolling update scales the new one up while the old one scales down. A rollback scales the old ReplicaSet back up.
+
 ### ⚡ Remember
 
 **Deployment = desired replicas + controlled application updates.**
+
+### 🧪 Practice task
+
+**Task:** Create a Deployment `web` with 3 replicas of `nginx:1.26`. Update it to `nginx:1.27`, watch the rollout, check the history, roll back to the previous revision, then scale to 5.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl set image deployment/<name> <container>=<image>`. The container name defaults to the image name (`nginx`) when created with `kubectl create deployment`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web --image=nginx:1.26 --replicas=3
+kubectl set image deployment/web nginx=nginx:1.27
+kubectl rollout status deployment/web
+kubectl rollout history deployment/web
+kubectl rollout undo deployment/web
+kubectl scale deployment web --replicas=5
+kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+</details>
+
 
 ## 1.9 DaemonSets
 
@@ -565,6 +800,53 @@ Then change `kind` to `DaemonSet`, remove Deployment-only fields such as `replic
 
 **Deployment -> desired number of replicas.**  
 **DaemonSet -> workload on eligible nodes.**
+
+### 🧪 Practice task
+
+**Task:** Create a DaemonSet `node-logger` running `busybox:1.36` with `sleep 3600` on every node, including control-plane nodes (which are tainted `node-role.kubernetes.io/control-plane:NoSchedule`).
+
+<details>
+<summary>💡 Hint</summary>
+
+There is no `kubectl create daemonset`. Generate a Deployment YAML, change `kind`, delete `replicas` and `strategy`, and add a toleration.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-logger
+spec:
+  selector:
+    matchLabels:
+      app: node-logger
+  template:
+    metadata:
+      labels:
+        app: node-logger
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: logger
+        image: busybox:1.36
+        command: ["sleep", "3600"]
+```
+
+```bash
+kubectl apply -f ds.yaml
+kubectl get ds node-logger
+kubectl get pods -l app=node-logger -o wide   # one Pod per node
+```
+
+</details>
+
 
 ## 1.10 Jobs
 
@@ -673,6 +955,43 @@ When a Job fails, `kubectl describe job <n>` shows the reason: `BackoffLimitExce
 
 **Job = finish work.**
 
+### 🧪 Practice task
+
+**Task:** Create a Job `batch-hello` that runs `busybox:1.36` with `echo hello`, needs 5 successful completions, runs 2 Pods in parallel, has `backoffLimit: 3`, and is cleaned up automatically 5 minutes after it finishes.
+
+<details>
+<summary>💡 Hint</summary>
+
+Generate with `kubectl create job`, then add the extra fields under `spec`. Cleanup uses `ttlSecondsAfterFinished`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create job batch-hello --image=busybox:1.36 --dry-run=client -o yaml -- echo hello > job.yaml
+```
+
+Add under `spec`:
+
+```yaml
+spec:
+  completions: 5
+  parallelism: 2
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+```
+
+```bash
+kubectl apply -f job.yaml
+kubectl get job batch-hello -w
+kubectl logs job/batch-hello
+```
+
+</details>
+
+
 ## 1.11 CronJobs
 
 A CronJob creates Jobs according to a schedule.
@@ -753,6 +1072,43 @@ A CronJob does not run Pods directly. It creates a Job for each scheduled time, 
 ### ⚡ Remember
 
 **CronJob = schedule the creation of Jobs.**
+
+### 🧪 Practice task
+
+**Task:** Create a CronJob `report` that runs `date` with `busybox:1.36` every 5 minutes, keeps only 2 successful and 1 failed Job in history, and never runs overlapping Jobs. Trigger one run manually without waiting for the schedule.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl create cronjob` covers image and schedule; the rest are `spec` fields. `kubectl create job --from=cronjob/<name>` makes a manual run.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create cronjob report --image=busybox:1.36 --schedule="*/5 * * * *" \
+  --dry-run=client -o yaml -- date > cj.yaml
+```
+
+Add under `spec`:
+
+```yaml
+spec:
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 1
+```
+
+```bash
+kubectl apply -f cj.yaml
+kubectl create job report-manual --from=cronjob/report
+kubectl logs job/report-manual
+```
+
+</details>
+
 
 ## 1.12 Container images
 
@@ -891,6 +1247,35 @@ source -> image build -> tag -> registry -> Kubernetes Pod
 ### ⚡ Remember
 
 **Use versioned image tags; keep image content separate from runtime configuration.**
+
+### 🧪 Practice task
+
+**Task:** Run a Pod `sleeper` using `busybox:1.36` whose container command is `sleep 3600` (not just args). Then create a docker-registry Secret `regcred` and attach it to the `default` ServiceAccount so Pods in the namespace use it for image pulls.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl run ... --command -- sleep 3600`. Registry secrets are created with `kubectl create secret docker-registry`; patch the ServiceAccount's `imagePullSecrets`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run sleeper --image=busybox:1.36 --command -- sleep 3600
+kubectl get pod sleeper -o jsonpath='{.spec.containers[0].command}'
+
+kubectl create secret docker-registry regcred \
+  --docker-server=registry.example.com \
+  --docker-username=user --docker-password=pass --docker-email=u@example.com
+
+kubectl patch serviceaccount default -p '{"imagePullSecrets":[{"name":"regcred"}]}'
+kubectl get sa default -o yaml
+```
+
+</details>
+
 
 ## 1.13 Basic scheduling controls
 
@@ -1046,6 +1431,52 @@ description: "Used for the web tier"
 ```
 
 Higher `value` wins when the scheduler preempts lower-priority Pods to make room. A Pod without a `priorityClassName` uses the `globalDefault` PriorityClass, or zero if none is set.
+
+### 🧪 Practice task
+
+**Task:** Label one node `disktype=ssd`. Create a Pod `fast` that must run on a node with that label. Then taint that node `dedicated=ml:NoSchedule` and create a Pod `ml-job` that tolerates the taint and also selects the label.
+
+<details>
+<summary>💡 Hint</summary>
+
+Use `nodeSelector` for the label, and `tolerations` with `key`, `operator`, `value`, `effect` for the taint. Get node names from `kubectl get nodes`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl label node <node> disktype=ssd
+kubectl taint node <node> dedicated=ml:NoSchedule
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ml-job
+spec:
+  nodeSelector:
+    disktype: ssd
+  tolerations:
+  - key: dedicated
+    operator: Equal
+    value: ml
+    effect: NoSchedule
+  containers:
+  - name: app
+    image: nginx:1.27
+```
+
+```bash
+kubectl apply -f ml-job.yaml
+kubectl get pod ml-job -o wide
+kubectl taint node <node> dedicated=ml:NoSchedule-   # cleanup: remove the taint
+```
+
+</details>
+
 
 ## 1.14 Imperative kubectl
 
@@ -1226,6 +1657,32 @@ EOF
 
 **Generate quickly -> edit the required fields -> apply -> verify.**
 
+### 🧪 Practice task
+
+**Task:** Using only imperative commands: create Deployment `shop` (`nginx:1.27`, 3 replicas), set env `MODE=prod`, set CPU request `100m` and memory limit `128Mi`, expose it as ClusterIP on port 80, and save the final Deployment YAML to `/tmp/shop.yaml`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl set env`, `kubectl set resources`, `kubectl expose`. Memory unit is `Mi`, not `m`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment shop --image=nginx:1.27 --replicas=3
+kubectl set env deployment/shop MODE=prod
+kubectl set resources deployment/shop --requests=cpu=100m --limits=memory=128Mi
+kubectl expose deployment shop --port=80
+kubectl get deployment shop -o yaml > /tmp/shop.yaml
+kubectl rollout status deployment/shop
+```
+
+</details>
+
+
 ## 1.15 kubectl output, API discovery and schema help
 
 ### Inspect objects
@@ -1284,6 +1741,31 @@ kubectl explain pod --recursive
 ### ⚡ Remember
 
 **Do not guess a field when Kubernetes can tell you the schema.**
+
+### 🧪 Practice task
+
+**Task:** (a) Print Pod names with their IPs as custom columns. (b) List Pods sorted by creation time. (c) Print only the image of the first container of Deployment `web`. (d) List namespaced API resources. (e) Use `kubectl explain` to find the type of `spec.containers.livenessProbe.periodSeconds`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`-o custom-columns=`, `--sort-by=`, `-o jsonpath=`, `kubectl api-resources --namespaced=true`, `kubectl explain <path>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get pods -o custom-columns=NAME:.metadata.name,IP:.status.podIP
+kubectl get pods --sort-by=.metadata.creationTimestamp
+kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}'
+kubectl api-resources --namespaced=true
+kubectl explain pod.spec.containers.livenessProbe.periodSeconds
+```
+
+</details>
+
 
 ## 1.16 Workload relationships and decision table
 
@@ -1391,6 +1873,33 @@ For exam purposes: CPU HPA needs `requests.cpu` on every container; memory HPA n
 
 **HPA = loop on a metric. It needs requests set on the target containers and metrics-server installed.**
 
+### 🧪 Practice task
+
+**Task:** Create Deployment `web` (`nginx:1.27`) with a CPU request of `100m`. Create an HPA for it with min 2, max 6, target CPU 50%. Check its status.
+
+<details>
+<summary>💡 Hint</summary>
+
+An HPA computes utilization against the CPU **request**, so the request must exist. It also needs metrics-server.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web --image=nginx:1.27
+kubectl set resources deployment web --requests=cpu=100m
+kubectl autoscale deployment web --min=2 --max=6 --cpu-percent=50
+kubectl get hpa
+kubectl describe hpa web
+```
+
+If `TARGETS` shows `<unknown>`, the CPU request is missing or metrics-server is not working (`kubectl top pods` fails).
+
+</details>
+
+
 ## 1.18 PodDisruptionBudget (PDB)
 
 A PodDisruptionBudget limits the number of Pods of a workload that can be **voluntarily** unavailable at the same time (for example during a node drain or a cluster upgrade). It is a guardrail, not a controller: the eviction API refuses to remove Pods that would violate the budget.
@@ -1428,6 +1937,31 @@ Only one of `minAvailable` / `maxUnavailable` may be set; both may be expressed 
 ### ⚡ Remember
 
 **PDB = "no more than N Pods of this workload may be voluntarily down at once."**
+
+### 🧪 Practice task
+
+**Task:** Create a Deployment `web` with 4 replicas labeled `app=web`. Create a PodDisruptionBudget `web-pdb` that always keeps at least 3 Pods available, and check how many Pods can be voluntarily disrupted.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl create pdb` takes `--selector` and `--min-available`. Look at the `ALLOWED DISRUPTIONS` column.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web --image=nginx:1.27 --replicas=4
+kubectl create pdb web-pdb --selector=app=web --min-available=3
+kubectl get pdb web-pdb
+```
+
+`ALLOWED DISRUPTIONS` should be `1` (4 healthy − 3 required).
+
+</details>
+
 
 # 2. Pod Design
 
@@ -1477,6 +2011,43 @@ A CKAD question will sometimes leave the design open. Use this checklist:
 - If the helper just needs to read the application's logs/metrics from outside the Pod -> a **node agent** (DaemonSet) or an **external scraper** is more appropriate than a sidecar.
 
 A common anti-pattern: putting a "log shipper" and a "metrics adapter" and a "config reloader" in one Pod because they all "support" the app. That Pod becomes impossible to update safely. Split the helpers into separate workloads when their lifecycles diverge.
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `duo` with two containers: `app` (`nginx:1.27`) and `helper` (`busybox:1.36`, running `sleep 3600`). Confirm both are running and that `helper` can reach nginx on `localhost:80`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Containers in one Pod share the network namespace. Use `kubectl exec -c helper` to run `wget` against `localhost`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: duo
+spec:
+  containers:
+  - name: app
+    image: nginx:1.27
+  - name: helper
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+```
+
+```bash
+kubectl apply -f duo.yaml
+kubectl get pod duo                      # READY 2/2
+kubectl exec duo -c helper -- wget -qO- localhost:80
+```
+
+</details>
+
 
 ## 2.2 Sidecar pattern
 
@@ -1539,6 +2110,52 @@ For CKAD, default to a regular sidecar in `spec.containers` - it is what `kubect
 
 **Sidecar = helper container beside the main application.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `logger` with a shared `emptyDir` volume. The `app` container (`busybox:1.36`) appends a line with `date` to `/var/log/app.log` every 2 seconds. A sidecar container `tail` (`busybox:1.36`) runs `tail -F` on the same file. Read the sidecar's logs.
+
+<details>
+<summary>💡 Hint</summary>
+
+Mount the same volume in both containers (the mount path may differ). The sidecar's stdout is what `kubectl logs -c tail` shows.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: logger
+spec:
+  volumes:
+  - name: logs
+    emptyDir: {}
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do date >> /var/log/app.log; sleep 2; done"]
+    volumeMounts:
+    - name: logs
+      mountPath: /var/log
+  - name: tail
+    image: busybox:1.36
+    command: ["sh", "-c", "tail -F /var/log/app.log"]
+    volumeMounts:
+    - name: logs
+      mountPath: /var/log
+```
+
+```bash
+kubectl apply -f logger.yaml
+kubectl logs logger -c tail
+```
+
+</details>
+
+
 ## 2.3 Init containers
 
 Init containers run before the application containers and must complete successfully before the next init/app container is started.
@@ -1593,9 +2210,70 @@ Typical uses:
 - generate initial configuration
 - perform one-time setup
 
+### Diagram: init container order
+
+```mermaid
+flowchart LR
+    S(["Pod scheduled"]) --> I1["init container 1 (runs to completion)"]
+    I1 --> I2["init container 2 (runs to completion)"]
+    I2 --> A["app containers start together"]
+    I1 -. "fails: restarted" .-> I1
+```
+
+Init containers run one at a time, in order. Each must exit successfully before the next starts; the app containers start only after the last one finishes.
+
 ### ⚡ Remember
 
 **Init container = startup preparation.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `web-init` whose init container (`busybox:1.36`) writes `<h1>Hello CKAD</h1>` to `index.html` in a shared `emptyDir`. The main `nginx:1.27` container serves that directory at `/usr/share/nginx/html`. Verify the page content.
+
+<details>
+<summary>💡 Hint</summary>
+
+Init containers go under `spec.initContainers` and must finish before the main containers start. Both containers mount the same volume.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-init
+spec:
+  volumes:
+  - name: html
+    emptyDir: {}
+  initContainers:
+  - name: prep
+    image: busybox:1.36
+    command: ["sh", "-c", "echo '<h1>Hello CKAD</h1>' > /work/index.html"]
+    volumeMounts:
+    - name: html
+      mountPath: /work
+  containers:
+  - name: nginx
+    image: nginx:1.27
+    volumeMounts:
+    - name: html
+      mountPath: /usr/share/nginx/html
+```
+
+```bash
+kubectl apply -f web-init.yaml
+kubectl get pod web-init            # Init:0/1 then Running
+kubectl exec web-init -- curl -s localhost
+```
+
+If `curl` is missing in the image, use `kubectl exec web-init -- cat /usr/share/nginx/html/index.html`.
+
+</details>
+
 
 ## 2.4 Ambassador and adapter patterns
 
@@ -1631,6 +2309,54 @@ Mechanically both are just another entry in `spec.containers` that talks to the 
 ### ⚡ Remember
 
 Both are **multi-container Pod patterns**. The exact implementation depends on the application.
+
+### 🧪 Practice task
+
+**Task:** Describe in one sentence each how an ambassador and an adapter container differ. Then build a Pod `adapter-demo` where the main container writes a raw line to a shared file and an adapter container transforms it (for example `tr a-z A-Z`) into a second file, and print the transformed output.
+
+<details>
+<summary>💡 Hint</summary>
+
+Ambassador = proxies outbound connections. Adapter = reshapes the app's output. Both are normal extra containers in the same Pod.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+Ambassador: represents the app to the outside (proxy for outbound traffic, e.g. to a database). Adapter: converts the app's output (logs/metrics) into the format another system expects.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: adapter-demo
+spec:
+  volumes:
+  - name: shared
+    emptyDir: {}
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do echo hello >> /data/raw.txt; sleep 2; done"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+  - name: adapter
+    image: busybox:1.36
+    command: ["sh", "-c", "tail -F /data/raw.txt | tr a-z A-Z > /data/out.txt"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+```
+
+```bash
+kubectl apply -f adapter-demo.yaml
+kubectl exec adapter-demo -c app -- cat /data/out.txt
+```
+
+</details>
+
 
 ## 2.5 Native sidecars
 
@@ -1669,6 +2395,55 @@ The two sidecar forms behave slightly differently for probes: a regular `contain
 **Regular init container -> runs to completion.**  
 **Native sidecar -> uses `restartPolicy: Always` and keeps running with the Pod.**
 
+### 🧪 Practice task
+
+**Task:** Convert the `logger` Pod from 2.2 so the `tail` container is a **native sidecar** (starts before `app`, keeps running next to it, and stops after it). Confirm the sidecar appears in `initContainers`.
+
+<details>
+<summary>💡 Hint</summary>
+
+A native sidecar is an init container with `restartPolicy: Always`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: logger-native
+spec:
+  volumes:
+  - name: logs
+    emptyDir: {}
+  initContainers:
+  - name: tail
+    image: busybox:1.36
+    restartPolicy: Always
+    command: ["sh", "-c", "touch /var/log/app.log; tail -F /var/log/app.log"]
+    volumeMounts:
+    - name: logs
+      mountPath: /var/log
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do date >> /var/log/app.log; sleep 2; done"]
+    volumeMounts:
+    - name: logs
+      mountPath: /var/log
+```
+
+```bash
+kubectl apply -f logger-native.yaml
+kubectl get pod logger-native          # READY 2/2
+kubectl logs logger-native -c tail
+```
+
+</details>
+
+
 ## 2.6 Ephemeral containers
 
 An **ephemeral container** is a temporary debugging container added to a **running** Pod. It is meant for troubleshooting, not for running the application.
@@ -1702,6 +2477,34 @@ Compare: `kubectl exec` enters an existing container; `kubectl debug` adds a new
 ### ⚡ Remember
 
 **Init container = before the app. Sidecar = beside the app. Ephemeral container = injected later for debugging.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `web` running `nginx:1.27`. Attach an ephemeral debug container (`busybox:1.36`) that shares the nginx container's process namespace, and list the processes you can see.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl debug -it pod/<name> --image=... --target=<container>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run web --image=nginx:1.27
+kubectl debug -it pod/web --image=busybox:1.36 --target=web -- sh
+# inside the debug container:
+ps aux            # nginx processes are visible
+exit
+kubectl get pod web -o jsonpath='{.spec.ephemeralContainers[*].name}'
+```
+
+The container name for `kubectl run web` is `web`, so `--target=web`.
+
+</details>
+
 
 ## 2.7 Container communication inside a Pod
 
@@ -1739,9 +2542,81 @@ volumes:
 
 Each container mounts the same volume at a suitable path.
 
+### 📖 Explained: how sharing works
+
+An `emptyDir` is a directory created on the node when the Pod starts. Every container that mounts it sees the **same files**, because they are the same directory, not copies.
+
+| Event | Data in `emptyDir` |
+|---|---|
+| Container crashes and restarts | **Kept** (the Pod is the same) |
+| Pod is deleted or rescheduled to another node | **Lost** |
+| Node reboots | Lost |
+
+Rules of thumb:
+
+- Use `emptyDir` for scratch space, caches, and handing files between containers (init container → app, app → log sidecar).
+- Use a PVC (§5.4) when the data must outlive the Pod.
+- Add `medium: Memory` for a RAM-backed volume (fast, but it counts against the container's memory limit), and `sizeLimit` to cap it.
+- Two containers writing the same file at the same time is **your** problem: Kubernetes does no locking.
+- If a non-root container cannot write to the volume, set `securityContext.fsGroup` on the Pod so the volume gets a group the container belongs to.
+
+```yaml
+volumes:
+- name: shared
+  emptyDir:
+    medium: Memory
+    sizeLimit: 64Mi
+```
+
 ### ⚡ Remember
 
 **Same Pod + same volume = shared files.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod with two containers sharing an `emptyDir` volume mounted at different paths (`/out` in the writer, `/in` in the reader). The writer creates `/out/msg.txt`; show that the reader sees it at `/in/msg.txt`.
+
+<details>
+<summary>💡 Hint</summary>
+
+One `volumes` entry, two `volumeMounts` with the same `name` but different `mountPath`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-vol
+spec:
+  volumes:
+  - name: data
+    emptyDir: {}
+  containers:
+  - name: writer
+    image: busybox:1.36
+    command: ["sh", "-c", "echo hi > /out/msg.txt; sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /out
+  - name: reader
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /in
+```
+
+```bash
+kubectl apply -f shared-vol.yaml
+kubectl exec shared-vol -c reader -- cat /in/msg.txt
+```
+
+</details>
+
 
 ## 2.9 Pod lifecycle and restart policy
 
@@ -1796,9 +2671,50 @@ spec:
 
 `Ready` is what a Service looks at, so a Pod can be phase `Running` and still receive no traffic. With `restartPolicy: Always` the kubelet restarts an exited container with an exponential back-off (10s, 20s, 40s ... capped at 5 minutes). That waiting period is what you see as `CrashLoopBackOff`.
 
+### Diagram: Pod phases
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Running: containers started
+    Pending --> Failed: could not start
+    Running --> Succeeded: all containers exit 0
+    Running --> Failed: a container fails and is not restarted
+    Succeeded --> [*]
+    Failed --> [*]
+```
+
+`Pending` means accepted but not running yet (scheduling, image pull). A container that crashes and is restarted keeps the Pod in `Running`; the phase only becomes `Failed` or `Succeeded` when the Pod is finished.
+
 ### ⚡ Remember
 
 **Pod phase != container state != readiness state.**
+
+### 🧪 Practice task
+
+**Task:** Create three Pods and compare their behavior when the container exits with code 1: `p-always` (`restartPolicy: Always`), `p-onfail` (`OnFailure`), `p-never` (`Never`). Each runs `sh -c "exit 1"` in `busybox:1.36`. Observe the status and restart counts.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl run ... --restart=...` sets the policy. Use `kubectl get pods -w`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run p-always --image=busybox:1.36 --restart=Always -- sh -c "exit 1"
+kubectl run p-onfail --image=busybox:1.36 --restart=OnFailure -- sh -c "exit 1"
+kubectl run p-never  --image=busybox:1.36 --restart=Never -- sh -c "exit 1"
+kubectl get pods -w
+```
+
+`p-always` and `p-onfail` restart (eventually `CrashLoopBackOff`, restart count rises). `p-never` stays at `Error` and is not restarted. Restarts happen in place inside the same Pod, on the same node.
+
+</details>
+
 
 ## 2.10 Self-healing
 
@@ -1828,6 +2744,33 @@ Replacement Pods get **new names and new IPs**, so applications must not depend 
 ### ⚡ Remember
 
 **Controller = keep actual state equal to desired state.**
+
+### 🧪 Practice task
+
+**Task:** Create a Deployment `heal` with 3 replicas. Delete one Pod, then all of its Pods, and observe the controller recreate them. Then create a bare Pod, delete it, and note the difference.
+
+<details>
+<summary>💡 Hint</summary>
+
+Bare Pods have no controller to recreate them.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment heal --image=nginx:1.27 --replicas=3
+kubectl delete pod -l app=heal --wait=false
+kubectl get pods -l app=heal -w         # new Pods appear
+
+kubectl run bare --image=nginx:1.27
+kubectl delete pod bare
+kubectl get pod bare                    # NotFound: nothing recreates it
+```
+
+</details>
+
 
 ## 2.11 Lifecycle hooks and graceful termination
 
@@ -1908,6 +2851,50 @@ The same problem hits `preStop: sleep N`. The sleep counts against `terminationG
 
 **preStop -> SIGTERM -> grace period -> SIGKILL.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `graceful` (`nginx:1.27`) with a `postStart` hook that writes a file `/tmp/started`, a `preStop` hook that sleeps 5 seconds, and `terminationGracePeriodSeconds: 20`. Verify the file exists and time the deletion.
+
+<details>
+<summary>💡 Hint</summary>
+
+Hooks are under `lifecycle` in the container spec; `exec.command` is a list.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: graceful
+spec:
+  terminationGracePeriodSeconds: 20
+  containers:
+  - name: nginx
+    image: nginx:1.27
+    lifecycle:
+      postStart:
+        exec:
+          command: ["sh", "-c", "echo started > /tmp/started"]
+      preStop:
+        exec:
+          command: ["sh", "-c", "sleep 5"]
+```
+
+```bash
+kubectl apply -f graceful.yaml
+kubectl exec graceful -- cat /tmp/started
+time kubectl delete pod graceful        # about 5+ seconds
+```
+
+If an app runs as `sh -c "app"`, SIGTERM goes to the shell, not the app; use `exec app` so the app becomes PID 1.
+
+</details>
+
+
 # 3. Configuration
 
 ## 3.1 Commands and arguments
@@ -1936,6 +2923,38 @@ containers:
 ### ⚡ Remember
 
 **command replaces the entrypoint. args supplies the command's arguments.**
+
+### 🧪 Practice task
+
+**Task:** Create two Pods from `busybox:1.36`: `cmd1` must run the command `echo` with arg `hello`; `cmd2` must run `sh -c "echo $HOSTNAME; sleep 3600"` so the env var is expanded. Check `cmd1` logs.
+
+<details>
+<summary>💡 Hint</summary>
+
+In YAML, `command` replaces the image ENTRYPOINT and `args` replaces CMD. With `kubectl run`, `--command` makes everything after `--` the command.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run cmd1 --image=busybox:1.36 --restart=Never --command -- echo hello
+kubectl logs cmd1
+
+kubectl run cmd2 --image=busybox:1.36 --restart=Never --command -- sh -c 'echo $HOSTNAME; sleep 3600'
+kubectl logs cmd2
+```
+
+Equivalent YAML for `cmd1`:
+
+```yaml
+command: ["echo"]
+args: ["hello"]
+```
+
+</details>
+
 
 ## 3.2 ConfigMaps
 
@@ -2102,6 +3121,61 @@ flowchart LR
 
 **ConfigMap = non-sensitive configuration.**
 
+### 🧪 Practice task
+
+**Task:** Create a ConfigMap `app-config` with `APP_MODE=prod` and `LOG_LEVEL=debug`. Create a Pod that (a) gets `APP_MODE` as env var `MODE`, (b) gets all keys as env vars, and (c) mounts the ConfigMap at `/etc/config`. Verify each.
+
+<details>
+<summary>💡 Hint</summary>
+
+`configMapKeyRef` for one key, `envFrom.configMapRef` for all keys, a `configMap` volume for files.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create configmap app-config --from-literal=APP_MODE=prod --from-literal=LOG_LEVEL=debug
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cm-demo
+spec:
+  volumes:
+  - name: cfg
+    configMap:
+      name: app-config
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    env:
+    - name: MODE
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: APP_MODE
+    envFrom:
+    - configMapRef:
+        name: app-config
+    volumeMounts:
+    - name: cfg
+      mountPath: /etc/config
+```
+
+```bash
+kubectl apply -f cm-demo.yaml
+kubectl exec cm-demo -- env | grep -E 'MODE|LOG_LEVEL'
+kubectl exec cm-demo -- ls /etc/config
+```
+
+</details>
+
+
 ## 3.3 Secrets
 
 Secrets are intended for sensitive values such as passwords, tokens, TLS material and registry credentials.
@@ -2213,6 +3287,59 @@ Under `data:` values must be base64; under `stringData:` they are plain text.
 
 **Secret = sensitive data. Base64 != encryption.**
 
+### 🧪 Practice task
+
+**Task:** Create a Secret `db-secret` with `username=admin` and `password=S3cret!`. Inject `password` as env var `DB_PASS` and mount the whole Secret at `/etc/db` read-only. Decode the stored password from the Secret object.
+
+<details>
+<summary>💡 Hint</summary>
+
+Secret data is base64-encoded (not encrypted). Use `base64 -d`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create secret generic db-secret --from-literal=username=admin --from-literal=password='S3cret!'
+kubectl get secret db-secret -o jsonpath='{.data.password}' | base64 -d
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-demo
+spec:
+  volumes:
+  - name: db
+    secret:
+      secretName: db-secret
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    env:
+    - name: DB_PASS
+      valueFrom:
+        secretKeyRef:
+          name: db-secret
+          key: password
+    volumeMounts:
+    - name: db
+      mountPath: /etc/db
+      readOnly: true
+```
+
+```bash
+kubectl apply -f secret-demo.yaml
+kubectl exec secret-demo -- sh -c 'echo $DB_PASS; ls /etc/db'
+```
+
+</details>
+
+
 ## 3.4 Environment variables
 
 ### Direct value
@@ -2269,6 +3396,53 @@ Choose env vars when the application reads them at startup and you are happy to 
 ### ⚡ Remember
 
 **Environment variables are read once, when the container starts.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `env-demo` with a plain env var `GREETING=hello`, an env var `FULL` defined as `$(GREETING)-world`, and one from a ConfigMap. Then change the ConfigMap value and show whether the running Pod's env var changes.
+
+<details>
+<summary>💡 Hint</summary>
+
+Env vars are fixed when the container starts. `$(VAR)` expansion works only for variables defined earlier in the same `env` list.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: env-demo
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    env:
+    - name: GREETING
+      value: hello
+    - name: FULL
+      value: "$(GREETING)-world"
+    - name: MODE
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: APP_MODE
+```
+
+```bash
+kubectl apply -f env-demo.yaml
+kubectl exec env-demo -- env | grep -E 'FULL|MODE'
+kubectl patch configmap app-config -p '{"data":{"APP_MODE":"dev"}}'
+kubectl exec env-demo -- env | grep MODE        # unchanged
+kubectl delete pod env-demo && kubectl apply -f env-demo.yaml   # now dev
+```
+
+</details>
+
 
 ## 3.5 Downward API
 
@@ -2327,6 +3501,69 @@ volumes:
 
 **Downward API = Pod self-knowledge.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod that exposes its own name, namespace, and CPU limit through the Downward API: two as env vars and the Pod labels as a file `/etc/podinfo/labels`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`fieldRef` for metadata fields, `resourceFieldRef` for limits/requests, and a `downwardAPI` volume with `items`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: downward
+  labels:
+    app: demo
+spec:
+  volumes:
+  - name: podinfo
+    downwardAPI:
+      items:
+      - path: labels
+        fieldRef:
+          fieldPath: metadata.labels
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    resources:
+      limits:
+        cpu: 500m
+    env:
+    - name: POD_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.name
+    - name: POD_NS
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: CPU_LIMIT
+      valueFrom:
+        resourceFieldRef:
+          containerName: app
+          resource: limits.cpu
+    volumeMounts:
+    - name: podinfo
+      mountPath: /etc/podinfo
+```
+
+```bash
+kubectl apply -f downward.yaml
+kubectl exec downward -- sh -c 'env | grep -E "POD_|CPU_"; cat /etc/podinfo/labels'
+```
+
+</details>
+
+
 ## 3.6 Resource requests
 
 A request is used by the scheduler when deciding whether a node has enough available capacity.
@@ -2344,9 +3581,73 @@ The scheduler treats the request as the Pod's guaranteed share. The kubelet rese
 
 If a container has no request, the scheduler assumes zero. That makes the Pod `BestEffort` (see §3.8) and the first to be evicted under node pressure.
 
+### 📖 Explained: how the scheduler uses requests
+
+Each node reports an **allocatable** amount of CPU and memory (capacity minus what the OS and kubelet reserve). The scheduler adds up the **requests** of the Pods already placed on a node and puts a new Pod there only if its request still fits.
+
+Example: a node has `2` CPU allocatable. Pods already on it request `1.5` CPU in total, but are really using only `0.2`. A new Pod requesting `600m` does **not** fit (1.5 + 0.6 > 2), so it stays `Pending` even though the node looks idle. Requests are reservations, not usage.
+
+CPU units: `1` = one core, `500m` = half a core, `100m` = one tenth. Memory units: `Mi`/`Gi` (powers of 1024). `128m` memory means 0.128 **bytes**, a classic typo.
+
+What a request does at runtime:
+
+| Resource | Effect of the request |
+|---|---|
+| CPU | Under contention, containers get CPU time in proportion to their requests. With a free CPU, a container can use more. |
+| Memory | Used for scheduling and for eviction order. It is **not** a cap; the limit (§3.7) is the cap. |
+
+See what is already reserved on a node:
+
+```bash
+kubectl describe node <node> | grep -A8 "Allocated resources"
+kubectl get pod <pod> -o jsonpath='{.spec.containers[*].resources}'
+```
+
+A Pod whose request is larger than any single node can ever provide stays `Pending` forever; the Events say `Insufficient cpu` or `Insufficient memory`.
+
 ### ⚡ Remember
 
 **Request = scheduling promise.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `req` with a CPU request of `250m` and a memory request of `64Mi`. Then create a Pod `huge` requesting `100` CPUs and explain why it stays `Pending`.
+
+<details>
+<summary>💡 Hint</summary>
+
+The scheduler places Pods by **requests**, not by actual usage. Check `Events`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: req
+spec:
+  containers:
+  - name: app
+    image: nginx:1.27
+    resources:
+      requests:
+        cpu: 250m
+        memory: 64Mi
+```
+
+```bash
+kubectl apply -f req.yaml
+kubectl run huge --image=nginx:1.27 --dry-run=client -o yaml > huge.yaml
+# add resources.requests.cpu: "100" to huge.yaml, then:
+kubectl apply -f huge.yaml
+kubectl describe pod huge | grep -A3 Events      # FailedScheduling: Insufficient cpu
+```
+
+</details>
+
 
 ## 3.7 Resource limits
 
@@ -2446,6 +3747,44 @@ A missing `ephemeral-storage` request/limit is the most common reason a `BestEff
 | set | set (equal) | yes | yes | Guaranteed (last evicted) |
 | set | set (limits > requests) | yes | yes | Burstable |
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `limited` with CPU limit `200m` and memory limit `64Mi`. Run a memory hog (`stress` style, for example `sh -c "tail /dev/zero"`) in a second Pod `oom` with a `32Mi` memory limit and show the termination reason.
+
+<details>
+<summary>💡 Hint</summary>
+
+Exceeding a memory limit kills the container (`OOMKilled`, exit code 137). Exceeding a CPU limit only throttles.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom
+spec:
+  restartPolicy: Never
+  containers:
+  - name: hog
+    image: busybox:1.36
+    command: ["sh", "-c", "tail /dev/zero"]
+    resources:
+      limits:
+        memory: 32Mi
+```
+
+```bash
+kubectl apply -f oom.yaml
+kubectl get pod oom -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}'   # OOMKilled
+```
+
+</details>
+
+
 ## 3.8 QoS classes
 
 Kubernetes assigns a Pod a QoS class from its resource configuration:
@@ -2472,6 +3811,41 @@ A common exam scenario: a task sets only `limits.memory` and not `requests.memor
 ### ⚡ Remember
 
 QoS affects behavior under resource pressure; it is not the same thing as scheduling requests.
+
+### 🧪 Practice task
+
+**Task:** Create three Pods with QoS classes `Guaranteed`, `Burstable`, and `BestEffort`, then print the class of each.
+
+<details>
+<summary>💡 Hint</summary>
+
+Guaranteed: every container has requests = limits for both CPU and memory. BestEffort: no requests or limits at all.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+# Guaranteed
+resources:
+  requests: {cpu: 100m, memory: 64Mi}
+  limits:   {cpu: 100m, memory: 64Mi}
+# Burstable
+resources:
+  requests: {cpu: 100m}
+# BestEffort: no resources block
+```
+
+```bash
+kubectl run be --image=nginx:1.27
+kubectl get pod be -o jsonpath='{.status.qosClass}{"\n"}'
+```
+
+Repeat with the other two resource blocks (use `--dry-run=client -o yaml`, add the block, apply) and read `.status.qosClass`.
+
+</details>
+
 
 ## 3.9 LimitRange
 
@@ -2506,6 +3880,49 @@ spec:
 ### ⚡ Remember
 
 **LimitRange = per-container namespace defaults/bounds.**
+
+### 🧪 Practice task
+
+**Task:** In namespace `lr`, create a LimitRange that gives containers a default request of `100m` CPU and default limit of `200m` CPU, with a maximum of `500m` per container. Create a Pod without resources and show the defaults; then try a Pod asking for `1` CPU.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kind: LimitRange` with a `Container` item using `default`, `defaultRequest`, and `max`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cpu-limits
+  namespace: lr
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 100m
+    default:
+      cpu: 200m
+    max:
+      cpu: 500m
+```
+
+```bash
+kubectl create ns lr
+kubectl apply -f lr.yaml
+kubectl run plain --image=nginx:1.27 -n lr
+kubectl get pod plain -n lr -o jsonpath='{.spec.containers[0].resources}'
+kubectl run big --image=nginx:1.27 -n lr --dry-run=client -o yaml > big.yaml
+# add resources.limits.cpu: "1" and apply: rejected (exceeds max)
+```
+
+</details>
+
 
 ## 3.10 ResourceQuota
 
@@ -2548,6 +3965,20 @@ When a Pod is created in a namespace with both a `LimitRange` and a `ResourceQuo
 
 The practical consequence: a missing `requests` field is fine if a LimitRange provides a default, because that default is filled in **before** the quota check runs; it is only fatal if a quota requires the field and no LimitRange supplies it.
 
+### Diagram: what happens to a new Pod in a namespace
+
+```mermaid
+flowchart LR
+    R["create Pod request"] --> D["LimitRanger fills default requests and limits"]
+    D --> M["LimitRange check: min and max"]
+    M --> Q["ResourceQuota: would the namespace total exceed the hard limits?"]
+    Q --> OK["accepted and stored"]
+    M -->|"violates"| REJ["rejected: 403 Forbidden"]
+    Q -->|"exceeds"| REJ
+```
+
+LimitRange works **per object** (defaults, min, max). ResourceQuota works on the **namespace total**. A quota on requests or limits also forces every Pod to declare them, which a LimitRange default can supply.
+
 ### ⚡ Remember
 
 **ResourceQuota = namespace-wide total.**
@@ -2555,6 +3986,41 @@ The practical consequence: a missing `requests` field is fine if a LimitRange pr
 ### 🎯 CKAD Focus (requests, limits, LimitRange, ResourceQuota)
 
 Set requests/limits on a container, read a quota's Used/Hard values, and fix a Pod that is rejected for missing or exceeding resources.
+
+### 🧪 Practice task
+
+**Task:** In namespace `quota-ns`, create a ResourceQuota allowing at most 3 Pods, `requests.cpu: 1`, and `limits.memory: 1Gi`. Create Pods until you hit the limit and read the usage from `describe`.
+
+<details>
+<summary>💡 Hint</summary>
+
+With a quota on requests/limits, every Pod in that namespace must declare them (or have defaults from a LimitRange).
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns quota-ns
+kubectl create quota team-quota -n quota-ns --hard=pods=3,requests.cpu=1,limits.memory=1Gi
+kubectl describe quota team-quota -n quota-ns
+```
+
+```yaml
+# each Pod needs resources, for example:
+resources:
+  requests: {cpu: 200m}
+  limits: {memory: 128Mi}
+```
+
+```bash
+kubectl apply -f pod1.yaml -n quota-ns   # repeat; the 4th Pod is rejected with "exceeded quota"
+kubectl describe quota team-quota -n quota-ns
+```
+
+</details>
+
 
 ---
 
@@ -2601,6 +4067,31 @@ A single command covers both questions: `kubectl auth can-i <verb> <resource> -n
 ### ⚡ Remember
 
 **Authentication = who you are. Authorization = what you may do.**
+
+### 🧪 Practice task
+
+**Task:** Using your current credentials, check who you are authenticated as and whether you may create Deployments. State in one line the difference between authentication and authorization.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl auth whoami` and `kubectl auth can-i`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl auth whoami
+kubectl auth can-i create deployments
+kubectl auth can-i '*' '*'
+```
+
+Authentication answers "who are you?" (certificates, tokens). Authorization (RBAC) answers "what may you do?".
+
+</details>
+
 
 ---
 
@@ -2654,6 +4145,33 @@ export KUBECONFIG=/path/a:/path/b               # merge several files
 ### ⚡ Remember
 
 Before every task, verify **current context + namespace**.
+
+### 🧪 Practice task
+
+**Task:** List your contexts, show the current one, create a new context `dev-ctx` that uses the current cluster and user with namespace `dev`, and switch to it.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl config get-contexts`, `set-context`, `use-context`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl config get-contexts
+kubectl config current-context
+CLUSTER=$(kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}')
+USER=$(kubectl config view --minify -o jsonpath='{.contexts[0].context.user}')
+kubectl config set-context dev-ctx --cluster=$CLUSTER --user=$USER --namespace=dev
+kubectl config use-context dev-ctx
+kubectl config view --minify | grep namespace
+```
+
+</details>
+
 
 ## 4.3 ServiceAccounts
 
@@ -2749,6 +4267,48 @@ Every namespace has a `default` ServiceAccount. If a Pod does not set `serviceAc
 ### ⚡ Remember
 
 **ServiceAccount = identity. RBAC = permissions.**
+
+### 🧪 Practice task
+
+**Task:** Create ServiceAccount `app-sa` in `dev`. Run a Pod that uses it, with `automountServiceAccountToken: false`. Then create a short-lived token for the ServiceAccount.
+
+<details>
+<summary>💡 Hint</summary>
+
+`serviceAccountName` goes in `spec`, next to `automountServiceAccountToken`. Tokens are issued with `kubectl create token`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns dev
+kubectl create serviceaccount app-sa -n dev
+kubectl create token app-sa -n dev --duration=10m
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sa-pod
+  namespace: dev
+spec:
+  serviceAccountName: app-sa
+  automountServiceAccountToken: false
+  containers:
+  - name: app
+    image: nginx:1.27
+```
+
+```bash
+kubectl apply -f sa-pod.yaml
+kubectl exec -n dev sa-pod -- ls /var/run/secrets/kubernetes.io/serviceaccount   # no such directory
+```
+
+</details>
+
 
 ## 4.4 Authorization
 
@@ -2898,9 +4458,43 @@ The subject's namespace only matters for `ServiceAccount`; `User` and `Group` ar
 - Binding a `Role` (namespaced) with a `ClusterRoleBinding`. The API rejects this pairing at apply time. Use a `RoleBinding` for a `Role`.
 - A `RoleBinding` that names a `ClusterRole` only grants the role's permissions in the binding's namespace, even if the `ClusterRole` would normally grant cluster-scoped access. The binding's scope is what counts.
 
+### Diagram: how a RoleBinding grants access
+
+```mermaid
+flowchart LR
+    SUB["Subject (User, Group or ServiceAccount)"] -->|"named in"| RB["RoleBinding (namespaced)"]
+    RB -->|"refers to"| R["Role or ClusterRole (verbs on resources)"]
+    R -->|"applies only in"| NS["the RoleBinding's namespace"]
+```
+
+The Role says **what** is allowed; the RoleBinding says **who** gets it and **where**.
+
 ### ⚡ Remember
 
 **Role = permission definition. RoleBinding = attachment.**
+
+### 🧪 Practice task
+
+**Task:** In `dev`, create a Role `pod-reader` allowing `get`, `list`, `watch` on Pods, and bind it to ServiceAccount `app-sa` with RoleBinding `read-pods`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl create role` and `kubectl create rolebinding --serviceaccount=<namespace>:<name>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create role pod-reader -n dev --verb=get,list,watch --resource=pods
+kubectl create rolebinding read-pods -n dev --role=pod-reader --serviceaccount=dev:app-sa
+kubectl get role,rolebinding -n dev
+```
+
+</details>
+
 
 ## 4.6 ClusterRole and ClusterRoleBinding
 
@@ -2940,6 +4534,16 @@ kubectl create rolebinding view-in-dev --clusterrole=view --user=jane -n dev   #
 
 Resources from a named group use `resource.group`, for example `--resource=deployments.apps`.
 
+### Diagram: ClusterRole bound two ways
+
+```mermaid
+flowchart TD
+    CR["ClusterRole"] -->|"ClusterRoleBinding"| ALL["permissions in ALL namespaces, plus cluster-scoped resources"]
+    CR -->|"RoleBinding in namespace dev"| ONE["permissions only in namespace dev"]
+```
+
+The same ClusterRole can be cluster-wide or limited to one namespace; the **kind of binding** decides the scope.
+
 ### ⚡ Remember
 
 Do not equate **ClusterRole** with automatically cluster-wide effective access. The binding determines where the permission applies.
@@ -2958,6 +4562,29 @@ If a task says "give this ServiceAccount read access to Pods in `dev` only", you
 - Using `RoleBinding` (not `ClusterRoleBinding`) to attach a `ClusterRole` and assuming the role's permissions now apply cluster-wide. They apply only in the binding's namespace. The role *type* does not determine scope; the *binding* does.
 - Confusing `RoleBinding` (namespaced) with `Role` (namespaced rules). `kubectl create rolebinding --clusterrole=view` is valid and grants `view` in that namespace; `kubectl create rolebinding --role=view` requires a Role called `view` in the same namespace.
 - Assuming a built-in `ClusterRole` like `view` or `edit` already exists in a custom cluster. They ship by default, but `kubectl get clusterrole view` is the fastest check; if it is missing, recreate with `kubectl create clusterrole view --verb=get,list,watch --resource=...` (the YAML is long, copy from the docs).
+
+### 🧪 Practice task
+
+**Task:** Create a ClusterRole `node-reader` allowing `get` and `list` on nodes, bind it with a ClusterRoleBinding to ServiceAccount `app-sa` in `dev`, then bind the built-in `view` ClusterRole to the same ServiceAccount only inside namespace `dev` using a RoleBinding.
+
+<details>
+<summary>💡 Hint</summary>
+
+A ClusterRole bound with a RoleBinding is limited to that one namespace.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create clusterrole node-reader --verb=get,list --resource=nodes
+kubectl create clusterrolebinding read-nodes --clusterrole=node-reader --serviceaccount=dev:app-sa
+kubectl create rolebinding view-dev -n dev --clusterrole=view --serviceaccount=dev:app-sa
+```
+
+</details>
+
 
 ## 4.7 Verify RBAC
 
@@ -2986,6 +4613,32 @@ kubectl set serviceaccount deployment/web app-sa -n dev
 ### ⚡ Remember
 
 **Test the effective permission, not just the YAML.**
+
+### 🧪 Practice task
+
+**Task:** Prove the permissions from 4.5 and 4.6: can `app-sa` list Pods in `dev`? delete Pods in `dev`? list Pods in `default`? list nodes?
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl auth can-i <verb> <resource> --as=system:serviceaccount:<ns>:<name> -n <ns>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+SA=system:serviceaccount:dev:app-sa
+kubectl auth can-i list pods   -n dev     --as=$SA   # yes
+kubectl auth can-i delete pods -n dev     --as=$SA   # no
+kubectl auth can-i list pods   -n default --as=$SA   # no
+kubectl auth can-i list nodes             --as=$SA   # yes
+kubectl auth can-i --list -n dev --as=$SA
+```
+
+</details>
+
 
 ## 4.8 Admission control
 
@@ -3068,6 +4721,51 @@ If a Pod is rejected with "violates PodSecurity", the error message names the fi
 ### ⚡ Remember
 
 When a Pod is rejected with a PodSecurity message, inspect the exact security requirement and fix the Pod accordingly.
+
+### 🧪 Practice task
+
+**Task:** Create namespace `restricted-ns` that enforces the `restricted` Pod Security level. Try to create a plain `nginx` Pod there, read the error, then fix the Pod so it is admitted.
+
+<details>
+<summary>💡 Hint</summary>
+
+Label the namespace `pod-security.kubernetes.io/enforce=restricted`. The Pod needs `runAsNonRoot`, `allowPrivilegeEscalation: false`, dropped capabilities, and a `seccompProfile`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns restricted-ns
+kubectl label ns restricted-ns pod-security.kubernetes.io/enforce=restricted
+kubectl run bad --image=nginx:1.27 -n restricted-ns        # forbidden: violates PodSecurity
+```
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: good
+  namespace: restricted-ns
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+```
+
+</details>
+
 
 ## 4.10 Validating vs mutating admission
 
@@ -3186,6 +4884,48 @@ It puts the container in the same cgroup as the host, gives it all capabilities,
 
 **Pick the level that owns the field. `fsGroup` lives on the Pod, `capabilities` on the container.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `sec` (`busybox:1.36`, `sleep 3600`) that runs as user `1000`, group `3000`, with `fsGroup: 2000`, a read-only root filesystem, and no privilege escalation. Verify with `id`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`runAsUser`, `runAsGroup`, `fsGroup` are Pod-level; `readOnlyRootFilesystem` and `allowPrivilegeEscalation` are container-level.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sec
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+```
+
+```bash
+kubectl apply -f sec.yaml
+kubectl exec sec -- id
+kubectl exec sec -- touch /x          # fails: read-only file system
+```
+
+</details>
+
+
 ## 4.12 Linux capabilities and privilege
 
 Linux capabilities split privileged operations into smaller permissions.
@@ -3220,6 +4960,46 @@ Examples of what capabilities gate: `NET_BIND_SERVICE` (listen on ports below 10
 ### ⚡ Remember
 
 **Least privilege is the goal.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod whose container drops all capabilities and adds only `NET_BIND_SERVICE`. Compare it with a Pod that sets `privileged: true`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Capabilities go in the container `securityContext.capabilities` (`drop` / `add`).
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: caps
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+        add: ["NET_BIND_SERVICE"]
+```
+
+```bash
+kubectl apply -f caps.yaml
+kubectl exec caps -- grep Cap /proc/1/status
+```
+
+`privileged: true` gives the container nearly all host capabilities and device access, so avoid it unless a task requires it.
+
+</details>
+
 
 ## 4.13 CRDs, Custom Resources and Operators
 
@@ -3301,6 +5081,67 @@ kubectl get crd databases.example.com -o yaml
 
 **CRD = resource type. CR = object. Operator = controller/reconciliation logic.**
 
+### 🧪 Practice task
+
+**Task:** Create a CRD `crontabs.stable.example.com` (namespaced, version `v1`, schema with a string field `spec.cronSpec`), then create a custom resource `my-crontab` and list it with `kubectl get crontab`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Start from the example in the notes or the docs. The CRD name must be `<plural>.<group>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: crontabs.stable.example.com
+spec:
+  group: stable.example.com
+  scope: Namespaced
+  names:
+    plural: crontabs
+    singular: crontab
+    kind: CronTab
+    shortNames: ["ct"]
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              cronSpec:
+                type: string
+```
+
+```yaml
+apiVersion: stable.example.com/v1
+kind: CronTab
+metadata:
+  name: my-crontab
+spec:
+  cronSpec: "* * * * */5"
+```
+
+```bash
+kubectl apply -f crd.yaml
+kubectl apply -f cr.yaml
+kubectl get crontab
+kubectl explain crontab.spec
+```
+
+</details>
+
+
 # 5. Storage & State Persistence
 
 ## 5.1 Container storage basics
@@ -3352,6 +5193,51 @@ Every source appears as files under the single mount path. Keys must not collide
 
 **The container filesystem is disposable. A volume is data with a lifetime you choose.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod that mounts a **projected** volume at `/etc/combined` merging a ConfigMap `app-config` and a Secret `db-secret` into one directory. List the files.
+
+<details>
+<summary>💡 Hint</summary>
+
+`volumes[].projected.sources[]` takes `configMap` and `secret` entries.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: projected
+spec:
+  volumes:
+  - name: all
+    projected:
+      sources:
+      - configMap:
+          name: app-config
+      - secret:
+          name: db-secret
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: all
+      mountPath: /etc/combined
+```
+
+```bash
+kubectl apply -f projected.yaml
+kubectl exec projected -- ls /etc/combined
+```
+
+</details>
+
+
 ---
 
 ## 5.2 Ephemeral volumes
@@ -3387,6 +5273,50 @@ volumes:
 ### ⚡ Remember
 
 **emptyDir = shared scratch space for a Pod.**
+
+### 🧪 Practice task
+
+**Task:** Create a Pod with an `emptyDir` volume at `/cache` limited to `64Mi`. Write a file, delete the container's process (restart it), and confirm the data survives a container restart but not a Pod deletion.
+
+<details>
+<summary>💡 Hint</summary>
+
+`emptyDir` lives as long as the Pod. `sizeLimit` is a field of `emptyDir`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cache
+spec:
+  volumes:
+  - name: cache
+    emptyDir:
+      sizeLimit: 64Mi
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: cache
+      mountPath: /cache
+```
+
+```bash
+kubectl apply -f cache.yaml
+kubectl exec cache -- sh -c 'echo hi > /cache/f; kill 1'   # container restarts
+kubectl exec cache -- cat /cache/f                          # still there
+kubectl delete pod cache && kubectl apply -f cache.yaml
+kubectl exec cache -- ls /cache                             # empty
+```
+
+</details>
+
 
 ## 5.3 Persistent Volumes
 
@@ -3427,6 +5357,43 @@ spec:
 
 **A PV is real storage and is cluster-scoped: it has no namespace.**
 
+### 🧪 Practice task
+
+**Task:** Create a PersistentVolume `pv-demo` of `1Gi`, access mode `ReadWriteOnce`, `hostPath: /mnt/data`, `persistentVolumeReclaimPolicy: Retain`, `storageClassName: manual`.
+
+<details>
+<summary>💡 Hint</summary>
+
+PVs are cluster-scoped (no namespace). Copy the example from the docs if you cannot type it.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-demo
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data
+```
+
+```bash
+kubectl apply -f pv.yaml
+kubectl get pv pv-demo        # STATUS Available
+```
+
+</details>
+
+
 ## 5.4 Persistent Volume Claims
 
 A PVC is an application request for storage. The PVC is namespaced and follows the application; the PV it binds to is cluster-scoped and follows the storage.
@@ -3463,6 +5430,19 @@ A PVC can bind to a compatible PV when the storage class, capacity and access mo
 | `Delete` | PV and the backing storage are deleted automatically (the usual default for dynamically provisioned volumes) |
 | `Recycle` (deprecated) | Basic scrub; removed in newer clusters - do not use |
 
+### Diagram: PersistentVolume lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Available
+    Available --> Bound: a matching PVC claims it
+    Bound --> Released: the PVC is deleted
+    Released --> Available: admin clears the claimRef (Retain policy)
+    Released --> [*]: reclaim policy Delete removes it
+```
+
+With `Retain`, a released PV keeps its data and does not bind to a new PVC until an admin clears the old claim reference.
+
 ### ⚡ Remember
 
 **PV = storage resource. PVC = storage request.**
@@ -3474,6 +5454,43 @@ A PVC can bind to a compatible PV when the storage class, capacity and access mo
 - Setting `storageClassName: ""` on a PVC and expecting it to bind to a default-class PV. An empty string means **no** class, which is a deliberate opt-out from dynamic provisioning; the PVC will only bind to a PV that also has no class.
 - Forgetting that a deleted PVC goes to `Released` (with `Retain`), and the PV is unavailable for re-binding until an admin removes the `claimRef` and re-applies the PV (or the admin uses `--edit` to set the PV back to `Available`). A `Released` PV does **not** auto-bind to a new PVC even if the class, mode, and capacity match.
 - A PVC's `volumeName` (when set explicitly) names a specific PV. If that PV is in a different zone from where the Pod is scheduled, the Pod stays `Pending` with `FailedMount`. The fix is to delete the PVC and let dynamic provisioning pick a PV in the right zone, or use `WaitForFirstConsumer` so binding is delayed until the Pod is scheduled.
+
+### 🧪 Practice task
+
+**Task:** Create a PVC `pvc-demo` requesting `500Mi`, `ReadWriteOnce`, `storageClassName: manual`. Show that it binds to `pv-demo` and what happens to the PV when you delete the PVC.
+
+<details>
+<summary>💡 Hint</summary>
+
+The PVC must match the PV's class, access mode, and fit within its capacity.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-demo
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 500Mi
+```
+
+```bash
+kubectl apply -f pvc.yaml
+kubectl get pvc,pv                # both Bound
+kubectl delete pvc pvc-demo
+kubectl get pv pv-demo            # Released (Retain keeps the PV and its data)
+```
+
+</details>
+
 
 ## 5.5 PV -> PVC -> Pod chain
 
@@ -3541,6 +5558,71 @@ PV <-binds-> PVC <-mounted by-> Pod
 kubectl get pv,pvc          # PV and PVC should both show Bound
 kubectl exec app -- sh -c 'echo hi > /data/test.txt && ls /data'
 ```
+
+### 🧪 Practice task
+
+**Task:** Build the full chain: PV `data-pv` (`1Gi`, `hostPath`), PVC `data-pvc`, and a Pod `writer` that mounts the PVC at `/data` and writes a file. Delete and recreate the Pod and verify the file is still there.
+
+<details>
+<summary>💡 Hint</summary>
+
+Use the same `storageClassName` on PV and PVC. The Pod references the PVC with `persistentVolumeClaim.claimName`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: data-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: manual
+  hostPath:
+    path: /mnt/data-pv
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: manual
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer
+spec:
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: data-pvc
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "echo persisted > /data/file.txt; sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+```
+
+```bash
+kubectl apply -f chain.yaml
+kubectl delete pod writer && kubectl apply -f chain.yaml
+kubectl exec writer -- cat /data/file.txt
+```
+
+</details>
+
 
 ## 5.6 Access modes
 
@@ -3674,6 +5756,39 @@ prevents a default StorageClass from being selected for that PVC.
 
 If the cluster has no default StorageClass, a PVC with no `storageClassName` stays `Pending` and `kubectl describe pvc` says "no storage class is set." Adding `storageClassName: <existing-class>` or marking an existing class as default both fix it.
 
+### 🧪 Practice task
+
+**Task:** Create a StorageClass `fast` (provisioner `kubernetes.io/no-provisioner`, `volumeBindingMode: WaitForFirstConsumer`, `reclaimPolicy: Delete`), mark it as non-default, and list StorageClasses to find which one is the default.
+
+<details>
+<summary>💡 Hint</summary>
+
+The default class has the annotation `storageclass.kubernetes.io/is-default-class: "true"`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+```
+
+```bash
+kubectl apply -f sc.yaml
+kubectl get storageclass          # "(default)" marks the default
+kubectl describe sc fast
+```
+
+</details>
+
+
 ## 5.8 Dynamic provisioning
 
 With dynamic provisioning, a PVC can cause a compatible PV/backing storage to be created automatically through the StorageClass provisioner.
@@ -3691,9 +5806,99 @@ You never write a PV by hand. With `reclaimPolicy: Delete` the PV and the underl
 
 See the **PVC Pending** entry in the Troubleshooting chapter for the symptom -> cause -> fix table.
 
+### 📖 Explained: what happens step by step
+
+1. You create a PVC that names a StorageClass (or omits it and gets the default class).
+2. The StorageClass names a **provisioner** (usually a CSI driver for your cloud or storage system).
+3. The provisioner creates the real disk and a matching PV object.
+4. The PV binds to your PVC, and the Pod can mount it.
+
+With `volumeBindingMode: WaitForFirstConsumer` step 3 is delayed until a Pod that uses the PVC is scheduled, so the disk is created in the same zone as the Pod. A `Pending` PVC with no Pod yet is **normal** in that mode.
+
+| | Static provisioning | Dynamic provisioning |
+|---|---|---|
+| Who creates the PV | An admin, by hand | The provisioner, automatically |
+| You write | PV + PVC | PVC only |
+| Needs | Existing storage | A StorageClass with a working provisioner |
+
+Minimal working example:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi        # no storageClassName: the default class is used
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app
+spec:
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: data
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+```
+
+```bash
+kubectl get pvc data -w     # Pending, then Bound once the Pod is scheduled (WaitForFirstConsumer)
+kubectl get pv              # a PV named pvc-<uid> appeared on its own
+```
+
+If the PVC stays `Pending` **with** a Pod using it: `kubectl describe pvc data` and read the Events (no default class, wrong class name, or no working provisioner).
+
 ### ⚡ Remember
 
 **PVC + StorageClass = a PV created for you.**
+
+### 🧪 Practice task
+
+**Task:** Create a PVC `dyn-pvc` that uses the cluster's default StorageClass (omit `storageClassName`). Show how the PV appears automatically. If it stays `Pending`, find out why.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl describe pvc` shows Events. With `WaitForFirstConsumer`, a PVC stays Pending until a Pod uses it.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dyn-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 200Mi
+```
+
+```bash
+kubectl apply -f dyn.yaml
+kubectl get pvc dyn-pvc
+kubectl describe pvc dyn-pvc | tail -8
+# create a Pod that mounts dyn-pvc if the class waits for the first consumer
+kubectl get pv
+```
+
+</details>
+
 
 ## 5.9 StatefulSets, Headless Services and storage
 
@@ -3838,6 +6043,73 @@ A normal Service's `ClusterIP` does not help here: it load-balances across all P
 
 **Deployment = interchangeable replicas. StatefulSet = stable name + stable per-Pod storage + ordered management.**
 
+### 🧪 Practice task
+
+**Task:** Create a headless Service `db` and a StatefulSet `db` with 3 replicas (`nginx:1.27`) and a `volumeClaimTemplates` entry of `100Mi` mounted at `/data`. Show the Pod names, the PVC names, and the stable DNS name of Pod `db-0`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Headless = `clusterIP: None`. `serviceName` in the StatefulSet must equal the Service name.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+spec:
+  clusterIP: None
+  selector:
+    app: db
+  ports:
+  - port: 80
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+spec:
+  serviceName: db
+  replicas: 3
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Mi
+```
+
+```bash
+kubectl apply -f sts.yaml
+kubectl get pods -l app=db         # db-0, db-1, db-2 created in order
+kubectl get pvc                    # data-db-0, data-db-1, data-db-2
+# DNS: db-0.db.<namespace>.svc.cluster.local
+```
+
+</details>
+
+
 # 6. Application Deployment
 
 ## 6.1 Deployment strategies at a glance
@@ -3980,6 +6252,44 @@ strategy:
 
 **RollingUpdate replaces old Pods gradually.**
 
+### 🧪 Practice task
+
+**Task:** Create Deployment `roll` with 4 replicas of `nginx:1.26`, set `maxSurge: 1` and `maxUnavailable: 0`, update to `nginx:1.27` and observe that capacity never drops below 4.
+
+<details>
+<summary>💡 Hint</summary>
+
+`spec.strategy.rollingUpdate.maxSurge` / `maxUnavailable`. Use `kubectl get pods -w` while updating.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment roll --image=nginx:1.26 --replicas=4 --dry-run=client -o yaml > roll.yaml
+```
+
+Add under `spec`:
+
+```yaml
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+```
+
+```bash
+kubectl apply -f roll.yaml
+kubectl set image deployment/roll nginx=nginx:1.27
+kubectl get pods -w
+kubectl rollout status deployment/roll
+```
+
+</details>
+
+
 ## 6.3 Recreate strategy and rollout controls
 
 `Recreate` stops the old Pods before creating the new ones.
@@ -4011,6 +6321,33 @@ Use it when two versions must never run together: a schema change the old code c
 
 **RollingUpdate = overlap possible. Recreate = old version goes away before new version starts.**
 
+### 🧪 Practice task
+
+**Task:** Change Deployment `roll` to the `Recreate` strategy, update the image, and observe that all old Pods stop before new ones start. Then pause the rollout, make a change, and resume it.
+
+<details>
+<summary>💡 Hint</summary>
+
+`rollingUpdate` settings must be removed when switching to `Recreate`. Use `kubectl rollout pause/resume`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl patch deployment roll --type=json -p='[{"op":"remove","path":"/spec/strategy/rollingUpdate"},{"op":"replace","path":"/spec/strategy/type","value":"Recreate"}]'
+kubectl set image deployment/roll nginx=nginx:1.26
+kubectl get pods -w
+
+kubectl rollout pause deployment/roll
+kubectl set image deployment/roll nginx=nginx:1.27
+kubectl rollout resume deployment/roll
+```
+
+</details>
+
+
 ## 6.4 Rollbacks and revision reasoning
 
 Deployment revisions represent previous Pod-template versions.
@@ -4035,6 +6372,32 @@ kubectl rollout history deployment/web
 ### ⚡ Remember
 
 `rollout undo` returns to the previous revision; add `--to-revision=<n>` when the task names one.
+
+### 🧪 Practice task
+
+**Task:** Update Deployment `roll` with `kubectl set image` using a **non-existent** tag, observe the stuck rollout, check the history with change causes, and roll back to the last working revision.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl rollout undo --to-revision=N`. Use `kubectl annotate` to record a change cause.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl set image deployment/roll nginx=nginx:does-not-exist
+kubectl annotate deployment roll kubernetes.io/change-cause="bad tag test"
+kubectl rollout status deployment/roll --timeout=30s     # times out
+kubectl rollout history deployment/roll
+kubectl rollout undo deployment/roll
+kubectl rollout status deployment/roll
+```
+
+</details>
+
 
 ## 6.5 Blue/Green deployment
 
@@ -4106,6 +6469,17 @@ kubectl get endpointslices -l kubernetes.io/service-name=web
 kubectl get pods -l version=green -o wide     # endpoint IPs should match these Pods
 ```
 
+### Diagram: blue/green cutover
+
+```mermaid
+flowchart LR
+    U["clients"] --> SVC["Service myapp (selector: version=blue)"]
+    SVC ==> BLUE["Deployment blue (live)"]
+    SVC -.->|"patch selector to version=green"| GREEN["Deployment green (running, tested, idle)"]
+```
+
+Both versions run at the same time. The cutover is one change to the Service selector, and rollback is the same change in reverse.
+
 ### ⚡ Remember
 
 **Service selector = traffic switch.**
@@ -4124,6 +6498,37 @@ kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- http:
 ```
 
 If the cutover "did not take", the most common cause is the Service selector not matching the new Pods' labels. `kubectl describe svc web` shows the selector; `kubectl get pods --show-labels` shows the labels.
+
+### 🧪 Practice task
+
+**Task:** Implement blue/green: Deployments `app-blue` (`nginx:1.26`, label `version=blue`) and `app-green` (`nginx:1.27`, label `version=green`), both with `app=myapp`, behind Service `myapp` selecting `version=blue`. Cut over to green by changing only the Service selector, then switch back.
+
+<details>
+<summary>💡 Hint</summary>
+
+The Service selector decides who gets traffic. `kubectl patch service` changes it.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment app-blue  --image=nginx:1.26 --replicas=2 --dry-run=client -o yaml > blue.yaml
+kubectl create deployment app-green --image=nginx:1.27 --replicas=2 --dry-run=client -o yaml > green.yaml
+# edit both files: labels app=myapp + version=blue/green in selector and template
+kubectl apply -f blue.yaml -f green.yaml
+kubectl create service clusterip myapp --tcp=80:80 --dry-run=client -o yaml > svc.yaml
+# edit selector to: app: myapp, version: blue
+kubectl apply -f svc.yaml
+
+kubectl patch service myapp -p '{"spec":{"selector":{"app":"myapp","version":"green"}}}'
+kubectl get endpoints myapp
+kubectl patch service myapp -p '{"spec":{"selector":{"app":"myapp","version":"blue"}}}'   # rollback
+```
+
+</details>
+
 
 ## 6.6 Canary deployment
 
@@ -4193,9 +6598,52 @@ kubectl scale deployment web-canary --replicas=2
 kubectl scale deployment web-canary --replicas=0   # abort the canary
 ```
 
+### Diagram: canary traffic split
+
+```mermaid
+flowchart LR
+    U["clients"] --> SVC["Service web (selector: app=web)"]
+    SVC -->|"about 90 percent"| ST["web-stable (9 Pods)"]
+    SVC -->|"about 10 percent"| CA["web-canary (1 Pod)"]
+```
+
+The Service selects both Deployments because they share `app=web`, so the traffic split follows the Pod count. For exact percentages you need an Ingress controller or service mesh feature.
+
 ### ⚡ Remember
 
 **Blue/green = switch versions. Canary = gradually increase the new version's share.**
+
+### 🧪 Practice task
+
+**Task:** Implement a canary: stable Deployment `web-stable` with 9 replicas and canary `web-canary` with 1 replica, both labeled `app=web`, behind one Service selecting only `app=web`. Confirm roughly 10% of Pods are canary, then promote and remove the canary.
+
+<details>
+<summary>💡 Hint</summary>
+
+The Service selector must match only the shared label, not the version label.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web-stable --image=nginx:1.26 --replicas=9 --dry-run=client -o yaml > stable.yaml
+kubectl create deployment web-canary --image=nginx:1.27 --replicas=1 --dry-run=client -o yaml > canary.yaml
+# in both: labels app=web + track=stable|canary (selector and template)
+kubectl apply -f stable.yaml -f canary.yaml
+kubectl create service clusterip web --tcp=80:80 --dry-run=client -o yaml > svc.yaml
+# selector: app: web
+kubectl apply -f svc.yaml
+kubectl get endpoints web          # 10 addresses
+
+# promote
+kubectl set image deployment/web-stable nginx=nginx:1.27
+kubectl delete deployment web-canary
+```
+
+</details>
+
 
 ## 6.7 Helm fundamentals
 
@@ -4326,6 +6774,19 @@ helm upgrade web bitnami/nginx --reset-values       # discard earlier overrides
 
 Release state is stored in the release's namespace, so pass `-n` whenever the task names one. `helm rollback` creates a **new** revision that copies the old one, so `helm history` keeps growing.
 
+### Diagram: what Helm does
+
+```mermaid
+flowchart LR
+    CH["Chart (templates and default values)"] --> H["helm install or upgrade"]
+    V["your values (--set, -f values.yaml)"] --> H
+    H --> M["rendered manifests"]
+    M --> K["objects in the cluster"]
+    H --> REL["release record (revision history)"]
+```
+
+Helm renders templates with your values, applies the result, and records a numbered **release revision**. That record is what makes `helm rollback` possible.
+
 ### ⚡ Remember
 
 **Chart -> install -> release.**
@@ -4349,6 +6810,35 @@ Helm merges values in this order; later wins:
 5. Individual `--set` flags after `-f` (override the file).
 
 This is why `--set` always wins against `-f`, and why passing multiple `-f` files later in the command overrides earlier ones.
+
+### 🧪 Practice task
+
+**Task:** Using Helm: add a repo (for example `bitnami`), search for `nginx`, install it as release `my-nginx` in namespace `web` with `--create-namespace` and `--set replicaCount=2`, list releases, upgrade with a different value, roll back, and uninstall.
+
+<details>
+<summary>💡 Hint</summary>
+
+Helm is namespace aware; use `-n web` or `-A`. `helm rollback <release> <revision>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+helm search repo nginx
+helm install my-nginx bitnami/nginx -n web --create-namespace --set replicaCount=2
+helm list -n web
+helm upgrade my-nginx bitnami/nginx -n web --set replicaCount=3
+helm history my-nginx -n web
+helm rollback my-nginx 1 -n web
+helm uninstall my-nginx -n web
+```
+
+</details>
+
 
 ## 6.8 Kustomize
 
@@ -4532,6 +7022,17 @@ secretGenerator:
 - `labels:` is the newer, more controllable form of `commonLabels:`. Adding selector labels with `includeSelectors: true` can conflict with an existing Deployment selector (immutable), so use it deliberately.
 - `kubectl kustomize` only renders; nothing changes in the cluster until `kubectl apply -k`.
 
+### Diagram: Kustomize base and overlay
+
+```mermaid
+flowchart LR
+    B["base/ (plain YAML)"] --> O["overlays/prod (patches, namePrefix, replicas, images)"]
+    O --> R["kubectl kustomize (render only)"]
+    O --> A["kubectl apply -k (render and apply)"]
+```
+
+The base is never edited per environment. Each overlay layers its changes on top, and Kustomize renders the final YAML without templates.
+
 ### ⚡ Remember
 
 **Base = common manifests. Overlay = environment-specific differences.**
@@ -4544,6 +7045,49 @@ secretGenerator:
 - `labels:` with `includeSelectors: true` on an existing Deployment. Changing the Deployment's selector labels is rejected (the selector is immutable), so the patch fails. Use `includeSelectors: false` (the default) when modifying existing workloads.
 - A JSON 6902 patch with the wrong path. The path uses JSON pointer syntax (`/spec/replicas`, `/spec/template/spec/containers/0/resources`), and a single wrong slash (e.g. `spec/replicas`) makes the entire patch fail at apply time. `kubectl kustomize | kubectl apply --dry-run=server -f -` is the fastest way to validate.
 - A patch that tries to add an item to a list using strategic merge without naming the existing items. Lists in strategic merge are merged by `name`/`kind`, so adding a new container without a unique `name:` makes the patch replace the whole list.
+
+### 🧪 Practice task
+
+**Task:** Create a Kustomize `base/` with a Deployment and Service for `nginx`, and an `overlays/prod/` that sets namespace `prod`, name prefix `prod-`, 3 replicas, and image tag `1.27`. Render it, then apply it.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kustomization.yaml` fields: `resources`, `namePrefix`, `namespace`, `images`, `replicas`. Apply with `kubectl apply -k`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+mkdir -p base overlays/prod
+kubectl create deployment web --image=nginx --dry-run=client -o yaml > base/deployment.yaml
+kubectl create service clusterip web --tcp=80:80 --dry-run=client -o yaml > base/service.yaml
+cat > base/kustomization.yaml <<'EOF'
+resources:
+- deployment.yaml
+- service.yaml
+EOF
+cat > overlays/prod/kustomization.yaml <<'EOF'
+resources:
+- ../../base
+namespace: prod
+namePrefix: prod-
+replicas:
+- name: web
+  count: 3
+images:
+- name: nginx
+  newTag: "1.27"
+EOF
+kubectl create ns prod
+kubectl kustomize overlays/prod        # render
+kubectl apply -k overlays/prod
+```
+
+</details>
+
 
 ## 6.9 Helm vs Kustomize
 
@@ -4608,6 +7152,51 @@ spec:
 
 **Readiness controls traffic eligibility.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `ready` (`nginx:1.27`) with a readiness probe: HTTP GET `/ready` on port 80 (this path does not exist). Show that the Pod is Running but not Ready, then fix the path to `/` and confirm `READY 1/1`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl describe pod` shows `Readiness probe failed` in Events. A Pod that is not Ready is removed from Service endpoints.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ready
+  labels:
+    app: ready
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.27
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 80
+      initialDelaySeconds: 2
+      periodSeconds: 3
+```
+
+```bash
+kubectl apply -f ready.yaml
+kubectl get pod ready                 # 0/1 Running
+kubectl describe pod ready | grep -i readiness
+kubectl delete pod ready
+# change path to / and re-apply
+kubectl get pod ready                 # 1/1
+```
+
+</details>
+
+
 ## 7.2 Liveness probes
 
 A liveness probe answers:
@@ -4648,6 +7237,47 @@ livenessProbe:
 
 **Liveness can trigger a restart.**
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `live` (`busybox:1.36`) that creates `/tmp/healthy`, deletes it after 20 seconds, and has an `exec` liveness probe `cat /tmp/healthy`. Observe the container being restarted.
+
+<details>
+<summary>💡 Hint</summary>
+
+Liveness failures restart the container (not the Pod). Watch `RESTARTS`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: live
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "touch /tmp/healthy; sleep 20; rm /tmp/healthy; sleep 600"]
+    livenessProbe:
+      exec:
+        command: ["cat", "/tmp/healthy"]
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 2
+```
+
+```bash
+kubectl apply -f live.yaml
+kubectl get pod live -w
+kubectl describe pod live | grep -i -A2 unhealthy
+```
+
+</details>
+
+
 ## 7.3 Startup probes
 
 A startup probe gives a slow-starting application time to initialize.
@@ -4669,9 +7299,69 @@ startupProbe:
 
 This gives roughly 300 seconds of startup checks before failure, assuming the defaults/values shown.
 
+### Diagram: how the three probes interact
+
+```mermaid
+flowchart TD
+    S(["Container starts"]) --> SP{"startup probe passes?"}
+    SP -->|"not yet, within threshold"| SP
+    SP -->|"threshold exceeded"| RST["container restarted"]
+    SP -->|"yes"| RUN["liveness and readiness begin"]
+    RUN --> LP{"liveness fails?"}
+    LP -->|"yes"| RST
+    RUN --> RP{"readiness fails?"}
+    RP -->|"yes"| OUT["removed from Service endpoints, not restarted"]
+```
+
+Without a startup probe, liveness and readiness begin immediately. **Liveness** failure restarts the container; **readiness** failure only stops traffic to it.
+
 ### ⚡ Remember
 
 **Startup = initialization gate.**
+
+### 🧪 Practice task
+
+**Task:** An app needs up to 60 seconds to start. Add a startup probe (HTTP on `/`, port 80) allowing up to 60 seconds, plus a liveness probe with a short period that only starts once startup succeeds.
+
+<details>
+<summary>💡 Hint</summary>
+
+Startup budget = `failureThreshold` × `periodSeconds`. Liveness and readiness are disabled until the startup probe passes.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-start
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.27
+    startupProbe:
+      httpGet:
+        path: /
+        port: 80
+      failureThreshold: 12
+      periodSeconds: 5
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      periodSeconds: 5
+```
+
+```bash
+kubectl apply -f slow-start.yaml
+kubectl describe pod slow-start | grep -E 'Startup|Liveness'
+```
+
+</details>
+
 
 ## 7.4 Probe mechanisms and defaults
 
@@ -4804,6 +7494,50 @@ A probe that points at the wrong path or port fails on every check: a wrong live
 **Readiness = should it receive traffic?**
 **Liveness = should it keep running?**
 
+### 🧪 Practice task
+
+**Task:** Write three probes for one Pod: an `httpGet` readiness probe, a `tcpSocket` liveness probe, and an `exec` startup probe. Then use `kubectl explain` to find the default values of `periodSeconds`, `timeoutSeconds`, and `failureThreshold`.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl explain pod.spec.containers.readinessProbe`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probes
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.27
+    readinessProbe:
+      httpGet: {path: /, port: 80}
+    livenessProbe:
+      tcpSocket: {port: 80}
+    startupProbe:
+      exec:
+        command: ["sh", "-c", "test -f /etc/nginx/nginx.conf"]
+```
+
+```bash
+kubectl apply -f probes.yaml
+kubectl explain pod.spec.containers.livenessProbe.periodSeconds
+kubectl explain pod.spec.containers.livenessProbe.timeoutSeconds
+kubectl explain pod.spec.containers.livenessProbe.failureThreshold
+```
+
+Defaults: `periodSeconds` 10, `timeoutSeconds` 1, `failureThreshold` 3 (`successThreshold` 1).
+
+</details>
+
+
 ## 7.5 Container logs
 
 ### Common commands
@@ -4838,6 +7572,47 @@ For a crashed container, try **`--previous`**.
 - `kubectl logs -f` and the Pod stays "Pending". There is no container yet, so there is nothing to follow. Check `kubectl describe pod` for why scheduling has not happened.
 - `--previous` only works for the **last** terminated container. If the container restarted several times, the older logs are gone. Pipe to a sidecar/log shipper if you need history.
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `multi-log` with two containers (`a` and `b`, both `busybox:1.36` printing a line every second). Get logs of container `b`, follow logs with a timestamp, show only the last 5 lines, and show the logs of a crashed container's previous instance.
+
+<details>
+<summary>💡 Hint</summary>
+
+`-c` selects the container, `--tail`, `-f`, `--timestamps`, `--previous`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi-log
+spec:
+  containers:
+  - name: a
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do echo from-a; sleep 1; done"]
+  - name: b
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do echo from-b; sleep 1; done"]
+```
+
+```bash
+kubectl apply -f multi-log.yaml
+kubectl logs multi-log -c b
+kubectl logs multi-log -c b -f --timestamps
+kubectl logs multi-log -c b --tail=5
+kubectl logs multi-log -c b --previous        # only after a restart
+kubectl logs multi-log --all-containers=true
+```
+
+</details>
+
+
 ## 7.6 Monitoring with CLI tools
 
 When Metrics Server is installed:
@@ -4855,9 +7630,59 @@ Watch resources:
 kubectl get pods -w
 ```
 
+### 📖 Explained: where the numbers come from
+
+`kubectl top` does not read logs or the container directly. The chain is:
+
+```text
+kubelet (reads cgroup usage on each node) -> Metrics Server (aggregates) -> Metrics API -> kubectl top / HPA
+```
+
+Things to know:
+
+- Metrics Server is an **add-on**. Without it you get `error: Metrics API not available`, and an HPA shows `<unknown>`.
+- Values are **current usage** (a recent average, refreshed about every minute), not history. For graphs and alerts you need something like Prometheus (outside CKAD).
+- Only CPU and memory are reported.
+- Newly started Pods may show no data for the first minute.
+
+Compare usage with what you asked for; that comparison is how you tune requests and limits:
+
+```bash
+kubectl top pod web --containers           # real usage now
+kubectl get pod web -o jsonpath='{.spec.containers[*].resources}'   # requests/limits
+kubectl describe node <node>               # reserved by requests vs real usage in `top nodes`
+```
+
+`top nodes` shows what is used; `describe node` → `Allocated resources` shows what is **reserved**. A node can be 90% reserved and 10% used.
+
 ### ⚡ Remember
 
 **`kubectl top` = metrics, not logs.**
+
+### 🧪 Practice task
+
+**Task:** Using `kubectl top`, find the Pod using the most CPU in all namespaces and the busiest node. Explain what must be installed for this to work.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl top` reads from metrics-server.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl top nodes
+kubectl top pods -A --sort-by=cpu
+kubectl top pod <pod> --containers
+```
+
+It needs the Metrics Server add-on; otherwise you get `error: Metrics API not available`.
+
+</details>
+
 
 ## 7.7 `kubectl describe` and events
 
@@ -4889,6 +7714,31 @@ Useful event reasons to recognize (their fixes are in Chapter 9):
 ### ⚡ Remember
 
 When behavior is unexpected, inspect the **object plus its events**, then jump to the matching row in the Troubleshooting decision tree.
+
+### 🧪 Practice task
+
+**Task:** Create a Pod with a non-existent image `nginx:no-such-tag`. Use `kubectl describe` and `kubectl get events` to find the reason, sorted by time and filtered to that Pod.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl get events --sort-by=.lastTimestamp --field-selector involvedObject.name=<pod>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run badimg --image=nginx:no-such-tag
+kubectl get pod badimg                            # ErrImagePull / ImagePullBackOff
+kubectl describe pod badimg | tail -10
+kubectl get events --sort-by=.lastTimestamp --field-selector involvedObject.name=badimg
+kubectl delete pod badimg
+```
+
+</details>
+
 
 ## 7.8 Debugging in Kubernetes
 
@@ -4938,6 +7788,19 @@ kubectl port-forward pod/web 8080:80
 kubectl port-forward svc/web 8080:80       # test through the Service
 ```
 
+### Diagram: which debugging tool to reach for
+
+```mermaid
+flowchart TD
+    Q{"What do you need?"} -->|"shell in a running container"| EX["kubectl exec"]
+    Q -->|"image has no shell"| EPH["kubectl debug with --target (ephemeral container)"]
+    Q -->|"Pod crashes too fast to inspect"| CP["kubectl debug with --copy-to (modified copy)"]
+    Q -->|"test the network from another Pod"| TMP["kubectl run --rm -it (temporary Pod)"]
+    Q -->|"a problem on the node itself"| ND["kubectl debug node/NAME"]
+```
+
+Start with `describe` and `logs`; reach for these only when those do not explain the problem.
+
 ### ⚡ Remember
 
 **`exec` = enter an existing container. `debug` = add a debugging environment or create a debug copy.**
@@ -4962,6 +7825,30 @@ kubectl debug pod/web --copy-to=web-debug \
 - `kubectl debug pod/web` on a Pod that has `ephemeralcontainers` disabled. Some hardened PodSecurity profiles or admission policies block ephemeral containers. The error says "ephemeral containers are forbidden for pod"; switch to `--copy-to` to make a debug copy instead.
 - Forgetting `--target=<container>` on a multi-container Pod. The debug container needs to know which namespace to share, otherwise it gets its own network namespace and cannot reach the app on `localhost`.
 - Using `kubectl debug node/<node>` on a managed cluster (EKS, GKE, AKS). The command requires the node's `SSHD` access; on managed clusters the API call is rejected or the resulting Pod has no useful privileges. Skip it on CKAD.
+
+### 🧪 Practice task
+
+**Task:** A Pod `app` runs a minimal image with no shell. Use `kubectl debug` to (a) attach an ephemeral container and (b) create a debuggable copy of the Pod with a different image. Also run a quick network test from a temporary Pod.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl debug pod/app -it --image=busybox:1.36 --target=<container>` and `kubectl debug pod/app --copy-to=app-debug --image=busybox:1.36 -it`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run app --image=nginx:1.27
+kubectl debug -it pod/app --image=busybox:1.36 --target=app -- sh
+kubectl debug pod/app --copy-to=app-debug --container=app --image=busybox:1.36 -it -- sh
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- -T 3 http://<pod-ip>
+```
+
+</details>
+
 
 ## 7.9 API deprecations
 
@@ -5008,6 +7895,52 @@ kubectl get endpointslices
 
 **Know the current API version before editing an old manifest.**
 
+### 🧪 Practice task
+
+**Task:** A manifest uses `apiVersion: extensions/v1beta1` for an Ingress. Find the supported version with `kubectl api-versions` / `kubectl explain`, and convert it to a working `networking.k8s.io/v1` Ingress for Service `web` port 80.
+
+<details>
+<summary>💡 Hint</summary>
+
+v1 Ingress needs `pathType` and `service.name` / `service.port.number`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl api-versions | grep networking
+kubectl explain ingress | head -5
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  rules:
+  - host: web.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web
+            port:
+              number: 80
+```
+
+```bash
+kubectl apply -f ingress.yaml
+kubectl get ingress web
+```
+
+</details>
+
+
 # 8. Services & Networking
 
 ## 8.1 Pod networking
@@ -5027,9 +7960,59 @@ Between Pods, use Pod networking or, for stable application access, a Service.
 
 Because Pod IPs change whenever Pods are recreated, applications should connect to a **Service** name, not a Pod IP.
 
+### 📖 Explained: how Pod traffic actually flows
+
+| From → To | What happens |
+|---|---|
+| Container → container in the same Pod | Same network namespace: use `localhost:<port>` |
+| Pod → Pod on the same node | Traffic goes through a virtual link on the node (bridge or routing set up by the CNI) |
+| Pod → Pod on another node | The CNI routes or tunnels the packet between nodes; the target still sees the real source Pod IP (no NAT) |
+| Pod → Service | The Service IP is rewritten to one ready Pod IP (see §8.3) |
+| Your laptop → Pod | Not reachable directly; use `kubectl port-forward`, a Service, or an Ingress |
+
+Useful commands:
+
+```bash
+kubectl get pods -o wide                             # Pod IP and node
+kubectl exec <pod> -- ip addr                        # the Pod's interface (if the image has `ip`)
+kubectl port-forward pod/web 8080:80                 # laptop:8080 -> Pod:80 (debug only)
+```
+
+Points that trip people up:
+
+- A Pod gets a **new IP every time it is recreated**, so never hard-code a Pod IP.
+- `containerPort` in the Pod spec is documentation; it does not open or block anything.
+- `hostNetwork: true` makes a Pod use the node's network namespace and IP. It is rare and a security concern.
+- If Pods on different nodes cannot talk, the CNI plugin is the first suspect (a cluster issue, not an app issue).
+
 ### ⚡ Remember
 
 **Pod IP = ephemeral. Service = stable endpoint.**
+
+### 🧪 Practice task
+
+**Task:** Create two Pods `a` and `b` (`nginx:1.27`) on different nodes if possible. Show that Pod `b` can reach Pod `a` by IP without NAT, and that each Pod has its own IP.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl get pods -o wide` and `wget -qO-` from a Pod to the other Pod IP.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run a --image=nginx:1.27
+kubectl run b --image=busybox:1.36 --command -- sleep 3600
+kubectl get pods -o wide
+A_IP=$(kubectl get pod a -o jsonpath='{.status.podIP}')
+kubectl exec b -- wget -qO- $A_IP
+```
+
+</details>
+
 
 ---
 
@@ -5146,6 +8129,30 @@ The single most common Service failure is "Service exists, no endpoints." That i
 - A Service in one namespace selecting Pods in another. Selectors are intra-namespace; the Service and the Pods must be in the same namespace, or the selector matches nothing.
 - A Service with no `selector` and no manually created Endpoints. The Service has nothing to forward to; EndpointSlices are empty. Use this pattern deliberately (e.g. for an external database) and create the Endpoints object, or set `type: ExternalName`.
 
+### 🧪 Practice task
+
+**Task:** Create Deployment `web` (3 replicas, `nginx:1.27`, container port 80) and a Service `web-svc` with `port: 8080` forwarding to `targetPort: 80`. Test through the Service from a temporary Pod.
+
+<details>
+<summary>💡 Hint</summary>
+
+`port` is what clients use; `targetPort` is the container's port.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web --image=nginx:1.27 --replicas=3 --port=80
+kubectl expose deployment web --name=web-svc --port=8080 --target-port=80
+kubectl get svc,endpoints web-svc
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- web-svc:8080
+```
+
+</details>
+
+
 ## 8.3 ClusterIP
 
 ClusterIP is the default Service type and provides an internal virtual IP.
@@ -5166,6 +8173,29 @@ Only **ready** Pods receive traffic: a Pod that fails its readiness probe is rem
 ### ⚡ Remember
 
 **ClusterIP = internal virtual IP + DNS name.**
+
+### 🧪 Practice task
+
+**Task:** Create a ClusterIP Service for an existing Deployment, find its cluster IP, and confirm it is **not** reachable from outside the cluster but works from a Pod using both the IP and the DNS name.
+
+<details>
+<summary>💡 Hint</summary>
+
+ClusterIP is the default Service type.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl expose deployment web --name=internal --port=80
+kubectl get svc internal -o jsonpath='{.spec.clusterIP}'
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh -c 'wget -qO- internal; wget -qO- http://<clusterIP>'
+```
+
+</details>
+
 
 ## 8.4 NodePort
 
@@ -5211,9 +8241,58 @@ If you omit `nodePort`, Kubernetes picks a free one in the range; read it from `
 - Choosing `nodePort` and `targetPort` to be the same number. The Service still works, but readers confuse which port is which. The convention is: `port` = what clients connect to, `targetPort` = what the container listens on, `nodePort` = the externally reachable port on each node.
 - Forgetting that a NodePort is also a ClusterIP. The Service gets a virtual ClusterIP in addition to the per-node port. `curl <cluster-ip>:80` works from inside the cluster; `curl <node-ip>:30080` works from outside.
 
+### Diagram: NodePort path
+
+```mermaid
+flowchart LR
+    C["client"] -->|"NODE_IP:30080"| N["any node in the cluster"]
+    N --> S["Service (ClusterIP plus nodePort)"]
+    S --> P1["Pod on node A"]
+    S --> P2["Pod on node B"]
+```
+
+The port is opened on **every** node, even nodes that run no matching Pod; traffic is forwarded to a ready Pod wherever it runs.
+
 ### ⚡ Remember
 
 **NodePort = ClusterIP + a port opened on every node.**
+
+### 🧪 Practice task
+
+**Task:** Expose Deployment `web` as a NodePort Service `web-np` with fixed `nodePort: 30080`. Test it using a node IP.
+
+<details>
+<summary>💡 Hint</summary>
+
+The valid NodePort range is 30000-32767 by default. `kubectl expose` cannot set the nodePort, so edit generated YAML.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl expose deployment web --name=web-np --type=NodePort --port=80 --dry-run=client -o yaml > np.yaml
+```
+
+Add `nodePort: 30080` under the port entry:
+
+```yaml
+ports:
+- port: 80
+  targetPort: 80
+  nodePort: 30080
+```
+
+```bash
+kubectl apply -f np.yaml
+kubectl get svc web-np
+NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+curl http://$NODE_IP:30080
+```
+
+</details>
+
 
 ## 8.5 LoadBalancer
 
@@ -5232,6 +8311,31 @@ A LoadBalancer Service builds on NodePort: the cloud provider creates an externa
 
 **LoadBalancer = NodePort + an external load balancer (needs provider support).**
 
+### 🧪 Practice task
+
+**Task:** Create a LoadBalancer Service for `web` and observe the `EXTERNAL-IP` column. Explain what happens on a cluster with no cloud load balancer, and which other Service types it builds on.
+
+<details>
+<summary>💡 Hint</summary>
+
+A LoadBalancer Service also gets a NodePort and a ClusterIP.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl expose deployment web --name=web-lb --type=LoadBalancer --port=80
+kubectl get svc web-lb            # EXTERNAL-IP <pending> without a cloud/LB controller
+kubectl get svc web-lb -o jsonpath='{.spec.ports[0].nodePort}'
+```
+
+On bare clusters `EXTERNAL-IP` stays `<pending>` (unless MetalLB or similar is installed). A LoadBalancer includes a ClusterIP and a NodePort.
+
+</details>
+
+
 ## 8.6 ExternalName Service
 
 An `ExternalName` Service maps a cluster DNS name to an external hostname (a DNS CNAME). It has no selector, no endpoints and does no proxying.
@@ -5248,9 +8352,46 @@ spec:
 
 Pods can then connect to `external-db` (or `external-db.<namespace>.svc.cluster.local`).
 
+### 📖 Explained: when to use it, and its limits
+
+Typical use: your app calls `external-db`, and that name points to `db.example.com` today. Later you move the database into the cluster by replacing the Service with a normal one **of the same name**, without touching the app.
+
+```bash
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- nslookup external-db
+# returns a CNAME to db.example.com
+```
+
+Limits:
+
+- It works at the DNS level only. It does **not** remap ports: the client must use the real port of the external service.
+- The value must be a hostname, not an IP address. For a fixed IP, create a Service **without a selector** and a matching EndpointSlice with that IP.
+- With HTTPS, the client sends the in-cluster name as the host, which may not match the certificate of the external server.
+
 ### ⚡ Remember
 
 **ExternalName = a DNS alias: no selector, no endpoints, no proxying.**
+
+### 🧪 Practice task
+
+**Task:** Create an ExternalName Service `ext-db` that maps to `db.example.com`. Resolve it from a Pod and see the CNAME.
+
+<details>
+<summary>💡 Hint</summary>
+
+ExternalName has no selector and no endpoints.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create service externalname ext-db --external-name=db.example.com
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- nslookup ext-db
+```
+
+</details>
+
 
 ## 8.7 Service selectors, endpoints and EndpointSlices
 
@@ -5275,9 +8416,45 @@ Check:
 5. Service `targetPort`.
 6. EndpointSlices.
 
+### Diagram: how a Service finds its Pods
+
+```mermaid
+flowchart LR
+    SVC["Service (selector: app=web)"] -->|"label match"| ES["EndpointSlice"]
+    ES --> R1["Pod web-1 (Ready, included)"]
+    ES -.->|"left out until Ready"| R2["Pod web-2 (not Ready)"]
+```
+
+The control plane keeps the EndpointSlice in sync with Pods that match the selector **and** are Ready. An empty slice means no label match or no Ready Pod.
+
 ### ⚡ Remember
 
 No endpoints usually means **selector, readiness or Pod availability** should be checked before blaming the client.
+
+### 🧪 Practice task
+
+**Task:** Make Service `web-svc` select no Pods by breaking its selector, show the empty endpoints, then fix the selector and read the EndpointSlices.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl get endpoints` / `kubectl get endpointslices -l kubernetes.io/service-name=<svc>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl patch svc web-svc -p '{"spec":{"selector":{"app":"wrong"}}}'
+kubectl get endpoints web-svc                   # <none>
+kubectl patch svc web-svc -p '{"spec":{"selector":{"app":"web"}}}'
+kubectl get endpoints web-svc
+kubectl get endpointslices -l kubernetes.io/service-name=web-svc
+```
+
+</details>
+
 
 ## 8.8 Service discovery
 
@@ -5295,9 +8472,84 @@ Applications should normally use Service DNS names rather than hard-coded Pod IP
 kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- nslookup web.dev
 ```
 
+### Diagram: from name to Pod
+
+```mermaid
+sequenceDiagram
+    participant App as App in a Pod
+    participant DNS as CoreDNS
+    participant KP as kube-proxy rules on the node
+    participant BE as Backend Pod
+    App->>DNS: look up web (search list adds default.svc.cluster.local)
+    DNS-->>App: ClusterIP 10.96.0.50
+    App->>KP: connect to 10.96.0.50 port 80
+    KP->>BE: rewritten to a ready Pod IP and targetPort
+```
+
+DNS only turns a name into the Service's virtual IP. The node's rules then pick one ready Pod for each connection.
+
+### 📖 Explained: how a name becomes an IP
+
+Every Pod's `/etc/resolv.conf` points at CoreDNS and has a search list:
+
+```text
+search default.svc.cluster.local svc.cluster.local cluster.local
+nameserver 10.96.0.10
+options ndots:5
+```
+
+- Typing `web` makes the resolver try `web.default.svc.cluster.local` first. That is why a short name works **only in the same namespace** as the Service.
+- `web.dev` works because `svc.cluster.local` is appended from the search list.
+- `ndots:5` means any name with fewer than 5 dots is tried with the search suffixes first. External names like `api.example.com` therefore cause a few failed lookups before the real one. A trailing dot (`api.example.com.`) skips the search list.
+
+Other things worth knowing:
+
+| Case | What DNS returns |
+|---|---|
+| Normal Service | One A record: the ClusterIP |
+| Headless Service (`clusterIP: None`) | One A record **per ready Pod** (clients see every Pod IP) |
+| StatefulSet Pod via headless Service | `pod-0.svc.ns.svc.cluster.local` → that Pod's IP |
+
+Kubernetes also injects env vars such as `WEB_SERVICE_HOST` and `WEB_SERVICE_PORT` into Pods, but **only for Services that already existed when the Pod started**. Prefer DNS; it has no ordering problem.
+
+Debug DNS in this order:
+
+```bash
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- nslookup web
+kubectl get pods -n kube-system -l k8s-app=kube-dns       # is CoreDNS running?
+kubectl get svc web -o wide                               # does the Service exist, in this namespace?
+```
+
 ### ⚡ Remember
 
 **Same namespace: `web`. Other namespace: `web.<namespace>`.**
+
+### 🧪 Practice task
+
+**Task:** From a Pod in namespace `default`, resolve `web-svc` by short name, by `web-svc.default`, and by FQDN. Read the Pod's `/etc/resolv.conf` and explain the search list.
+
+<details>
+<summary>💡 Hint</summary>
+
+Services are resolved by CoreDNS; the Pod's namespace is added to the search path.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh -c '
+nslookup web-svc
+nslookup web-svc.default
+nslookup web-svc.default.svc.cluster.local
+cat /etc/resolv.conf'
+```
+
+The search list (`<ns>.svc.cluster.local svc.cluster.local cluster.local`) is why short names work within the same namespace.
+
+</details>
+
 
 ## 8.9 NetworkPolicies
 
@@ -5511,6 +8763,65 @@ A **timeout** is the NetworkPolicy fingerprint; "connection refused" means the S
 - A policy that selects all Pods (`podSelector: {}`) with `policyTypes: [Ingress]` and an empty `from:` list. This denies all **incoming** traffic to every Pod in the namespace, but it does **not** touch egress or DNS lookups — those are only affected by a policy whose `policyTypes` includes `Egress`. Do not "fix" a broken DNS lookup by editing an ingress-only deny-all; check for a separate egress-denying policy instead.
 - Setting `podSelector: {}` and forgetting this also selects Pods in other namespaces via the policy's own namespace. `podSelector` is intra-namespace; use `namespaceSelector` for cross-namespace selection.
 
+### 🧪 Practice task
+
+**Task:** In namespace `np`, create Pods `frontend` (label `role=frontend`), `backend` (label `role=backend`, `nginx:1.27`), and a Service for the backend. Apply a default-deny ingress NetworkPolicy, then allow only Pods with `role=frontend` to reach `backend` on port 80. Test allowed and denied access.
+
+<details>
+<summary>💡 Hint</summary>
+
+`podSelector: {}` selects all Pods. Test from a labeled temporary Pod. Your CNI must support NetworkPolicy.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns np
+kubectl run backend --image=nginx:1.27 -l role=backend -n np
+kubectl expose pod backend --port=80 -n np
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: np
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend
+  namespace: np
+spec:
+  podSelector:
+    matchLabels:
+      role: backend
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          role: frontend
+    ports:
+    - protocol: TCP
+      port: 80
+```
+
+```bash
+kubectl apply -f netpol.yaml
+kubectl run ok  --rm -it --image=busybox:1.36 --restart=Never -n np -l role=frontend -- wget -qO- -T 3 backend
+kubectl run bad --rm -it --image=busybox:1.36 --restart=Never -n np -- wget -qO- -T 3 backend   # times out
+```
+
+</details>
+
+
 ## 8.10 Ingress
 
 Ingress defines HTTP/HTTPS routing to Services. It only works if an **Ingress controller** (for example ingress-nginx) is running in the cluster.
@@ -5585,6 +8896,31 @@ kubectl get ingressclass
 
 Ingress is not a replacement for a Service.
 
+### 🧪 Practice task
+
+**Task:** Create an Ingress `web-ing` for host `web.example.com` routing `/` to Service `web-svc:80` using `ingressClassName: nginx`. Generate it imperatively, then test with a Host header against the ingress controller.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl create ingress --rule="host/path=service:port"`. Check available classes with `kubectl get ingressclass`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get ingressclass
+kubectl create ingress web-ing --class=nginx --rule="web.example.com/*=web-svc:80"
+kubectl get ingress web-ing
+kubectl describe ingress web-ing
+curl -H "Host: web.example.com" http://<ingress-controller-ip>/
+```
+
+</details>
+
+
 ## 8.11 Host-based and path-based routing
 
 ### Host-based
@@ -5647,6 +8983,34 @@ If the backend expects `/` but the Ingress path is `/api`, a controller-specific
 
 **Host = which site. Path = which page. Both end at a Service and port.**
 
+### 🧪 Practice task
+
+**Task:** Write one Ingress with two hosts: `shop.example.com` → `shop-svc:80` and `blog.example.com` → `blog-svc:80`; and a second Ingress with path routing `/api` → `api-svc:8080` and `/` → `web-svc:80` on host `app.example.com`.
+
+<details>
+<summary>💡 Hint</summary>
+
+Rules are a list; each rule has a host and `http.paths`. Order and `pathType` matter (`Prefix` vs `Exact`).
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ingress hosts --class=nginx \
+  --rule="shop.example.com/*=shop-svc:80" \
+  --rule="blog.example.com/*=blog-svc:80"
+
+kubectl create ingress paths --class=nginx \
+  --rule="app.example.com/api*=api-svc:8080" \
+  --rule="app.example.com/*=web-svc:80"
+kubectl get ingress
+```
+
+</details>
+
+
 ## 8.12 Ingress troubleshooting
 
 Trace the full chain:
@@ -5675,6 +9039,32 @@ Check the IngressClass/controller as well as the backend Service.
 ### ⚡ Remember
 
 An Ingress problem does not automatically mean the Pod is broken.
+
+### 🧪 Practice task
+
+**Task:** An Ingress returns 503/404. Walk through the checks: does the Ingress exist and show an address? Does the backend Service exist in the same namespace with the right port? Does the Service have endpoints? Do the Pods respond?
+
+<details>
+<summary>💡 Hint</summary>
+
+Ingress → Service → Endpoints → Pod. Backend Services must be in the Ingress's namespace.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get ingress -A
+kubectl describe ingress web-ing          # check backends and events
+kubectl get svc web-svc
+kubectl get endpoints web-svc             # empty = selector/readiness problem
+kubectl get pods -l app=web
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- web-svc:80
+```
+
+</details>
+
 
 ## 8.13 Capstone: a realistic web tier
 
@@ -5824,6 +9214,58 @@ What this stack gives you:
 - The ConfigMap supplies non-sensitive configuration; the HPA reads CPU from `resources.requests.cpu`.
 - The ServiceAccount is the Pod's identity in the API; the SecurityContext is the `restricted` profile.
 
+### 🧪 Practice task
+
+**Task:** Build a web tier in namespace `shop`: a ConfigMap-driven Deployment (3 replicas, readiness probe, resource requests), a ClusterIP Service, an Ingress for `shop.example.com`, and a NetworkPolicy allowing ingress to the app only from the ingress controller namespace. Verify each layer.
+
+<details>
+<summary>💡 Hint</summary>
+
+Build it in layers and verify after each: Deployment → Service → Ingress → NetworkPolicy.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create ns shop
+kubectl create configmap shop-config -n shop --from-literal=MODE=prod
+kubectl create deployment web -n shop --image=nginx:1.27 --replicas=3 --port=80 --dry-run=client -o yaml > web.yaml
+# add: envFrom.configMapRef shop-config, readinessProbe httpGet / 80, resources.requests cpu 50m
+kubectl apply -f web.yaml
+kubectl expose deployment web -n shop --port=80
+kubectl create ingress web -n shop --class=nginx --rule="shop.example.com/*=web:80"
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-ingress
+  namespace: shop
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - port: 80
+```
+
+```bash
+kubectl apply -f netpol.yaml
+kubectl get deploy,svc,ingress,netpol,endpoints -n shop
+```
+
+</details>
+
+
 # 9. Troubleshooting
 
 ## 9.1 Systematic troubleshooting flow
@@ -5851,9 +9293,50 @@ kubectl logs <pod> --previous
 kubectl get events
 ```
 
+### Diagram: troubleshooting flow
+
+```mermaid
+flowchart TD
+    A["kubectl get pod: status, READY, RESTARTS"] --> B["kubectl describe pod: read Events at the bottom"]
+    B --> C{"has a container started?"}
+    C -->|"no"| D["fix scheduling, image, volume or config"]
+    C -->|"yes, but crashing"| E["kubectl logs --previous and exit code"]
+    C -->|"running, not Ready"| F["check readiness probe, endpoints, Service selector"]
+    D --> G["apply the fix, then verify with get and logs"]
+    E --> G
+    F --> G
+```
+
+Always go from the status to the Events to the logs, and change one thing at a time.
+
 ### ⚡ Remember
 
 Do not change random fields before understanding the failure.
+
+### 🧪 Practice task
+
+**Task:** Create a broken Pod `broken` with the image `nginx:no-such-tag`. Without guessing, follow the systematic flow (status → describe → events → logs) to name the cause, then fix it.
+
+<details>
+<summary>💡 Hint</summary>
+
+Order: `get` (status) → `describe` (Events) → `logs` (`--previous` if restarted) → fix → verify.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run broken --image=nginx:no-such-tag
+kubectl get pod broken
+kubectl describe pod broken | tail -10        # Failed to pull image
+kubectl set image pod/broken broken=nginx:1.27
+kubectl get pod broken
+```
+
+</details>
+
 
 ## 9.2 Pending Pod
 
@@ -5890,6 +9373,33 @@ flowchart TD
 | `didn't match Pod's node selector/affinity` | `nodeSelector`/affinity label exists on no node | Fix the selector or label the node |
 | `unbound immediate PersistentVolumeClaims` | PVC is `Pending` | See **PVC Pending** below |
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `pending` requesting `100` CPUs, then another one with a `nodeSelector: {disk: nvme}` that no node has. Find the reason for each from the Events.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl describe pod` → `FailedScheduling` message.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run pending --image=nginx:1.27 --dry-run=client -o yaml > p.yaml
+# add resources.requests.cpu: "100"  -> apply
+kubectl describe pod pending | grep -A3 Events     # Insufficient cpu
+# second Pod with nodeSelector disk: nvme
+# Events: 0/N nodes are available: node(s) didn't match Pod's node affinity/selector
+```
+
+Fix: lower the request / label a node (`kubectl label node <n> disk=nvme`) / remove the selector.
+
+</details>
+
+
 ---
 
 ## 9.3 ImagePullBackOff / ErrImagePull
@@ -5903,6 +9413,53 @@ flowchart TD
 | `manifest unknown` / `not found` | Wrong image name or tag | Correct it: `kubectl set image pod/<pod> <container>=<image>` or edit the Deployment |
 | `pull access denied` / `unauthorized` | Private registry, no credentials | Create a `docker-registry` Secret and add `imagePullSecrets` (Pod or ServiceAccount) |
 | `no such host` / timeout | Registry unreachable or DNS problem | Fix the registry host or network |
+
+### 🧪 Practice task
+
+**Task:** Fix a Deployment `web` that is stuck in `ImagePullBackOff` because of a typo in the image name, and then explain what extra field is needed when pulling from a private registry.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl set image` or `kubectl edit`. Private registries need `imagePullSecrets`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl create deployment web --image=nginx:1.277
+kubectl get pods
+kubectl describe pod -l app=web | grep -i -A2 failed
+kubectl set image deployment/web nginx=nginx:1.27
+kubectl rollout status deployment/web
+```
+
+For private images add `imagePullSecrets: [{name: regcred}]` to the Pod spec (or to the ServiceAccount).
+
+</details>
+
+### 📖 Worked example
+
+```text
+$ kubectl get pod web
+NAME   READY   STATUS             RESTARTS   AGE
+web    0/1     ImagePullBackOff   0          2m
+
+$ kubectl describe pod web | tail -4
+  Warning  Failed   Failed to pull image "nginx:1.277": ... manifest for nginx:1.277 not found
+  Warning  Failed   Error: ErrImagePull
+  Normal   BackOff  Back-off pulling image "nginx:1.277"
+```
+
+Reading it: the message `manifest ... not found` means the registry is reachable but this tag does not exist, so the fix is the tag, not credentials or networking. `ErrImagePull` is the failed attempt; `ImagePullBackOff` is the waiting period before the next attempt.
+
+```bash
+kubectl set image pod/web web=nginx:1.27        # a bare Pod allows changing the image
+kubectl get pod web -w
+```
+
 
 ---
 
@@ -5949,6 +9506,32 @@ kubectl describe pod <pod>             # Last State, Exit Code, probe events
 - Setting `initialDelaySeconds` on the liveness probe to "give the app more time". If the app is slow to start, the right tool is a `startupProbe`, not a longer delay. A long `initialDelaySeconds` also delays detection of *real* failures.
 - Treating `CrashLoopBackOff` as a single bug. The state just means "the container exited and the kubelet is backing off retries"; the *reason* is in `describe` (exit code, OOMKilled, probe failure). Fix the reason, not the back-off.
 
+### 🧪 Practice task
+
+**Task:** Create a Pod `crash` running `sh -c "echo starting; exit 3"` with `restartPolicy: Always`. Find the exit code and the last log, then fix it so the container keeps running.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl logs crash --previous`; exit code in `describe` → `Last State`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run crash --image=busybox:1.36 -- sh -c "echo starting; exit 3"
+kubectl get pod crash                    # CrashLoopBackOff
+kubectl logs crash --previous
+kubectl describe pod crash | grep -A4 'Last State'     # Exit Code: 3
+kubectl delete pod crash
+kubectl run crash --image=busybox:1.36 -- sh -c "echo starting; sleep 3600"
+```
+
+</details>
+
+
 ---
 
 ## 9.5 CreateContainerConfigError
@@ -5965,6 +9548,70 @@ kubectl describe pod <pod>             # Last State, Exit Code, probe events
 | `container has runAsNonRoot and image will run as root` (or `image has non-numeric user ... cannot verify user is non-root`) | `runAsNonRoot: true` but the image runs as root or a named user | Set a numeric `runAsUser` (for example `1000`) or use an image with a numeric non-root `USER` |
 
 The kubelet retries automatically once the object exists.
+
+### 🧪 Practice task
+
+**Task:** Create a Pod that references a ConfigMap key that does not exist (`configMapKeyRef` to `missing-cm`). Find the status and reason, then create the ConfigMap so the Pod starts.
+
+<details>
+<summary>💡 Hint</summary>
+
+Status `CreateContainerConfigError`; the reason is in `describe`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cfg-err
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sleep", "3600"]
+    env:
+    - name: X
+      valueFrom:
+        configMapKeyRef:
+          name: missing-cm
+          key: x
+```
+
+```bash
+kubectl apply -f cfg-err.yaml
+kubectl get pod cfg-err                    # CreateContainerConfigError
+kubectl describe pod cfg-err | grep -i 'configmap'
+kubectl create configmap missing-cm --from-literal=x=1
+kubectl get pod cfg-err                    # Running (the kubelet retries)
+```
+
+</details>
+
+### 📖 Worked example
+
+```text
+$ kubectl get pod app
+NAME   READY   STATUS                       RESTARTS   AGE
+app    0/1     CreateContainerConfigError   0          30s
+
+$ kubectl describe pod app | grep -i -A2 warning
+  Warning  Failed  Error: configmap "app-settings" not found
+```
+
+Reading it: the Pod was scheduled, but the kubelet could not build the container's configuration because an object it references is missing. Nothing is wrong with the image or the app.
+
+```bash
+kubectl get configmap -n <pod-namespace>           # is it there? right namespace? right spelling?
+kubectl create configmap app-settings --from-literal=MODE=prod
+kubectl get pod app -w                             # the kubelet retries on its own
+```
+
+If the message says `couldn't find key`, the object exists but the `key:` in your `configMapKeyRef` / `secretKeyRef` is wrong.
+
 
 ---
 
@@ -5986,6 +9633,49 @@ kubectl get events --sort-by=.lastTimestamp
 | `FailedCreatePodSandBox` | Network/runtime problem on the node | Cluster-level issue; report or reschedule |
 | Long image pull, no error | Large image / slow registry | Wait; verify with events |
 
+### 🧪 Practice task
+
+**Task:** Create a Pod that mounts a PVC `no-such-pvc` that does not exist. Read the status and the reason, then create the PVC (or fix the claim name).
+
+<details>
+<summary>💡 Hint</summary>
+
+`ContainerCreating` for a long time → `describe` → `FailedMount` or "persistentvolumeclaim not found".
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl describe pod <pod> | tail -8
+kubectl get pvc
+kubectl apply -f pvc.yaml            # or edit the Pod to the correct claimName
+```
+
+Pods are immutable for most fields, so if you must change `claimName`, delete and recreate the Pod.
+
+</details>
+
+### 📖 Worked example
+
+```text
+$ kubectl get pod app
+NAME   READY   STATUS              RESTARTS   AGE
+app    0/1     ContainerCreating   0          5m
+
+$ kubectl describe pod app | tail -3
+  Warning  FailedMount  MountVolume.SetUp failed for volume "cfg" : configmap "app-cfg" not found
+```
+
+Reading it: a Pod that sits in `ContainerCreating` for minutes is almost always waiting for a **volume**, not for the image. `FailedMount` names the missing volume source. Check the volume list in the Pod, then create the missing ConfigMap, Secret, or PVC in the **same namespace**.
+
+```bash
+kubectl get pod app -o jsonpath='{.spec.volumes}'
+kubectl get cm,secret,pvc
+```
+
+
 ---
 
 ## 9.7 Init container failure
@@ -6001,6 +9691,66 @@ kubectl logs <pod> -c <init-container>
 ```
 
 `Init:N/M` means N of M init containers have finished. Stuck at `Init:0/1` usually means the init container is still running (for example a wait loop for a dependency that is not ready). App containers do not start until all init containers succeed.
+
+### 🧪 Practice task
+
+**Task:** Create a Pod `init-fail` with an init container that runs `exit 1`. Find which container failed and its logs, then fix it.
+
+<details>
+<summary>💡 Hint</summary>
+
+Status `Init:Error` / `Init:CrashLoopBackOff`. `kubectl logs <pod> -c <init-container>`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-fail
+spec:
+  initContainers:
+  - name: setup
+    image: busybox:1.36
+    command: ["sh", "-c", "echo setup failed; exit 1"]
+  containers:
+  - name: app
+    image: nginx:1.27
+```
+
+```bash
+kubectl apply -f init-fail.yaml
+kubectl get pod init-fail
+kubectl logs init-fail -c setup
+kubectl delete pod init-fail
+# change the init command to: echo ok; then re-apply
+```
+
+</details>
+
+### 📖 Worked example
+
+```text
+$ kubectl get pod web
+NAME   READY   STATUS                  RESTARTS   AGE
+web    0/1     Init:CrashLoopBackOff   3          1m
+
+$ kubectl logs web -c wait-for-db
+nc: bad address 'db'
+```
+
+Reading it: the main container never starts until every init container succeeds, so the answer is in the **init container's** logs (`-c <init-name>`), not the app's. Here the init container waits for a Service named `db` that does not exist yet.
+
+```bash
+kubectl get svc db                  # create or fix the dependency
+kubectl get pod web -w              # Init:0/1 -> PodInitializing -> Running
+```
+
+`Init:CrashLoopBackOff` means the init container keeps failing; `Init:0/1` with no restarts usually means it is still waiting in a loop.
+
 
 ---
 
@@ -6034,6 +9784,31 @@ Common, easy-to-miss causes:
 
 **Remember:** Running != Ready.
 
+### 🧪 Practice task
+
+**Task:** Create a Pod with a readiness probe on a wrong port (`8080` on nginx) behind a Service. Show `READY 0/1`, empty endpoints, and fix the probe.
+
+<details>
+<summary>💡 Hint</summary>
+
+Compare `kubectl get endpoints <svc>` before and after the fix.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get pod
+kubectl describe pod <pod> | grep -i 'readiness probe failed'
+kubectl get endpoints <svc>               # <none>
+```
+
+Fix: change the probe `port` to the port nginx really listens on (`80`), re-create the Pod (or `kubectl edit deployment` if it is a Deployment), then `kubectl get endpoints <svc>` shows the Pod IP.
+
+</details>
+
+
 ---
 
 ## 9.9 OOMKilled
@@ -6055,6 +9830,29 @@ Last State:  Terminated
 
 **Interpretation and fix:** the container exceeded its memory limit. Raise `limits.memory` (keeping requests <= limits and within any quota), or fix the memory growth. CPU over-use only throttles; it never causes `OOMKilled`.
 
+### 🧪 Practice task
+
+**Task:** Create a Pod with `limits.memory: 20Mi` that allocates more (`tail /dev/zero`). Confirm `OOMKilled` and exit code 137, then fix with a larger limit.
+
+<details>
+<summary>💡 Hint</summary>
+
+`describe` → `Last State: Terminated, Reason: OOMKilled`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl describe pod oom | grep -A5 'Last State'
+kubectl get pod oom -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'   # 137
+# raise resources.limits.memory (for example 256Mi), recreate or roll out the change
+```
+
+</details>
+
+
 ---
 
 ## 9.10 Service has no endpoints
@@ -6068,6 +9866,55 @@ Last State:  Terminated
 | Selector matches no labels in `--show-labels` | Selector/label typo | Fix the Service selector or Pod labels |
 | Matching Pods are `0/1` Ready | Readiness failing | See **Running but not Ready** |
 | Pods exist in another namespace | Service and Pods in different namespaces | Create the Service in the Pods' namespace |
+
+### 🧪 Practice task
+
+**Task:** Create a Service whose selector does not match any Pod labels. Detect the problem and fix it with one command.
+
+<details>
+<summary>💡 Hint</summary>
+
+Compare `kubectl get svc <svc> -o wide` (selector) with `kubectl get pods --show-labels`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get endpoints <svc>                     # <none>
+kubectl get svc <svc> -o jsonpath='{.spec.selector}'
+kubectl get pods --show-labels
+kubectl patch svc <svc> -p '{"spec":{"selector":{"app":"web"}}}'
+kubectl get endpoints <svc>
+```
+
+</details>
+
+### 📖 Worked example
+
+```text
+$ kubectl get endpoints web
+NAME   ENDPOINTS   AGE
+web    <none>      3m
+
+$ kubectl get svc web -o jsonpath='{.spec.selector}'
+{"app":"web"}
+
+$ kubectl get pods --show-labels
+NAME    READY   STATUS    LABELS
+web-1   1/1     Running   app=webapp
+```
+
+Reading it: the Service looks for `app=web`, but the Pod is labeled `app=webapp`. The selector matches nothing, so there are no endpoints. Fix the side that is wrong:
+
+```bash
+kubectl patch svc web -p '{"spec":{"selector":{"app":"webapp"}}}'
+kubectl get endpoints web           # now lists the Pod IP:port
+```
+
+If the labels match but the Pod is `0/1` Ready, the Pod is excluded until its readiness probe passes (§9.8).
+
 
 ---
 
@@ -6089,6 +9936,30 @@ kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- --tim
 ```
 
 **Interpretation and fix:** if the Pod IP works on the app's real port but the Service does not, `targetPort` is wrong. Example: `targetPort: 8080` while the app listens on `9090` -> change `targetPort` to `9090`.
+
+### 🧪 Practice task
+
+**Task:** A Service `web` has endpoints, but connections fail. The app listens on port 80 and the Service has `targetPort: 8080`. Prove it and fix it.
+
+<details>
+<summary>💡 Hint</summary>
+
+Endpoints exist, but connect to the Pod IP on 80 versus 8080 shows the mismatch.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get svc web -o jsonpath='{.spec.ports}'
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- -T 3 <pod-ip>:80     # works
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- -T 3 <pod-ip>:8080   # fails
+kubectl patch svc web --type=json -p='[{"op":"replace","path":"/spec/ports/0/targetPort","value":80}]'
+```
+
+</details>
+
 
 ---
 
@@ -6114,6 +9985,48 @@ kubectl get pods --show-labels -n <ns>
 
 Test with a labelled temporary Pod (see the NetworkPolicy section).
 
+### 🧪 Practice task
+
+**Task:** A default-deny egress NetworkPolicy makes Pods unable to resolve names. Diagnose it and add a rule that allows DNS (port 53 UDP/TCP) to the `kube-system` namespace.
+
+<details>
+<summary>💡 Hint</summary>
+
+Symptom: `nslookup` times out. Look for policies with `policyTypes: [Egress]` and check whether port 53 is allowed.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get netpol -A
+kubectl describe netpol <name>
+```
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+```
+
+</details>
+
+
 ---
 
 ## 9.13 RBAC failure
@@ -6136,6 +10049,30 @@ kubectl get clusterrole,clusterrolebinding | grep <name>
 ```
 
 **Interpretation and fix:** check that the binding's subject (kind, name, **namespace**) matches, `roleRef` points at the right Role, and the rule has the right `apiGroups`, `resources` and `verbs`. A ClusterRole bound through a RoleBinding only applies in that namespace.
+
+### 🧪 Practice task
+
+**Task:** A Pod using ServiceAccount `app-sa` gets `forbidden: cannot list pods`. Prove which permission is missing and grant exactly that.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl auth can-i ... --as=system:serviceaccount:<ns>:<sa>`, then create a Role and RoleBinding.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl auth can-i list pods --as=system:serviceaccount:dev:app-sa -n dev     # no
+kubectl create role pod-lister -n dev --verb=list --resource=pods
+kubectl create rolebinding pod-lister-bind -n dev --role=pod-lister --serviceaccount=dev:app-sa
+kubectl auth can-i list pods --as=system:serviceaccount:dev:app-sa -n dev     # yes
+```
+
+</details>
+
 
 ---
 
@@ -6174,6 +10111,31 @@ Read the event text in `kubectl describe pvc` first; the message is specific. If
 - A pre-created PV with a `storageClassName` of (say) `manual` and a PVC with no `storageClassName` on a cluster that has a default StorageClass. The PVC gets the default class at admission, and the PV is not a match. Fix: set `storageClassName: manual` on the PVC, or `""` on the PVC to opt out of dynamic provisioning.
 - A `ReadWriteOnce` PVC mounted by two Pods on different nodes. `RWO` allows multiple Pods on the same node to mount the volume, but only one node total. The second Pod stays `ContainerCreating` with `FailedMount: volume is already exclusively attached`. Use `ReadWriteMany` for cross-node sharing.
 - A `Pod` with `volumes: - persistentVolumeClaim: claimName: <name>` referencing a PVC in another namespace. PVCs are namespaced; the Pod must be in the same namespace.
+
+### 🧪 Practice task
+
+**Task:** Create a PVC requesting `5Gi` with `storageClassName: nonexistent`. Find why it is Pending and fix it so it binds.
+
+<details>
+<summary>💡 Hint</summary>
+
+`kubectl describe pvc` Events; compare with `kubectl get sc` and `kubectl get pv`.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl describe pvc <pvc> | tail -6
+kubectl get storageclass
+kubectl get pv
+```
+
+Fix: use an existing StorageClass name (or create a matching PV). The `storageClassName` of a bound PVC cannot be edited, so delete and recreate the PVC.
+
+</details>
+
 
 ---
 
@@ -6230,6 +10192,31 @@ Use `describe` to confirm the actual reason rather than relying only on the exit
 
 OOMKilled is a per-Pod signal: raising `limits.memory` (or fixing the leak) fixes the next restart. Evicted is a cluster signal: the node is the problem. Setting realistic `requests` so the scheduler packs Pods more sensibly and avoiding `BestEffort` workloads both reduce the chance of eviction.
 
+### 🧪 Practice task
+
+**Task:** Create five Pods that end in different statuses: `ImagePullBackOff`, `CrashLoopBackOff`, `Completed`, `Running 0/1`, and `Pending`. List them and map each status to its cause.
+
+<details>
+<summary>💡 Hint</summary>
+
+Use a bad image, `exit 1`, a finished command with `restartPolicy: Never`, a failing readiness probe, and an impossible CPU request.
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl run s1 --image=nginx:nope
+kubectl run s2 --image=busybox:1.36 -- sh -c "exit 1"
+kubectl run s3 --image=busybox:1.36 --restart=Never -- echo done
+# s4: readiness probe httpGet /nope on nginx; s5: requests.cpu "100"
+kubectl get pods
+```
+
+</details>
+
+
 ---
 
 ## 9.17 Evicted Pods
@@ -6244,6 +10231,32 @@ kubectl describe node <node>        # Conditions: MemoryPressure / DiskPressure
 ```
 
 **Interpretation and fix:** the kubelet evicts Pods to protect a node under resource pressure, starting with `BestEffort` Pods, then `Burstable` Pods using more than their requests, and `Guaranteed` Pods last (see QoS classes). Set realistic requests and limits, and let the controller recreate the Pods. Evicted Pods remain listed as `Failed` records until you remove them with `kubectl delete pod <pod>`. This differs from `OOMKilled`, where one container exceeded **its own** memory limit.
+
+### 🧪 Practice task
+
+**Task:** Find evicted Pods in the cluster, read the eviction reason, and clean them up.
+
+<details>
+<summary>💡 Hint</summary>
+
+Evicted Pods show `Failed` with reason `Evicted` (node pressure).
+
+</details>
+
+<details>
+<summary>✅ Solution</summary>
+
+```bash
+kubectl get pods -A --field-selector=status.phase=Failed
+kubectl describe pod <pod> | grep -i -E 'reason|message'
+kubectl delete pods -A --field-selector=status.phase=Failed
+kubectl describe node <node> | grep -i -A5 conditions
+```
+
+Prevent repeats by setting realistic `requests`/`limits` (Burstable/BestEffort Pods are evicted first).
+
+</details>
+
 
 ---
 
