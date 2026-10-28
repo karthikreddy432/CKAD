@@ -17,7 +17,7 @@
 
 ## Scope
 
-These notes follow the official CKAD curriculum (Kubernetes **v1.35** per the Linux Foundation CKAD page). The exam environment is aligned with the newest Kubernetes minor version within roughly 4-8 weeks of its release, so re-check the version on the LF/CNCF pages before your exam.
+As checked on **29 October 2026**, the Linux Foundation CKAD page says the exam is based on Kubernetes **v1.35**. The exam environment is also described as aligning with the most recent minor version within roughly 4–8 weeks of its release, so check the official [CKAD certification page](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/) and candidate handbook again shortly before your exam. Treat the published exam-environment information as authoritative for version-sensitive tasks; your local cluster may run a different version.
 
 | Domain | Weight | Where in these notes |
 |---|---:|---|
@@ -54,7 +54,7 @@ Diagrams are Mermaid. If your viewer does not render Mermaid, each diagram is fo
 
 ### Speed patterns that save minutes
 
-These four habits alone typically recover 10-15 minutes over a 2-hour exam:
+These four habits can save time in a 2-hour exam, but the amount depends on your familiarity with the commands and the mix of tasks:
 
 1. Always start a task by confirming the **context** and **namespace** (see the recap on the [Final CKAD Revision Sheet](#10-final-ckad-revision-sheet)).
 2. Generate YAML with `kubectl ... --dry-run=client -o yaml` and edit the few fields that matter.
@@ -336,7 +336,7 @@ kubectl get pods --all-namespaces                       # when unsure where some
 ### Common mistakes
 
 - Creating a `NetworkPolicy` or `ResourceQuota` in `default` and expecting it to apply to `dev`. Namespaces are hard walls for these objects.
-- Deleting a namespace to "clean up". `kubectl delete namespace dev` deletes **every** object inside it (Pods, Services, Secrets, PVCs, RBAC, ...) and is irreversible. Use a prefix or a label to scope cleanup, or delete the workload objects first.
+- Deleting a namespace to "clean up". `kubectl delete namespace dev` requests deletion of **every namespaced object** in it (Pods, Services, Secrets, PVCs, Roles, and more). The namespace name can be recreated, but the old objects and their data may not be recoverable without backups; PVC/PV retention policies determine storage outcomes. Use a narrower label/name selector for routine cleanup, and verify before deleting a namespace.
 - Setting `-n` on the *create* command but forgetting it on the *verify* command. The most common CKAD mistake: `kubectl create` ran in `dev`, then `kubectl get pods` (no `-n`) returns an empty list, looks like failure.
 - Treating namespaces as a security boundary by themselves. They are a *name* boundary; isolation is provided by `NetworkPolicy`, `ResourceQuota`, and `RBAC` on top of them.
 
@@ -558,8 +558,8 @@ The Deployment `selector.matchLabels` must match `template.metadata.labels`, and
 
 - Editing a Deployment's `spec.selector.matchLabels`. The selector is immutable; `kubectl apply` rejects the change. Create a new Deployment with a new name if you really need to change the match.
 - Scaling a Deployment (`--replicas=N`) does **not** create a new revision. Only changes to the Pod template do. `kubectl rollout history` will not show scale changes.
-- Forgetting that a failed `rollout` leaves the Deployment in a half-upgraded state: the new ReplicaSet exists, the old one is still around, and the next `rollout` command (including `rollout undo`) replaces the bad ReplicaSet. Check `kubectl describe deploy` for `Progressing: False` and the reason.
-- `kubectl rollout restart` creates a new revision **without** changing the template. Use it to pick up new ConfigMap/Secret env values (the env was frozen at process start).
+- A stalled rollout can leave both the old and new ReplicaSets present. Inspect `kubectl describe deployment`, the ReplicaSets, Pod events, and readiness before deciding what to do. `kubectl rollout undo deployment/web` changes the Pod template back to an earlier revision and lets the Deployment controller scale the ReplicaSets accordingly; it is not simply a command to delete the new ReplicaSet.
+- `kubectl rollout restart` updates a restart annotation on the Pod template, which triggers a new rollout/revision even though the image and application settings need not change. It is useful when environment variables were read from a changed ConfigMap/Secret at container start; mounted ConfigMap/Secret files have different update behavior.
 
 ### Diagram: Deployment, ReplicaSets and Pods
 
@@ -925,7 +925,7 @@ kubectl get cronjob,job
 
 ```mermaid
 flowchart LR
-    SCH["schedule (cron)"] --> CJ["CronJob controller in kube-system"]
+    SCH["schedule (cron)"] --> CJ["CronJob controller"]
     CJ -->|"next due time"| NEWJ["Creates a new Job object"]
     NEWJ --> J["Job controller reconciles"]
     J --> POD["Pod(s) (restartPolicy: Never/OnFailure)"]
@@ -937,7 +937,7 @@ A CronJob does not run containers directly. At a scheduled time, the CronJob con
 ### Common mistakes
 
 - Forgetting that `concurrencyPolicy: Forbid` *skips* the new trigger if the previous run is still active. The Job is never created, and there is no error; the CronJob just does not fire that minute. Use `Allow` (default) or `Replace` if you want every scheduled run to execute.
-- Setting `successfulJobsHistoryLimit: 0` and `failedJobsHistoryLimit: 0` to "save space". This deletes the Job and its Pod immediately, so you have nothing to debug with `kubectl logs job/<name>` when a schedule fails. The defaults (`3` and `1`) are sensible.
+- Setting `successfulJobsHistoryLimit: 0` and `failedJobsHistoryLimit: 0` to "save space". This tells the controller not to retain completed Jobs in history; cleanup is controller-driven rather than guaranteed to happen instantly, but the evidence may disappear before you investigate. The defaults (`3` and `1`) are useful while learning and troubleshooting.
 - Assuming the CronJob's timezone is your laptop's. Without `spec.timeZone`, the controller uses the kube-controller-manager's clock, which on a hosted cluster is usually UTC. A schedule of `0 9 * * *` may fire at 9 AM UTC, not 9 AM local time.
 - The CronJob name must be a valid DNS-1035 label (lowercase, alphanumeric, hyphens, max 52 characters). Long descriptive names get rejected.
 
@@ -1170,7 +1170,7 @@ tolerations:
 
 ### How the scheduler combines rules
 
-A scheduler decision is the intersection of several filters, not a single rule. For any candidate node the scheduler evaluates, in order:
+A scheduling decision is the intersection of constraints, not a single rule. The diagram below is a **conceptual troubleshooting order**, not a promise about the scheduler's exact internal plugin execution order. A candidate node must satisfy all hard constraints; preferred rules influence scoring rather than making an otherwise-ineligible node feasible:
 
 ```mermaid
 flowchart TD
@@ -1620,14 +1620,14 @@ A Horizontal Pod Autoscaler (HPA) periodically compares observed metrics with th
 
 ```mermaid
 flowchart LR
-    MS["metrics-server (kubelet -> metrics API)"] --> HPA["HPA controller in kube-system"]
-    HPA -->|writes desired replicas| DEP["Deployment spec.replicas"]
+    MS["metrics-server (kubelet -> metrics API)"] --> HPA["HPA controller in the control plane"]
+    HPA -->|updates the scale subresource / desired replica count| DEP["Deployment desired replicas"]
     DEP --> RS["ReplicaSet controller reconciles"]
     RS --> PODS["Pod count"]
     PODS -->|kubelet reports CPU| MS
 ```
 
-The HPA is a **control loop**: it polls metrics every 15 seconds by default, compares the average against the target, and writes a new desired count. The Deployment's own controller does the actual Pod creation or deletion, which is why HPA never edits Pods directly.
+The HPA is a **control loop**: the controller-manager reconciles observed metrics against the target on a configurable sync interval (commonly 15 seconds by default). It updates the target workload’s scale subresource, which changes the desired replica count; the Deployment/StatefulSet controller then reconciles Pods. The HPA does not create or delete individual Pods itself.
 
 ### Imperative
 
@@ -1673,10 +1673,10 @@ spec:
 
 ### Important rules
 
-- Every container in the target must have `resources.requests.cpu` set, otherwise utilization is undefined and the HPA cannot compute a desired replica count (`<unknown>` / `0%` in `kubectl get hpa`).
+- For a CPU utilization target using the `Resource` metric, containers in the Pod need CPU requests so Kubernetes can calculate utilization relative to the requested CPU. If a relevant request is missing, utilization may be reported as `<unknown>` and the HPA cannot reliably calculate a replica recommendation from that metric.
 - The metrics-server must be running. Verify with `kubectl top pods`; if it errors, HPA cannot read metrics.
-- HPA does not change `spec.replicas` directly; it writes the desired count and the Deployment's ReplicaSet controller reconciles.
-- Rollout of a new HPA `maxReplicas` lower than the current replica count does not delete Pods by itself; the deployment controller scales the Deployment down at its own pace.
+- HPA updates the target workload through its scale subresource (the desired replica count, represented by `spec.replicas` on a Deployment/StatefulSet). The workload controller then creates or removes Pods; the HPA does not manipulate individual Pods directly.
+- If `maxReplicas` is lowered below the current count, the HPA can reduce the target workload’s desired replica count toward the new maximum. The HPA updates the scale target; the Deployment/StatefulSet controller then performs the Pod scale-down.
 
 ### Metric types
 
@@ -1753,7 +1753,7 @@ Only one of `minAvailable` / `maxUnavailable` may be set; both may be expressed 
 
 ### Important rules
 
-- The PDB `selector` must match the **Pod labels** of the target workload, not the workload's own selector. Pods owned by a Deployment carry `pod-template-hash`, plus the labels from the Pod template.
+- The PDB `selector` must select the **Pods** whose availability you want to protect; it does not select the Deployment object itself. Usually, reuse the application's stable labels from the Pod template (often the same labels used by the Deployment selector), and make sure those labels do not unintentionally match unrelated Pods. Do not normally include the generated `pod-template-hash`, because it changes when a Deployment rolls out and could make the PDB stop matching the workload's new Pods.
 - A PDB constrains eligible voluntary disruptions requested through the **Eviction API**, such as the evictions performed by `kubectl drain`. A direct `kubectl delete pod` or deletion of the owning workload can bypass that protection even though the action is voluntary. Node failure and other involuntary disruptions cannot be prevented by a PDB, although unavailable Pods count against the budget. A container OOM kill is not itself an eviction request.
 - `policy/v1` is the current stable API; `policy/v1beta1` was removed in 1.25.
 
@@ -1846,7 +1846,7 @@ spec:
       emptyDir: {}
 ```
 
-The `emptyDir` volume is created for this Pod and mounted by both containers at `/var/log`. The application writes `app.log`; the sidecar reads that same file and writes the tailed output to its own stdout, which is why `kubectl logs -c sidecar` displays the file contents. The file is shared because both containers mount the same volume—not because containers share their entire filesystem. The `emptyDir` survives a container restart but is deleted when the Pod is removed.
+The `emptyDir` volume is created for this Pod and mounted by both containers at `/var/log`. The application writes `app.log`; the sidecar reads that same file and writes the tailed output to its own stdout, which is why `kubectl logs -c sidecar` displays the file contents. The file is shared because both containers mount the same volume—not because containers share their entire filesystem. The `emptyDir` survives a container restart while the same Pod object remains, but its contents are removed when that Pod is deleted and replaced. It is scratch/shared Pod storage, not durable storage for data that must survive Pod replacement.
 
 ```bash
 kubectl logs app-with-sidecar -c sidecar       # tail the log file the sidecar is following
@@ -1860,7 +1860,7 @@ The exam usually says "sidecar container" or "log shipper". Both forms work, but
 | Form | Where it lives | Lifecycle | Probes | When to choose |
 |---|---|---|---|---|
 | Regular sidecar | `spec.containers[]` (alongside the main container) | Restarted by kubelet if it crashes | Accepts `livenessProbe` and `readinessProbe` | Quick generation with `kubectl run` and edit; you want a probe on the helper |
-| Native sidecar (Kubernetes 1.29+ GA in 1.33) | `spec.initContainers[]` with `restartPolicy: Always` | Ordered: starts before main containers, stops after | Probes not supported | You need guaranteed startup ordering (e.g. the helper must be ready before the main app) |
+| Native sidecar (feature enabled by default since 1.29; GA in 1.33) | `spec.initContainers[]` with `restartPolicy: Always` | Starts in init-container order and is stopped after main containers | Supports probes; `startupProbe` can gate progression to later init containers, and `readinessProbe` affects Pod readiness | Use when sidecar startup/shutdown ordering matters |
 
 For CKAD, default to a regular sidecar in `spec.containers` - it is what `kubectl run` and `kubectl explain pod.spec.containers` lead you to, and it is the form that every example in the official docs uses first.
 
@@ -2107,7 +2107,7 @@ A frequent CKAD question is "do I put this in `containers` or `initContainers`?"
 | Is the actual application | `containers`, no `restartPolicy` override |
 | Debugging tool for an already-running Pod | `kubectl debug` (ephemeral container), not a manifest change |
 
-The two sidecar forms behave slightly differently for probes: a regular `containers` sidecar accepts readiness/liveness probes (handy when it must be Ready before traffic starts); a native sidecar does **not** support probes but still benefits from ordered startup.
+Both regular and native sidecars support probes. For a native sidecar in `initContainers`, a `startupProbe` can keep Kubernetes from advancing to the next init container until the sidecar has started successfully; a `readinessProbe` contributes to the Pod's Ready condition, and a `livenessProbe` can trigger a restart of the sidecar container. A readiness probe by itself does **not** make the main application wait for the sidecar to become ready. If startup ordering depends on health, use the appropriate startup behavior and test it on the target Kubernetes version.
 
 ### ⚡ Remember
 
@@ -2325,15 +2325,14 @@ spec:
 ```mermaid
 stateDiagram-v2
     [*] --> Pending
-    Pending --> Running: containers started
-    Pending --> Failed: could not start
-    Running --> Succeeded: all containers exit 0
-    Running --> Failed: a container fails and is not restarted
+    Pending --> Running: Pod is bound and containers begin running
+    Running --> Succeeded: all containers exit successfully
+    Running --> Failed: Pod finishes with a failed container
     Succeeded --> [*]
     Failed --> [*]
 ```
 
-`Pending` means accepted but not running yet (scheduling, image pull). A container that crashes and is restarted keeps the Pod in `Running`; the phase only becomes `Failed` or `Succeeded` when the Pod is finished.
+`Pending` means the Pod has been accepted but at least one part of setup is not complete; it can remain Pending while scheduling, image pulls, volume setup, or sandbox/network setup is retried. An image-pull or mount error does not normally make the Pod phase `Failed`. Once containers have started, a container can crash and be restarted while the Pod phase remains `Running`; `Succeeded` and `Failed` describe a Pod that has finished. This is a simplified diagram of common transitions, not an exhaustive state machine.
 
 ### ⚡ Remember
 
@@ -2878,7 +2877,7 @@ Under `data:` values must be base64; under `stringData:` they are plain text.
 
 - Treating `data:` and `stringData:` as interchangeable. `data` requires base64; `stringData` takes plain text and the API server converts it. Mixing them up produces "illegal base64" errors at apply time.
 - Reading a Secret with `kubectl get secret <n> -o yaml` and pasting the whole object into Git. Use `stringData` in your source manifest and keep the base64 form in the cluster only.
-- Forgetting `automountServiceAccountToken: false` for a Pod that does not need the API. Even a `default` ServiceAccount token is mounted, and the Secret it uses is visible to anyone with Pod exec.
+- Forgetting `automountServiceAccountToken: false` for a Pod that does not need the API. By default, Kubernetes projects a short-lived ServiceAccount token into the Pod; it is not normally an automatically created long-lived Secret object. A user who can exec into a container may be able to read that container's mounted token, so keep RBAC least-privileged and disable automount when the credential is unnecessary.
 - Since Kubernetes 1.24, **no long-lived ServiceAccount token Secret is created automatically**. Old exam material showing `kubectl get secret <sa>-token-xxxxx` is outdated; the Pod now receives a projected, expiring token at `/var/run/secrets/kubernetes.io/serviceaccount` instead. Use `kubectl create token <sa>` for external clients.
 - A Secret referenced by a Pod that is later deleted leaves the Pod stuck in `CreateContainerConfigError` (the kubelet retries indefinitely; recreate the Secret to recover).
 - `optional: false` (the default) on `secretKeyRef` makes the whole Pod fail to start if the key is missing. `optional: true` lets the Pod start with an empty value - useful when the key is genuinely optional, dangerous when it is not.
@@ -3130,9 +3129,9 @@ resources:
 
 ### Why a request is a "promise"
 
-The scheduler treats the request as the Pod's guaranteed share. The kubelet reserves that amount on the node so other Pods cannot claim it, even if the workload is currently idle. This is also what the **eviction manager** and **HPA** read: a HPA's `target.averageUtilization` is calculated against `requests.cpu`, not real CPU usage.
+The scheduler uses requests as the amount of CPU and memory it accounts for when deciding whether a node has enough **allocatable** capacity. This is a scheduling calculation, not a physical reservation that stops other processes from using idle capacity. CPU requests also influence relative CPU shares under contention; memory requests influence scheduling and are one input to eviction decisions. A CPU HPA target expressed as `averageUtilization` compares observed CPU usage with the relevant CPU requests.
 
-If a container has no request, the scheduler assumes zero. That makes the Pod `BestEffort` (see §3.8) and the first to be evicted under node pressure.
+If neither a request nor a limit is specified for a resource (and no `LimitRange` or other admission default supplies one), the effective request is normally zero. However, if a container specifies a limit but omits the request for that resource, Kubernetes normally defaults the request to the limit unless another defaulting policy applies. Therefore, check the live Pod spec before concluding that its effective request is zero. A Pod's QoS class also depends on all containers and their resource settings; lack of one request alone does not always make the Pod `BestEffort`.
 
 ### 📖 Explained: how the scheduler uses requests
 
@@ -3160,7 +3159,7 @@ A Pod whose request is larger than any single node can ever provide stays `Pendi
 
 ### ⚡ Remember
 
-**Request = scheduling promise.**
+**Request = the value the scheduler accounts for; it is not a hard runtime cap or a guarantee of dedicated CPU time.**
 
 
 
@@ -3180,20 +3179,20 @@ resources:
 - CPU is **compressible** -> reaching the CPU limit results in throttling.
 - Memory is **incompressible** -> exceeding the memory limit can cause `OOMKilled`.
 
-If only a limit is specified for a container, Kubernetes can default the request to the same value for that resource.
+If only a limit is specified, Kubernetes normally defaults the request for that resource to the limit. A LimitRange can also set default requests/limits, so inspect the admitted Pod when exact values matter.
 
 ### How requests and limits flow
 
 ```mermaid
 flowchart LR
-    R["resources.requests.cpu/memory"] --> S["Scheduler: pick a node with enough free capacity"]
-    R --> H["HPA: target utilization = current / request"]
-    R --> E["Eviction manager: which Pods to remove under pressure"]
-    L["resources.limits.cpu"] --> T["Throttle (CPU shares are capped)"]
+    R["resources.requests.cpu/memory"] --> S["Scheduler: account for requested capacity"]
+    R --> H["HPA: utilization is calculated relative to request"]
+    R --> E["Eviction manager: compare usage with requests under pressure"]
+    L["resources.limits.cpu"] --> T["CPU quota may throttle usage at the limit"]
     L2["resources.limits.memory"] --> K["OOMKilled when exceeded"]
 ```
 
-The request influences scheduling and is used when calculating CPU utilization targets for HPA; the limit is enforced at runtime by the container runtime/kernel cgroups. A request that is too large can make a Pod unschedulable, while a missing CPU request can make CPU-utilization-based autoscaling undefined for that container. A low CPU limit usually causes throttling; a low memory limit can cause OOM termination. Debug each symptom using the correct layer rather than treating requests and limits as interchangeable.
+The scheduler uses requests when deciding whether a node has enough allocatable capacity; a request is an accounting input, not a reservation of dedicated CPU time or a hard runtime cap. CPU-based HPA utilization is also calculated relative to requests, so missing relevant CPU requests can leave utilization undefined for that metric. CPU limits are enforced through CPU quota/throttling, while a memory-limit breach can lead to an OOM kill. Debug each symptom at the correct layer rather than treating requests and limits as interchangeable.
 
 ### Complete example
 
@@ -3216,8 +3215,10 @@ spec:
 ```
 
 ```bash
-kubectl set resources deployment/web --requests=cpu=100m,memory=128Mi --limits=cpu=500m,memory=256Mi
+kubectl apply -f resource-demo.yaml
 kubectl get pod resource-demo -o jsonpath='{.status.qosClass}'
+# For an existing Deployment named web, update its Pod template instead:
+kubectl set resources deployment/web --requests=cpu=100m,memory=128Mi --limits=cpu=500m,memory=256Mi
 ```
 
 ### Units (a classic trap)
@@ -3241,7 +3242,7 @@ resources:
     ephemeral-storage: 1Gi
 ```
 
-A missing `ephemeral-storage` request/limit is the most common reason a `BestEffort` Pod that otherwise looks innocuous gets evicted.
+Unbounded local storage can contribute to node disk pressure and eviction. Ephemeral-storage requests/limits help resource accounting and eviction decisions where supported, but they do not change the Pod QoS class; QoS classification is based on CPU and memory requests/limits.
 
 ### ⚡ Remember
 
@@ -3249,18 +3250,18 @@ A missing `ephemeral-storage` request/limit is the most common reason a `BestEff
 
 ### Request/limit defaults and how they interact
 
-- If you set only a **limit** and not a **request**, Kubernetes does **not** automatically copy the limit to the request. The Pod's request stays whatever the LimitRange defaults to (or zero if there is no LimitRange). This is a common reason an HPA reports `<unknown>/0%` even though the container has a memory limit.
-- If you set only a **request** and not a **limit**, the container has no runtime ceiling - it can consume the node's full resources until evicted under pressure.
-- A LimitRange can default the request to the limit for a given resource (`defaultRequest == default`). That is how some clusters push Burstable Pods up to Guaranteed QoS without the user setting both.
+- If you set only a **limit** and omit the request, Kubernetes normally defaults that resource’s request to the limit. A `LimitRange` can supply its own `defaultRequest`, so inspect the admitted Pod rather than guessing from the submitted YAML. An HPA can still show unknown metrics for other reasons, including missing requests on a different container or unavailable metrics.
+- If you set only a **request** and not a **limit**, Kubernetes does not impose a per-container hard limit for that resource. CPU use can rise when spare CPU is available; memory can grow until the process is killed by an applicable OOM condition or the kubelet evicts workloads under node pressure. This is not a guarantee that the container can safely consume all node resources.
+- A `LimitRange` can set default requests and limits. A Pod is `Guaranteed` only if every container ends up with CPU and memory requests and limits, and each request equals its corresponding limit; setting one default is not enough.
 - The four combinations and their effects:
 
-| `requests` | `limits` | Scheduling guarantee | Runtime cap | QoS class (typically) |
+| Declared `requests` | Declared `limits` | Effect after admission | Runtime cap | QoS class (typically) |
 |---|---|---|---|---|
-| unset | unset | none | none | BestEffort (first evicted) |
-| set | unset | yes | none (Burstable) | Burstable |
-| unset | set (no LimitRange) | none | yes | Burstable (request still 0) |
-| set | set (equal) | yes | yes | Guaranteed (last evicted) |
-| set | set (limits > requests) | yes | yes | Burstable |
+| unset | unset | No request for that resource unless a default is applied | none | BestEffort only if no container has CPU or memory requests/limits |
+| set | unset | Scheduler accounts for the request | none for that resource | Burstable unless the Pod meets Guaranteed rules |
+| unset | set | Request normally defaults to the limit for that resource, unless a LimitRange supplies a different default | limit applies to that resource | Depends on all CPU/memory settings across all containers; a single limit does not make a Pod Guaranteed |
+| set | set (equal) | Scheduler accounts for request | yes | Guaranteed only when every container has CPU and memory requests/limits and each pair is equal |
+| set | set (limits > requests) | Scheduler accounts for request | yes | Burstable |
 
 
 
@@ -3270,22 +3271,22 @@ Kubernetes assigns a Pod a QoS class from its resource configuration:
 
 | Class | Rule | Under node memory pressure |
 |---|---|---|
-| **Guaranteed** | Every container has CPU **and** memory requests and limits, and requests == limits | Evicted last |
-| **Burstable** | At least one request or limit set, but not Guaranteed | Middle |
-| **BestEffort** | No requests or limits on any container | Evicted first |
+| **Guaranteed** | Every relevant container has CPU **and** memory requests and limits, and requests equal limits | Generally least likely to be evicted under node pressure |
+| **Burstable** | At least one request or limit is set, but the Pod does not meet Guaranteed rules | Depends on priority and usage relative to requests |
+| **BestEffort** | No requests or limits on any container | Generally most vulnerable under node pressure |
 
 The class appears in `kubectl get pod <pod> -o jsonpath='{.status.qosClass}'`.
 
 ```mermaid
 flowchart TD
     A[For every container in the Pod] --> Q1{All have cpu + memory requests AND limits, with requests == limits?}
-    Q1 -->|yes| G[Guaranteed - last to evict]
+    Q1 -->|yes| G[Guaranteed - usually less vulnerable]
     Q1 -->|no| Q2{Any container has at least one request or limit?}
     Q2 -->|yes| B[Burstable - middle]
-    Q2 -->|no| BE[BestEffort - first to evict]
+    Q2 -->|no| BE[BestEffort - often more vulnerable]
 ```
 
-A common exam scenario is a container with only `limits.memory` specified. If no other default applies, Kubernetes defaults the request for that resource to the limit, so check the live Pod rather than assuming the request is absent. A LimitRange can also add defaults. QoS is computed for the whole Pod, and every container must satisfy the Guaranteed rules for the Pod to be Guaranteed. QoS is useful for reasoning about node-pressure eviction, but actual eviction decisions also consider Pod priority and usage relative to requests.
+A common exam scenario is a container with only `limits.memory` specified. Kubernetes normally defaults that resource's request to the limit if the request is omitted; a `LimitRange` may also provide defaults. Check the live Pod rather than infer the final values from the submitted YAML. QoS is computed for the whole Pod, so every relevant container must meet the Guaranteed rules for the Pod to be Guaranteed. QoS helps predict node-pressure behavior, but it does not create an absolute eviction order: priority and usage relative to requests also matter.
 
 ### ⚡ Remember
 
@@ -3595,7 +3596,7 @@ Practical consequences for the exam:
 
 ### When to disable `automountServiceAccountToken`
 
-Set it to `false` (on the Pod or on the ServiceAccount) when the workload does not call the Kubernetes API: typical web apps, batch jobs that only talk to an external database, sidecars that only read files. The reasons are real, not theoretical:
+Set it to `false` (on the Pod or on the ServiceAccount) when the workload does not call the Kubernetes API: typical web apps, batch jobs that only talk to an external database, sidecars that only read files. The reason is practical: a projected ServiceAccount token is a credential. If a compromised process can read the mounted token, it can attempt API requests allowed by that identity. Avoid mounting credentials that the workload does not need:
 
 - An idle mount is a small attack surface, but the projected token has real RBAC permissions. If the workload is compromised, the token is too.
 - A Pod that does not need the API has no business carrying the credential.
@@ -4028,7 +4029,7 @@ The "block X" list is the part CKAD tasks actually test. Pick the level that mat
 | `privileged: true` | allowed | **rejected** | **rejected** |
 | `hostNetwork`, `hostPID`, `hostIPC` | allowed | **rejected** | **rejected** |
 | `hostPath` volumes | allowed | **rejected** | **rejected** |
-| Containers with no `securityContext.runAsNonRoot` and image runs as root | allowed | allowed | **rejected** |
+| `runAsNonRoot` is not `true` at Pod or container level | allowed | allowed | **rejected** |
 | `allowPrivilegeEscalation: true` (or unset) | allowed | allowed | **rejected** (must be `false`) |
 | `capabilities` not dropped | allowed | allowed | **rejected** (must `drop: ["ALL"]`) |
 | `seccompProfile.type` not `RuntimeDefault` or `Localhost` | allowed | allowed | **rejected** (must be one of these) |
@@ -4039,9 +4040,9 @@ If a Pod is rejected with `violates PodSecurity`, the admission response identif
 
 ### Common mistakes
 
-- Confusing the three levels. `baseline` is "no obvious privilege escalation"; `restricted` is "no obvious privilege escalation **and** run as non-root with minimal capabilities." A task that says "satisfy the restricted profile" needs all of: `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, `seccompProfile.type: RuntimeDefault`, and a non-root `runAsUser` (numeric).
+- Confusing the three levels. `baseline` is "no obvious privilege escalation"; `restricted` is "no obvious privilege escalation **and** run as non-root with minimal capabilities." A task that says "satisfy the restricted profile" needs the required restrictions, including `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, and an allowed seccomp profile (`RuntimeDefault` or `Localhost`), plus the other Restricted requirements that apply. An explicit numeric `runAsUser` is not universally required by the policy; it can be useful when the image declares a non-numeric user and kubelet cannot verify that the user is non-root. The effective user must still be non-root.
 - Using `privileged: true` to "fix" a permissions problem in a `restricted` namespace. It does not; the Pod is rejected outright.
-- Forgetting that `hostPath` is rejected by both `baseline` (with restrictions) and `restricted` (always). Use a `PersistentVolumeClaim` instead.
+- Forgetting that `hostPath` is forbidden by both the built-in `baseline` and `restricted` Pod Security Standards. Use an appropriate PVC or another permitted volume type; a PVC does not itself guarantee persistence or security, so its backing storage and policy still matter.
 - Setting `pod-security.kubernetes.io/warn=restricted` and `enforce=baseline`. The Pod is admitted (because `enforce` is the gate) but the user sees a warning. Useful for staged rollouts, not for CKAD tasks that ask for an enforced level.
 
 ### ⚡ Remember
@@ -4185,7 +4186,7 @@ Know **which level owns the field** and which container-level values override Po
 
 ### Pod-level vs container-level fields at a glance
 
-A field is valid at Pod level only, container level only, or both. Putting it at the wrong level is silently ignored, which is the worst kind of mistake:
+A field is valid at Pod level only, container level only, or both. A field placed at an unsupported level may be rejected or fail to have the intended effect, depending on the API and validation path; check the schema rather than assuming Kubernetes will move it to the right place:
 
 | Field | Pod-level | Container-level | Notes |
 |---|---|---|---|
@@ -4194,17 +4195,17 @@ A field is valid at Pod level only, container level only, or both. Putting it at
 | `fsGroup` | yes | no | Pod-level only; sets the group on volume mounts |
 | `seccompProfile` | yes | yes | Container overrides Pod |
 | `supplementalGroups` | yes | no | Pod-level only |
-| `sysctls` | yes | no | Pod-level only; some are "unsafe" and need an annotation to allow |
+| `sysctls` | yes | no | Pod-level only; safe sysctls are allowed by default; unsafe ones may require a cluster administrator to allow-list them in kubelet configuration |
 | `allowPrivilegeEscalation` | no | yes | Container only |
 | `readOnlyRootFilesystem` | no | yes | Container only |
 | `capabilities` | no | yes | Container only |
 | `privileged` | no | yes | Container only |
 
-A common CKAD scenario: "the application's `volumes` mount returns `Permission denied`." That is almost always a missing `fsGroup` on the Pod, not a missing `runAsUser`. `fsGroup` makes the kubelet set the group ownership of the mounted volume to the given GID, so a container running as non-root can still read and write the volume.
+A common CKAD scenario is a volume mount returning `Permission denied`. Check the effective UID/GID, file ownership and mode, read-only settings, and the storage driver's behavior before choosing a fix. `fsGroup` can provide a supplementary group for volume access and may affect volume ownership/permissions, but support and ownership handling vary by volume type and CSI driver; it is not a universal fix.
 
 ### What `privileged: true` actually means
 
-It puts the container in the same cgroup as the host, gives it all capabilities, and lets it see host devices. It is required for some networking and storage drivers but is **rarely** needed by application code. The `restricted` Pod Security profile rejects it; `baseline` rejects it on most setups. If a task says "container needs to access the host network", prefer `hostNetwork: true` on the Pod over `privileged: true`.
+`privileged: true` disables or relaxes several container isolation controls, grants a broad set of Linux capabilities, and allows access to host devices. It does **not** by itself enable `hostNetwork`; host networking is a separate Pod-level setting. Some node-level networking or storage components require privileged access, but ordinary application containers rarely do. Both the Pod Security `baseline` and `restricted` profiles reject privileged containers. Note that `hostNetwork: true` is also disallowed by Baseline and Restricted, so use neither setting unless the workload genuinely requires it and the cluster's policy permits it.
 
 ### ⚡ Remember
 
@@ -4278,9 +4279,9 @@ Examples of what capabilities gate: `NET_BIND_SERVICE` (listen on ports below 10
 
 ### Common mistakes
 
-- Writing `add: ["NET_BIND_SERVICE"]` alone. Capabilities are evaluated as a *final set*: the container starts with the Docker default set, and `drop: ["ALL"]` is what produces a clean baseline. Use `drop: ["ALL"]` plus `add: ["NET_BIND_SERVICE"]` if you only need the one.
-- Trying to add a capability that is **not** in the allowed set for the namespace's Pod Security level. `restricted` only allows `NET_BIND_SERVICE` to be added back. To use `SYS_ADMIN` (for example for a network plugin DaemonSet), the namespace must be `privileged` or `baseline` at minimum.
-- Forgetting that a non-root user cannot bind to ports below 1024 even with `NET_BIND_SERVICE` set on capabilities only by default; in practice the capability lets the bind succeed, but verify with `kubectl exec <pod> -- id` and a port-bind test.
+- Writing `add: ["NET_BIND_SERVICE"]` alone when you intend to allow only that capability. `add` augments the capabilities supplied by the runtime; it does not remove the runtime's defaults. Use `drop: ["ALL"]` plus `add: ["NET_BIND_SERVICE"]` when that is the intended minimal set and the Pod Security policy permits it.
+- Trying to add a capability that is **not** in the allowed set for the namespace's Pod Security level. Restricted permits only `NET_BIND_SERVICE` to be added back when the required capability rules are met; Baseline also allows only its documented capability set and does not allow `SYS_ADMIN`. A workload that genuinely requires `SYS_ADMIN` needs a policy that permits it—often the built-in `privileged` Pod Security level or a carefully designed alternative policy—not merely Baseline.
+- On typical Linux configurations, a non-root process cannot bind ports below 1024 without `NET_BIND_SERVICE`; adding that capability can permit the bind, subject to kernel/runtime configuration (for example `net.ipv4.ip_unprivileged_port_start`). Verify with an actual port-bind test rather than assuming the UID alone decides it.
 - Using `privileged: true` to "fix" a permissions problem. That bypasses every other capability and security context field. Diagnose the underlying missing capability first; reach for `privileged` only when a CSI driver or CNI requires it.
 
 ### ⚡ Remember
@@ -4596,7 +4597,7 @@ A PVC binds only when the PV controller finds a volume that satisfies the claim 
 |---|---|
 | `Retain` | PV keeps its data and becomes `Released`; an admin must remove the `claimRef` and clean up before it is `Available` again |
 | `Delete` | PV and the backing storage are deleted automatically (the usual default for dynamically provisioned volumes) |
-| `Recycle` (deprecated) | Basic scrub; removed in newer clusters - do not use |
+| `Recycle` (deprecated) | Legacy basic scrub behavior; support is limited and implementation-dependent. Do not use for new designs; prefer `Delete` or `Retain`. |
 
 ### Diagram: PersistentVolume lifecycle
 
@@ -4617,11 +4618,11 @@ With `Retain`, a released PV keeps its data and does not bind to a new PVC until
 
 ### Common mistakes
 
-- Treating `storage` as a "max size" you can fill later. The PVC `requests.storage` is a **reservation**: the PV is bound at that capacity. A 5 Gi request on a 10 Gi PV uses only 5 Gi (most filesystems) but the PVC cannot grow into the rest. If you need 10 Gi, request 10 Gi.
-- Believing access modes can be widened on an existing PV. `ReadWriteOnce` cannot be promoted to `ReadWriteMany`; the PV is fixed at creation. The PVC's `accessModes` is also immutable after the PVC is created (resize is the only field that can change).
+- Treating `requests.storage` as a hard usage quota. It is the capacity requested for matching/provisioning a volume, not a per-PVC filesystem quota. If a 5 Gi claim binds to a 10 Gi PV, the mounted filesystem may expose the full underlying 10 Gi capacity; the request does not automatically cap writes at 5 Gi. Check `kubectl get pvc <claim> -o yaml` and `df -h` inside the Pod to confirm the actual capacity. To expand a smaller bound volume, the StorageClass/driver and filesystem must support expansion and the PVC request must be increased.
+- Believing access modes can be widened on an existing PV. `ReadWriteOnce` cannot be promoted to `ReadWriteMany` in place. A PVC's access modes are generally immutable after creation; storage request expansion may be allowed when supported, and some newer API versions expose other separately mutable fields. Check the target version's API rather than assuming resize is the only mutable field.
 - Setting `storageClassName: ""` on a PVC and expecting it to bind to a default-class PV. An empty string means **no** class, which is a deliberate opt-out from dynamic provisioning; the PVC will only bind to a PV that also has no class.
 - Forgetting that a deleted PVC goes to `Released` (with `Retain`), and the PV is unavailable for re-binding until an admin removes the `claimRef` and re-applies the PV (or the admin uses `--edit` to set the PV back to `Available`). A `Released` PV does **not** auto-bind to a new PVC even if the class, mode, and capacity match.
-- A PVC's `volumeName` (when set explicitly) names a specific PV. If that PV is in a different zone from where the Pod is scheduled, the Pod stays `Pending` with `FailedMount`. The fix is to delete the PVC and let dynamic provisioning pick a PV in the right zone, or use `WaitForFirstConsumer` so binding is delayed until the Pod is scheduled.
+- A PVC's `volumeName` (when set explicitly) names a specific PV. If that PV's node/zone affinity conflicts with every node eligible for the Pod, the Pod can remain `Pending` with a scheduling event such as a volume node-affinity conflict; this is not normally a `FailedMount` diagnosis. Inspect the Pod and PVC events before deciding how to recover. For future claims, topology-aware dynamic provisioning with `WaitForFirstConsumer` can prevent choosing storage before the scheduler knows the consumer's placement; deleting a bound claim may risk data loss and is not a first-line fix.
 
 
 
@@ -4681,7 +4682,7 @@ flowchart LR
     PV2["(or pre-created PV)"] -.->|"can bind if match"| PVC
 ```
 
-The match checks three things: `storageClassName`, `accessModes`, and that PV `capacity >= PVC.resources.requests.storage`. Volume mode (`Filesystem` vs `Block`) and `volumeBindingMode` (`Immediate` vs `WaitForFirstConsumer`) also matter; a mismatch is a typical `Pending` cause (see §9.14).
+The basic matching checks include `storageClassName`, compatible `accessModes`, and `PV.capacity >= PVC.resources.requests.storage`. Volume mode (`Filesystem` vs `Block`), selectors, explicit `volumeName`, and topology/binding constraints can also affect whether a claim binds or its Pod can schedule. `volumeBindingMode` is a StorageClass behavior that controls when binding/provisioning occurs; it is not itself a PV/PVC compatibility field. These details matter when diagnosing a `Pending` claim (see §9.14).
 
 ```text
 PV <-binds-> PVC <-mounted by-> Pod
@@ -4694,7 +4695,9 @@ kubectl exec app -- sh -c 'echo hi > /data/test.txt && ls /data'
 
 ### 🧪 Practice task
 
-**Task:** Build the full chain: PV `data-pv` (`1Gi`, `hostPath`), PVC `data-pvc`, and a Pod `writer` that mounts the PVC at `/data` and writes a file. Delete and recreate the Pod and verify the file is still there.
+**Local-lab note:** This `hostPath` exercise is intended for a single-node learning cluster where the node-local directory remains the same. On a multi-node cluster, a replacement Pod may land on a different node and see a different `/mnt/data-pv`; a `hostPath` PV also violates Pod Security Baseline/Restricted. For realistic durable storage, use a working StorageClass/CSI provisioner or a properly configured local PV with node affinity.
+
+**Task:** Build the full chain: PV `data-pv` (`1Gi`, `hostPath`), PVC `data-pvc`, and a Pod `writer` that mounts the PVC at `/data` and writes a file. Delete and recreate the Pod on the same node and verify the file is still there.
 
 <details>
 <summary>💡 Hint</summary>
@@ -4774,7 +4777,7 @@ A PVC binds only to a PV that offers the requested mode, so a mismatch is a clas
 
 | `volumeMode` | Meaning |
 |---|---|
-| `Filesystem` (default) | Mounted as a directory; kubelet formats the volume on first use |
+| `Filesystem` (default) | Presented as a mounted directory; storage setup may format a new block device when required and supported |
 | `Block` | Exposed as a raw block device; the application reads/writes at the device level (databases sometimes need this) |
 
 `kubectl describe pvc` shows both `accessModes` and `volumeMode`. A `Filesystem` PVC binding to a `Block` PV (or vice versa) is a common `Pending` cause.
@@ -4841,7 +4844,7 @@ metadata:
 kubectl get storageclass     # the default is marked (default)
 ```
 
-A cluster can have only one default StorageClass at a time. A PVC that has `storageClassName: <not-the-default>` is bound to that class only; a PVC that has `storageClassName: ""` opts out of dynamic provisioning and will only bind to a pre-created, classless PV.
+Best practice is to mark only one StorageClass as default. Kubernetes can tolerate multiple defaults during migration; a new PVC that omits `storageClassName` uses the most recently created default. A PVC with `storageClassName: <name>` requests that specific class; a PVC with `storageClassName: ""` opts out of dynamic provisioning and can bind only to a pre-created classless PV.
 
 ### Complete PVC that uses a StorageClass
 
@@ -4876,9 +4879,9 @@ prevents a default StorageClass from being selected for that PVC.
 
 ### Common mistakes
 
-- Marking two StorageClasses as default. There is one annotation `storageclass.kubernetes.io/is-default-class: "true"`, and Kubernetes tolerates only one true default at a time. The second annotation is ignored. Pick one and remove the other; PVCs without `storageClassName` go to the latest true default.
+- Marking two StorageClasses as default. Best practice is to have one default, but Kubernetes allows multiple StorageClasses to carry `storageclass.kubernetes.io/is-default-class: "true"` during migration. A new PVC that omits `storageClassName` uses the **most recently created** default StorageClass. Remove unintended defaults to avoid surprising provisioning choices.
 - Forgetting that `WaitForFirstConsumer` keeps the PVC `Pending` until a Pod is scheduled. A standalone `kubectl get pvc` then shows `Pending` and looks like a failure, but it is normal: bind happens on first use. The `kubectl describe pvc` event reads `waiting for first consumer to be created before binding`.
-- Choosing `Immediate` for a zonal volume. The PV is created in a zone at PVC creation time, not at Pod schedule time. If the Pod is then scheduled to a different zone, the volume mount fails. Always use `WaitForFirstConsumer` for zonal or local storage.
+- Choosing `Immediate` for topology-constrained storage. With dynamic provisioning, the volume may be created/bound before the scheduler considers the consuming Pod's placement; the Pod can then remain Pending because the PV's topology is incompatible with available nodes. Prefer `WaitForFirstConsumer` when the storage driver supports it and placement should influence provisioning. Local PVs generally use this mode so the scheduler can account for the PV's node affinity. Follow the storage driver's and cluster's documented requirements rather than treating either mode as universal.
 - A PVC that requests `storageClassName: ""` on a cluster with a default class. The empty string opts out of dynamic provisioning; the PVC will only bind to a pre-created, classless PV. The behavior is "do not provision," not "use the default."
 
 ### What the default StorageClass actually does
@@ -4915,7 +4918,7 @@ See the **PVC Pending** entry in the Troubleshooting chapter for the symptom -> 
 3. The provisioner creates the real disk and a matching PV object.
 4. The PV binds to your PVC, and the Pod can mount it.
 
-With `volumeBindingMode: WaitForFirstConsumer` step 3 is delayed until a Pod that uses the PVC is scheduled, so the disk is created in the same zone as the Pod. A `Pending` PVC with no Pod yet is **normal** in that mode.
+With `volumeBindingMode: WaitForFirstConsumer`, binding/provisioning is deferred until a Pod that uses the claim is being scheduled. The scheduler's placement constraints can then guide selection or provisioning of a topology-compatible volume. The PVC may remain `Pending` before a consumer exists and during this scheduling/binding process; that state is normal until the binding workflow can proceed.
 
 | | Static provisioning | Dynamic provisioning |
 |---|---|---|
@@ -5109,7 +5112,7 @@ data-db-1
 data-db-2
 ```
 
-Stable DNS: `db-0.db.<namespace>.svc.cluster.local`.
+Stable DNS (assuming the cluster DNS suffix is `cluster.local`): `db-0.db.<namespace>.svc.cluster.local`. The example uses `nginx` only to demonstrate StatefulSet identity and PVC wiring; it is not a database deployment.
 
 ```bash
 kubectl get pods -l app=db
@@ -5830,7 +5833,9 @@ spec:
       containers:
         - name: web
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          port: {{ .Values.service.port }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
 ```
 
 Render without installing:
@@ -5870,23 +5875,21 @@ Helm renders templates with your values, applies the result, and records a numbe
 
 ### Common mistakes
 
-- Forgetting `-n <namespace>`. `helm list` defaults to the current namespace, and `helm install` does **not** create the namespace by default. The release "disappears" from a query with `-A` if you are in the wrong namespace, but `helm list -A` shows it.
-- Expecting `helm upgrade` to use only the new values. By default, the previous `--set` and `-f` overrides are kept on top of the new `--set` and `-f`. Add `--reset-values` to start from defaults, or use `--reuse-values` to ignore new `-f` files.
-- Editing a chart's `values.yaml` and expecting a re-install to pick it up. Helm only uses the values passed at install/upgrade time, not the chart's defaults. Use `helm show values` to see the chart's defaults, then `-f values.yaml` to override.
+- Forgetting `-n <namespace>`. `helm list` defaults to the current namespace, and `helm install` does **not** create the namespace by default unless you pass `--create-namespace`. If a release appears to be missing, check the intended namespace or use `helm list -A` to list releases across namespaces.
+- Assuming `helm upgrade` always carries forward the previous release's custom values. The behavior depends on the Helm version and flags, so choose the intended policy explicitly: `--reuse-values` merges the previous release values with new overrides, while `--reset-values` starts from chart defaults plus values supplied on this command. Helm 4 also documents `--reset-then-reuse-values`; check `helm upgrade --help` for the options supported by your installed version.
+- Editing a chart's `values.yaml` and expecting a running release to change immediately. Chart defaults are always part of rendering; they affect a release when you install/upgrade using that edited chart version or path. Use `helm show values` to inspect defaults and `-f values.yaml` or `--set` to override them.
 - Running `helm uninstall` and assuming `helm rollback` can still help. Uninstall removes the release and its revision history. Roll back *before* uninstalling if you might want to return.
-- A release with a stuck `pending-install` or `pending-upgrade` state happens when the job hook failed. `helm history <release>` shows the failed revision. Use `helm rollback` to recover, or `helm uninstall` and start over.
+- A release stuck in `pending-install` or `pending-upgrade` means an install/upgrade operation did not finish cleanly; a failed hook is one possible cause, not the only one. Inspect `helm status`, `helm history`, hook Jobs/Pods, and Kubernetes events. Roll back only when a usable earlier revision exists. For a failed first install, diagnose the cause and then clean up or retry according to the release state rather than assuming rollback is available.
 
 ### Values precedence (low to high)
 
-Helm merges values in this order; later wins:
+Helm combines values with increasing precedence; higher-precedence inputs override lower-precedence values:
 
-1. Chart's `values.yaml` defaults.
-2. Any `values.yaml` in chart dependencies.
-3. `-f values.yaml` files in the order specified.
-4. `--set key=value` and `--set-string`, `--set-json` flags.
-5. Individual `--set` flags after `-f` (override the file).
+1. Chart defaults from `values.yaml` (including dependency defaults and parent-chart overrides according to Helm's chart-value rules).
+2. User-supplied values files (`-f`), merged in the order specified; later files override earlier files.
+3. Command-line overrides such as `--set`, `--set-string`, and `--set-json`.
 
-This is why `--set` always wins against `-f`, and why passing multiple `-f` files later in the command overrides earlier ones.
+This is why command-line overrides take precedence over `-f` files and why multiple `-f` files are order-sensitive.
 
 ### 🧪 Practice task
 
@@ -6215,7 +6218,7 @@ A readiness probe tells Kubernetes whether the application can accept requests n
 
 ### Readiness gates
 
-A **readiness gate** is a Pod-level condition that must be `True` (added by something external) before the Pod can be marked Ready. Common exam use: hold a Pod out of the Service endpoints until its PVC is bound, or until a node agent has registered it.
+A readiness gate adds a custom Pod condition that must become `True` before the Pod can be marked Ready. Kubernetes does not set that custom condition automatically; an external controller or integration must write it. Use this when readiness depends on an external fact that a container probe cannot adequately represent—for example, a controller confirming that the Pod has registered with an external load balancer or service registry. PVC binding is usually handled earlier by scheduling and volume setup, so it is not a good default example of a readiness gate.
 
 ```yaml
 spec:
@@ -6765,13 +6768,13 @@ kubectl debug pod/web --copy-to=web-debug \
   --share-processes --container=app --image=busybox:1.36
 ```
 
-`--target=app` joins the existing container's namespaces (network, PID), so the debug shell sees the same ports, environment, and process tree. The original Pod is untouched; the ephemeral container is added through the `ephemeralcontainers` subresource and is removed when the Pod is deleted.
+`--target=app` asks the runtime to target the application container's **process namespace**, so the debug container may be able to inspect the application process tree (runtime support is required). Containers in a Pod already share the Pod network namespace, so the debug container can normally reach the app through `localhost`; `--target` is not what gives it network access. The debug container does not automatically inherit the application container's environment variables or filesystem. The original Pod is otherwise left running; the ephemeral container is added through the `ephemeralcontainers` subresource and remains part of the Pod until the Pod is deleted.
 
 ### Common mistakes
 
 - `kubectl debug pod/web` on a Pod that has `ephemeralcontainers` disabled. Some hardened PodSecurity profiles or admission policies block ephemeral containers. The error says "ephemeral containers are forbidden for pod"; switch to `--copy-to` to make a debug copy instead.
-- Forgetting `--target=<container>` on a multi-container Pod. The debug container needs to know which namespace to share, otherwise it gets its own network namespace and cannot reach the app on `localhost`.
-- Using `kubectl debug node/<node>` on a managed cluster (EKS, GKE, AKS). The command requires the node's `SSHD` access; on managed clusters the API call is rejected or the resulting Pod has no useful privileges. Skip it on CKAD.
+- Forgetting `--target=<container>` when you need to inspect a particular container's processes. `--target` targets the process namespace where supported; it is not required for ordinary Pod-network access, because containers in the same Pod share a network namespace. If localhost access fails, investigate the app listener, port, process state, or Pod networking rather than assuming `--target` controls networking.
+- Assuming `kubectl debug node/<node>` requires SSH. It is specifically useful when SSH is unavailable: Kubernetes creates a debugging Pod on the node and mounts the node filesystem at `/host`. It requires permission to create a Pod on the selected node and to access host filesystems; managed-cluster RBAC, admission policy, node reachability, or a restricted debug profile may limit what you can do. It does not require the node to run SSHD, and it will not work if the node is unreachable or kubelet cannot create the Pod.
 
 ### 🧪 Practice task
 
@@ -6901,11 +6904,11 @@ Between Pods, use Pod networking or, for stable application access, a Service.
 ### The Kubernetes network model
 
 - Every Pod gets its own IP address.
-- Any Pod can reach any other Pod by IP, on any node, **without NAT**.
+- The base Kubernetes network model allows Pod-to-Pod communication across nodes without NAT. NetworkPolicy and the cluster networking implementation can still restrict or affect that reachability.
 - Agents on a node (such as the kubelet) can reach all Pods on that node.
 - The **CNI plugin** (Calico, Cilium, Flannel, ...) implements this. NetworkPolicy enforcement also depends on the CNI.
 
-Because Pod IPs change whenever Pods are recreated, applications should connect to a **Service** name, not a Pod IP.
+A replacement Pod may receive a different IP, so applications should connect through a **Service** name or another stable discovery mechanism rather than treating a Pod IP as a durable address.
 
 ### 📖 Explained: how Pod traffic actually flows
 
@@ -6927,7 +6930,7 @@ kubectl port-forward pod/web 8080:80                 # laptop:8080 -> Pod:80 (de
 
 Points that trip people up:
 
-- A Pod gets a **new IP every time it is recreated**, so never hard-code a Pod IP.
+- A replacement Pod can receive a different IP, so never depend on a Pod IP remaining stable across recreation.
 - `containerPort` in the Pod spec is documentation; it does not open or block anything.
 - `hostNetwork: true` makes a Pod use the node's network namespace and IP. It is rare and a security concern.
 - If Pods on different nodes cannot talk, the CNI plugin is the first suspect (a cluster issue, not an app issue).
@@ -6964,14 +6967,14 @@ flowchart LR
     S -->|"selector: app=web"| E{"Ready Pods (endpoints)"}
     E -->|"targetPort 8080"| P1["Pod A"]
     E -->|"targetPort 8080"| P2["Pod B"]
-    KP[kube-proxy on each node] -.->|programs DNAT rules| S
+    KP["kube-proxy or equivalent Service dataplane"] -.->|programs Service forwarding| S
 ```
 
 The flow has three stages:
 
 1. **Name resolution.** CoreDNS returns the Service's ClusterIP for the name `web` (or `web.dev` from another namespace).
-2. **DNAT to a Pod.** `kube-proxy` on the node intercepts the connection to the ClusterIP (which no interface owns) and rewrites the destination to one of the ready Pods' IPs and the `targetPort`.
-3. **Forward.** The connection reaches the chosen Pod. If the Pod is no longer ready, kube-proxy drops it from the EndpointSlice and the next connection goes to a different Pod.
+2. **Service forwarding.** In a common kube-proxy-based cluster, the dataplane handles traffic addressed to the ClusterIP and forwards it to an eligible Pod IP and `targetPort`. The ClusterIP is virtual and usually is not assigned to a physical interface. Some networking implementations provide a replacement Service dataplane, so the exact mechanism varies.
+3. **Forward.** The connection reaches the chosen Pod. The EndpointSlice controller publishes endpoint readiness conditions, and the Service dataplane consumes those endpoints to stop selecting an unready Pod for new traffic. Existing connections and endpoint-removal timing can behave differently, so do not assume every in-flight connection instantly moves to a different Pod.
 
 ### Port meanings
 
@@ -6981,7 +6984,7 @@ The flow has three stages:
 | `targetPort` | Container/application port the Service forwards to (number or named port) |
 | `nodePort` | Port opened on every node (NodePort/LoadBalancer only; default range 30000-32767) |
 
-A Service with more than one port must give each port a `name`.
+A Service with more than one port must give each port a unique `name`. In the common kube-proxy-based dataplane, traffic is forwarded through Service rules; some CNIs replace kube-proxy, so do not assume every cluster uses iptables/IPVS rules on each node.
 
 ### Service types
 
@@ -6989,7 +6992,7 @@ A Service with more than one port must give each port a `name`.
 |---|---|---|
 | `ClusterIP` (default) | Inside the cluster | Virtual IP + DNS name |
 | `NodePort` | `<node-ip>:<nodePort>` | Builds on ClusterIP |
-| `LoadBalancer` | External IP from the provider | Builds on NodePort; needs a supporting environment |
+| `LoadBalancer` | External address from the provider/integration | Commonly uses NodePorts; some implementations can route directly to Pods and disable NodePort allocation |
 | `ExternalName` | Inside the cluster | DNS CNAME to an external hostname; no selector or proxying |
 | Headless (`clusterIP: None`) | Inside the cluster | DNS returns Pod IPs directly |
 
@@ -7043,7 +7046,7 @@ When a Service does not route traffic, walk this list in order:
 6. `kubectl exec <pod> -- wget -qO- http://<pod-ip>:<container-port>/<path>` - does the app respond on the port the Service forwards to?
 7. `kubectl exec <pod> -- nslookup <service>` - does the Service name resolve inside the cluster?
 
-The single most common Service failure is "Service exists, no endpoints." That is a **selector / readiness** problem, not a Service problem.
+A common Service failure is "Service exists, no endpoints." First check the Service selector, Pod labels and readiness, then inspect EndpointSlices and controller events. This is usually an endpoint-selection issue, but an unhealthy endpoint controller or a deliberately selector-less Service can change the diagnosis.
 
 ### Common mistakes
 
@@ -7091,7 +7094,7 @@ Typical use: service-to-service communication within the cluster.
 
 The ClusterIP is a **virtual IP** that no network interface owns. `kube-proxy` (or the CNI's replacement for it) programs rules on every node that rewrite traffic sent to the Service IP and port to the IP and `targetPort` of one ready Pod. Cluster DNS maps the Service name to the ClusterIP, so clients use `web` instead of an address. Because the IP is virtual you usually cannot `ping` it; test with `curl` or `wget` against the port.
 
-Only **ready** Pods receive traffic: a Pod that fails its readiness probe is removed from the Service's EndpointSlices.
+By default, Services send normal traffic to ready endpoints. A failed readiness probe normally marks the endpoint not ready, but settings such as `publishNotReadyAddresses` can intentionally change publication behavior. When the result is surprising, inspect the EndpointSlice's `ready` and `serving` conditions rather than relying only on the Pod's STATUS column.
 
 ### ⚡ Remember
 
@@ -7153,7 +7156,7 @@ flowchart LR
     S --> P2["Pod on node B"]
 ```
 
-The port is opened on **every** node, even nodes that run no matching Pod; traffic is forwarded to a ready Pod wherever it runs.
+In the standard NodePort model, the port is available on **every** node, even nodes that run no matching Pod; the Service dataplane forwards traffic to a ready endpoint. Provider, firewall, and dataplane behavior can affect external reachability.
 
 ### ⚡ Remember
 
@@ -7172,11 +7175,11 @@ spec:
 
 The actual external behavior depends on the cluster environment/provider.
 
-A LoadBalancer Service builds on NodePort: the cloud provider creates an external load balancer that targets the node ports and writes its address to `EXTERNAL-IP`. On clusters without that integration (kubeadm, kind, minikube without `minikube tunnel`) `EXTERNAL-IP` stays `<pending>`; use NodePort or `kubectl port-forward` there. One load balancer per Service gets expensive, which is one reason to put an Ingress in front of many Services.
+In the common implementation, a LoadBalancer Service allocates NodePorts and the external load balancer forwards traffic to those node ports. Some providers and dataplanes can route directly to Pod endpoints; where supported, `spec.allocateLoadBalancerNodePorts: false` avoids allocating NodePorts. On clusters without an external load-balancer integration (for example, kind or a plain kubeadm cluster), `EXTERNAL-IP` may remain `<pending>`; use a supported local integration, NodePort, or `kubectl port-forward` for practice. One external load balancer per Service can be expensive, which is one reason to place an Ingress/Gateway in front of multiple Services.
 
 ### ⚡ Remember
 
-**LoadBalancer = NodePort + an external load balancer (needs provider support).**
+**LoadBalancer = externally provisioned traffic entry point; commonly NodePort-backed, but implementation details vary.**
 
 
 
@@ -7294,7 +7297,7 @@ For a normal Service, DNS resolves the Service name to its ClusterIP; the Servic
 
 ### 📖 Explained: how a name becomes an IP
 
-Every Pod's `/etc/resolv.conf` points at CoreDNS and has a search list:
+A typical Pod using the default `dnsPolicy: ClusterFirst` has `/etc/resolv.conf` configured to use cluster DNS (commonly CoreDNS) and a namespace-aware search list. `dnsPolicy`, `hostNetwork`, or custom DNS configuration can change this:
 
 ```text
 search default.svc.cluster.local svc.cluster.local cluster.local
@@ -7357,12 +7360,21 @@ The search list (`<ns>.svc.cluster.local svc.cluster.local cluster.local`) is wh
 
 ## 8.9 NetworkPolicies
 
-A NetworkPolicy declares which ingress and/or egress connections are allowed for Pods selected by `spec.podSelector`; enforcement requires a CNI/network plugin that implements NetworkPolicy. Ingress is evaluated at the destination Pod and egress at the source Pod, so a connection may need to be allowed by policy on both ends. A timeout after DNS resolves can indicate a policy block, but first rule out missing endpoints and an incorrect listener/targetPort.
+A NetworkPolicy declares which ingress and/or egress connections are allowed for Pods selected by `spec.podSelector`; enforcement requires a CNI/network plugin that implements NetworkPolicy. Egress policy is evaluated at the source Pod and ingress policy at the destination Pod. If both Pods are isolated in the relevant direction, the connection succeeds only when the source’s egress rules permit it **and** the destination’s ingress rules permit it. A timeout after DNS resolves can indicate a policy block, but first rule out missing endpoints and an incorrect listener/targetPort.
 
 ```mermaid
 flowchart LR
-    F["from: podSelector, namespaceSelector or ipBlock"] -->|ingress| SEL["Selected Pods (spec.podSelector)"]
-    SEL -->|egress| T["to: podSelector, namespaceSelector or ipBlock"]
+    SRC["Source Pod"] --> E{ "Source egress isolated?" }
+    E -->|no| EOK["Egress allowed"]
+    E -->|yes| ER{"Matching egress rule?"}
+    ER -->|yes| EOK
+    ER -->|no| BLOCK1["Connection blocked"]
+    EOK --> DST["Destination Pod"]
+    DST --> I{"Destination ingress isolated?"}
+    I -->|no| IOK["Ingress allowed"]
+    I -->|yes| IR{"Matching ingress rule?"}
+    IR -->|yes| IOK
+    IR -->|no| BLOCK2["Connection blocked"]
 ```
 
 Rules to keep in mind:
@@ -7551,14 +7563,14 @@ kubectl run tmp --rm -it --restart=Never --labels=app=frontend --image=busybox:1
 
 When traffic to a Pod times out (not "refused"), work through this list:
 
-1. **Is there a NetworkPolicy that selects the target Pod?** `kubectl get networkpolicy -A`. If none, the cluster's CNI is not enforcing policies and traffic is open. If yes, every selecting policy's `policyTypes` decides what's allowed.
+1. **Does a NetworkPolicy isolate the Pod in the direction being tested?** Run `kubectl get networkpolicy -A`, then inspect `podSelector` and `policyTypes`. If no policy selects the destination Pod for ingress, NetworkPolicy does not isolate its ingress; if no policy selects the source Pod for egress, NetworkPolicy does not isolate its egress. This does **not** mean the CNI is globally disabled: it may enforce policies for other Pods, and firewalls, service meshes, or cloud rules may still block traffic.
 2. **Does the policy's `podSelector` match the target Pod's labels?** `kubectl get pod --show-labels` vs the policy.
 3. **Is the right direction restricted?** A policy with `policyTypes: [Ingress]` does not affect egress; a policy with `[Egress]` does not affect ingress. The default is "no restriction in the un-listed direction."
 4. **Do the `from` / `to` selectors match the actual client/server?** A namespaceSelector with a typo or a podSelector with a wrong label returns zero matches, and the rule is effectively a deny.
-5. **Is the protocol and port right?** `port` in a NetworkPolicy is the **container port the Pod listens on**, not the Service's `port`. With `protocol: TCP` (default) and `port: 8080`, a TCP listener on `9090` is not matched.
-6. **For egress policies: is DNS allowed?** With `policyTypes: [Egress]` and no rule for port 53, every name lookup fails and the connection times out regardless of the rest of the policy. Allow UDP 53 (and TCP 53 for large responses) to CoreDNS.
+5. **Is the protocol and destination port right?** A NetworkPolicy `port` matches the destination port on the Pod endpoint, not the Service's front-end `port`. For example, if a Service listens on `80` and forwards to Pod port `8080`, the policy normally needs to allow `8080`. `port` can be numeric or a named Pod port. With TCP (the default), a listener on `9090` is not matched by a rule for `8080`.
+6. **For egress-isolated Pods: is DNS actually permitted?** If no egress rule permits traffic to the configured DNS resolver on the protocol and port it uses, name lookups fail. Explicitly allow UDP 53 and TCP 53 where needed, scoped to the cluster DNS endpoints. Check `/etc/resolv.conf` and your cluster DNS setup rather than assuming every cluster queries the `kube-dns` Service IP directly.
 
-A **timeout** is the NetworkPolicy fingerprint; "connection refused" means the Service is forwarding to a port nothing is listening on, which is not a NetworkPolicy problem.
+A **timeout** is a common clue for dropped traffic, including a NetworkPolicy block; it is not proof. A **connection refused** often points to a wrong `targetPort`, no process listening, or an active reject, but a CNI or other network control can also reject traffic. Use the symptom to choose the next check, then confirm with the policy, EndpointSlice, listener, and network configuration rather than treating either symptom as definitive.
 
 ### Common mistakes
 
@@ -7630,7 +7642,7 @@ kubectl run bad --rm -it --image=busybox:1.36 --restart=Never -n np -- wget -qO-
 
 Ingress defines HTTP/HTTPS routing to Services. It only works if an **Ingress controller** (for example ingress-nginx) is running in the cluster.
 
-**Note (as of late 2025/2026):** the Kubernetes project announced that ingress-nginx is being retired, with best-effort maintenance ending March 2026 and no further releases or security fixes after that. Existing deployments keep working and the CKAD `Ingress` API itself is unaffected, but if you are setting up a practice cluster now, any Ingress controller (ingress-nginx, Traefik, HAProxy, or a Gateway API implementation) demonstrates the same `Ingress` object behavior this section covers — you don't need to chase this news for exam purposes, just don't be surprised if newer tutorials point you elsewhere.
+**Note (checked 29 October 2026):** the official `ingress-nginx` repository was archived in March 2026; the project states that there will be no further releases or security fixes, although existing deployments are not automatically broken. The Kubernetes `Ingress` API remains a separate concept from any particular controller. For a new practice cluster, choose a maintained Ingress controller if you want to practice `Ingress` objects; a Gateway API implementation is an alternative for learning the distinct Gateway API resources and does not necessarily implement the same `Ingress` behavior. See the [official ingress-nginx retirement notice](https://github.com/kubernetes/ingress-nginx).
 
 ```mermaid
 flowchart LR
@@ -7963,10 +7975,10 @@ What this stack gives you:
 
 - The Deployment runs three Pods (HPA can grow to ten).
 - The Service selects those Pods by `app: web`; the HPA scales the Deployment.
-- The PDB keeps at least two Pods available during a voluntary disruption.
+- The PDB asks the Eviction API to preserve at least two available matching Pods during eligible voluntary disruptions. It does not prevent involuntary failures or every direct deletion path.
 - The NetworkPolicy lets any Pod in any namespace connect to the app on port 8080, and lets the app reach DNS.
 - The ConfigMap supplies non-sensitive configuration; the HPA reads CPU from `resources.requests.cpu`.
-- The ServiceAccount is the Pod's identity in the API; the SecurityContext is the `restricted` profile.
+- The ServiceAccount supplies the Pod's identity for Kubernetes API requests. `securityContext` configures the process/container security settings; it does not itself enable the Pod Security `restricted` profile, which is enforced through namespace Pod Security Admission labels.
 
 ### 🧪 Practice task
 
@@ -8375,7 +8387,7 @@ $ kubectl describe pod app | tail -3
   Warning  FailedMount  MountVolume.SetUp failed for volume "cfg" : configmap "app-cfg" not found
 ```
 
-Reading it: a Pod that sits in `ContainerCreating` for minutes is almost always waiting for a **volume**, not for the image. `FailedMount` names the missing volume source. Check the volume list in the Pod, then create the missing ConfigMap, Secret, or PVC in the **same namespace**.
+Reading it: a Pod that sits in `ContainerCreating` for minutes is still in setup; possible causes include image pulling, volume setup, sandbox creation, or network configuration. Do not infer the cause from the status label alone. In this example, the `FailedMount` event identifies a missing ConfigMap as the specific blocker. Check the Pod's volumes and events, then create or correct the missing ConfigMap, Secret, or PVC in the **same namespace**.
 
 ```bash
 kubectl get pod app -o jsonpath='{.spec.volumes}'
@@ -8723,7 +8735,7 @@ kubectl auth can-i list pods --as=system:serviceaccount:dev:app-sa -n dev     # 
 
 ## 9.14 PVC Pending
 
-**Symptom:** `kubectl get pvc` shows `Pending`; a Pod using it may also be `Pending` or `ContainerCreating`. Pending is a state, not a diagnosis: with `WaitForFirstConsumer` and no consuming Pod, it can be expected; otherwise Events should indicate a class, capacity, mode, topology, or provisioner problem. Pending is a state, not a diagnosis: with `WaitForFirstConsumer` and no consuming Pod, it can be expected; otherwise Events should indicate a class, capacity, mode, topology, or provisioner problem.
+**Symptom:** `kubectl get pvc` shows `Pending`; a Pod using it may also be `Pending` or `ContainerCreating`. `Pending` is a state, not a diagnosis. With `WaitForFirstConsumer` and no consuming Pod, it can be expected. Otherwise, inspect Events for class, capacity, access-mode, topology, or provisioner problems.
 
 **Inspect:**
 
@@ -8745,7 +8757,7 @@ kubectl get storageclass
 
 Read the event text in `kubectl describe pvc` first; the message is specific. If the event is generic, the most common causes in CKAD are:
 
-1. **No StorageClass matches the request** and the cluster has no default class -> the PVC has no class, no provisioner can pick it up. Add `storageClassName: <existing-class>` or set an existing class as default.
+1. **No StorageClass matches the request** and no matching classless static PV exists -> no provisioner can satisfy the claim. Add `storageClassName: <existing-class>`, set an existing class as default, or create a matching static PV if that is the intended model.
 2. **Capacity too large for any available PV** -> reduce `resources.requests.storage` to fit the largest PV (or provision dynamically).
 3. **Access mode not offered by any PV** -> `ReadWriteMany` requires a backend that supports it (NFS, CephFS). `ReadWriteOncePod` is supported on fewer backends than `ReadWriteOnce`. Pick a mode the cluster can satisfy.
 4. **Storage class exists but the provisioner cannot create the volume** -> look for `Failed to provision volume` events with a CSI error. The CSI driver may need credentials, may be unavailable, or may have hit a quota.
@@ -8754,7 +8766,7 @@ Read the event text in `kubectl describe pvc` first; the message is specific. If
 ### Common mistakes
 
 - A pre-created PV with a `storageClassName` of (say) `manual` and a PVC with no `storageClassName` on a cluster that has a default StorageClass. The PVC gets the default class at admission, and the PV is not a match. Fix: set `storageClassName: manual` on the PVC, or `""` on the PVC to opt out of dynamic provisioning.
-- A `ReadWriteOnce` PVC mounted by two Pods on different nodes. `RWO` allows multiple Pods on the same node to mount the volume, but only one node total. The second Pod stays `ContainerCreating` with `FailedMount: volume is already exclusively attached`. Use `ReadWriteMany` for cross-node sharing.
+- A `ReadWriteOnce` PVC used by Pods on different nodes. RWO is a single-node read-write mount mode, not a one-Pod-only mode; multiple Pods on the same node may use it, depending on the backend. A second node may fail attachment (often with a `Multi-Attach`/`FailedAttachVolume` event). For cross-node read-write sharing, the storage backend must support an appropriate mode such as RWX; changing the YAML alone does not add that capability.
 - A `Pod` with `volumes: - persistentVolumeClaim: claimName: <name>` referencing a PVC in another namespace. PVCs are namespaced; the Pod must be in the same namespace.
 
 ### 🧪 Practice task
@@ -8832,10 +8844,10 @@ Use `describe` to confirm the actual reason rather than relying only on the exit
 
 | Symptom | Where it is decided | What the message means |
 |---|---|---|
-| Container restart with `Reason: OOMKilled`, exit `137` | Per-container cgroup on the node | This container exceeded **its own** `limits.memory`; the node is fine |
+| Container restart with `Reason: OOMKilled`, exit `137` | Commonly a container memory cgroup; confirm with node events too | Often the container reached its memory limit, but do not rule out a node-level OOM solely from this reason |
 | Several Pods at once with `STATUS Evicted`, `Reason: Evicted` | Node-level eviction manager | The whole node was under pressure (memory or disk); the kubelet removed Pods to protect the node |
 
-OOMKilled is a per-Pod signal: raising `limits.memory` (or fixing the leak) fixes the next restart. Evicted is a cluster signal: the node is the problem. Setting realistic `requests` so the scheduler packs Pods more sensibly and avoiding `BestEffort` workloads both reduce the chance of eviction.
+`OOMKilled` is a **container termination reason**, most often associated with the container exceeding its memory cgroup limit; do not assume the node is healthy without checking node conditions and events, because node-level OOM conditions can also affect processes. Raising `limits.memory` may help only when the configured limit is too low for legitimate usage; fixing a leak or unbounded allocation may be the correct fix. `Evicted` means kubelet evicted the Pod under node pressure. Realistic requests help scheduling and influence eviction decisions, but do not guarantee that a Pod can never be evicted.
 
 
 ---
@@ -8851,7 +8863,7 @@ kubectl describe pod <pod>          # Reason: Evicted, e.g. "The node was low on
 kubectl describe node <node>        # Conditions: MemoryPressure / DiskPressure
 ```
 
-**Interpretation and fix:** the kubelet evicts Pods to protect a node under resource pressure, starting with `BestEffort` Pods, then `Burstable` Pods using more than their requests, and `Guaranteed` Pods last (see QoS classes). Set realistic requests and limits, and let the controller recreate the Pods. Evicted Pods remain listed as `Failed` records until you remove them with `kubectl delete pod <pod>`. This differs from `OOMKilled`, where one container exceeded **its own** memory limit.
+**Interpretation and fix:** the kubelet evicts Pods to protect a node under resource pressure. The eviction order is not determined by QoS class alone: kubelet considers whether usage of the starved resource exceeds requests, Pod priority, and usage relative to requests. `BestEffort` Pods and `Burstable` Pods exceeding requests are often more vulnerable; `Guaranteed` Pods and `Burstable` Pods below requests are generally considered later, but none should be treated as impossible to evict under every condition. Set realistic requests and limits, and diagnose node pressure before relying on a controller to recreate the workload. Evicted Pods remain listed as `Failed` records until removed. This differs from a container reported as `OOMKilled`, which is a container termination reason and most often indicates a container memory-limit OOM.
 
 
 ---
@@ -8922,12 +8934,12 @@ kubectl top pods|nodes
 | Deployment vs StatefulSet vs DaemonSet | Interchangeable replicas / stable identity + own PVC / one Pod per eligible node |
 | Job vs CronJob | Run to completion / create Jobs on a schedule |
 | ConfigMap vs Secret | Non-sensitive config / sensitive data (base64 is not encryption) |
-| Requests vs limits | Scheduling guarantee / runtime ceiling |
-| CPU vs memory limit | CPU exceeded -> throttled; memory exceeded -> `OOMKilled` |
+| Requests vs limits | Scheduling accounting input / runtime cap (if set) |
+| CPU vs memory limit | CPU limit reached -> may be throttled; memory-limit breach -> can cause `OOMKilled` |
 | Startup vs readiness vs liveness | Startup gate / traffic eligibility (no restart) / restart decision |
 | `port` vs `targetPort` vs `nodePort` | Service port / container port / port on each node |
 | Service vs Ingress | Stable L4 endpoint to Pods / HTTP(S) host+path routing to Services (needs a controller) |
-| ClusterIP vs NodePort vs LoadBalancer | Internal / node port / external LB (each builds on the previous) |
+| ClusterIP vs NodePort vs LoadBalancer | Internal virtual endpoint / node port / external load balancer (implementation-dependent datapath) |
 | PV vs PVC vs StorageClass | Storage / request for storage / provisioning policy |
 | Role vs ClusterRole | Namespaced permissions / cluster-scoped or reusable permissions |
 | RoleBinding vs ClusterRoleBinding | Grants within one namespace (Role **or** ClusterRole) / grants a ClusterRole cluster-wide |
