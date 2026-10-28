@@ -52,9 +52,18 @@ Do not memorize every YAML line. Learn the fields a task is likely to make you c
 
 Diagrams are Mermaid. If your viewer does not render Mermaid, each diagram is followed by (or sits next to) a text explanation.
 
+### How to read the diagrams (and what to learn from them)
+
+A Mermaid diagram is not decoration: use it to answer a specific question. **Control-flow diagrams** show who acts next (for example, a controller reconciling a Deployment); **data-path diagrams** show where a request travels (for example, a Service forwarding to a Pod); **decision diagrams** help narrow a failure to a small number of causes. After reading a diagram, try to explain each arrow in one sentence. If you cannot explain an arrow, return to the adjacent text or run the related command on a cluster.
+
+For every major topic, aim to learn four things: **intent** (why the object exists), **mechanism** (how Kubernetes processes it), **verification** (which observable evidence proves it worked), and **failure mode** (what you would inspect when it does not work). This avoids treating YAML as magic syntax.
+
+> **Version note (checked 28 October 2026):** this document originally names Kubernetes v1.35 based on the Linux Foundation exam page. The CNCF curriculum repository also has a v1.37 CKAD curriculum file, so the public references are not fully aligned. Do not silently assume either version is the environment you will receive: check the current Linux Foundation candidate/exam information close to exam day and use the candidate environment as the final authority. Sources: [Linux Foundation CKAD page](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/) · [CNCF curriculum repository](https://github.com/cncf/curriculum).
+
+
 ### Speed patterns that save minutes
 
-These four habits alone typically recover 10-15 minutes over a 2-hour exam:
+These four habits can save time in a 2-hour exam, but the benefit depends on your familiarity and practice:
 
 1. Always start a task by confirming the **context** and **namespace** (see the recap on the [Final CKAD Revision Sheet](#10-final-ckad-revision-sheet)).
 2. Generate YAML with `kubectl ... --dry-run=client -o yaml` and edit the few fields that matter.
@@ -101,6 +110,26 @@ flowchart TD
 ```
 
 Every component talks to the API server; only the API server talks to etcd.
+
+### 📖 Explained: desired state is continuously reconciled
+
+Applying a manifest records a desired state; it does not execute a shell script that performs every later step in a fixed sequence. Controllers observe API objects and repeatedly compare desired state with current state. If a Deployment asks for three replicas but only two matching Pods exist, the relevant controller creates a replacement. If an object is already correct, a well-behaved controller does nothing. This repeated comparison is why Kubernetes can recover after a controller restart: it can reconstruct what needs to happen from the objects stored in the API.
+
+```mermaid
+flowchart TD
+    USER[User applies manifest] --> API[API server validates request]
+    API --> STORE[(Persist object in etcd)]
+    STORE --> WATCH[Controller observes change]
+    WATCH --> COMPARE{Actual state matches desired state?}
+    COMPARE -->|No| ACT[Create or update dependent resources]
+    COMPARE -->|Yes| WAIT[Wait for new events or resync]
+    ACT --> OBS[Observe updated cluster state]
+    OBS --> COMPARE
+    WAIT --> WATCH
+```
+
+**Interpretation:** the API server accepts and stores the declaration; a controller performs resource-specific reconciliation; node components then implement the assigned Pod. The controller is not guaranteed to make the workload healthy instantly—scheduling, images, storage, and application startup can still fail.
+
 
 ### ⚡ Remember
 
@@ -2309,6 +2338,24 @@ spec:
 
 `Ready` is what a Service looks at, so a Pod can be phase `Running` and still receive no traffic. With `restartPolicy: Always` the kubelet restarts an exited container with an exponential back-off (10s, 20s, 40s ... capped at 5 minutes). That waiting period is what you see as `CrashLoopBackOff`.
 
+### 📖 Explained: do not collapse three status dimensions into one
+
+`Running` answers a Pod-level lifecycle question. `Waiting` / `Running` / `Terminated` describes a particular container's state. `Ready` is a condition about whether the Pod should be considered ready for normal service traffic. They can disagree without Kubernetes contradicting itself: a Pod can be `Running`, a container can be running, and the readiness probe can still fail.
+
+```mermaid
+flowchart TD
+    P[Pod object exists] --> PHASE[Pod phase: Pending / Running / Succeeded / Failed]
+    P --> CST[Container state: Waiting / Running / Terminated]
+    P --> COND[Pod conditions: Scheduled / Initialized / Ready]
+    COND -->|Ready=True| ENDPOINT[Eligible for normal Service endpoints]
+    COND -->|Ready=False| NOENDPOINT[Normally excluded from ready endpoints]
+    CST -->|Waiting reason| WHY[Inspect image, config, mounts and events]
+    CST -->|Terminated / repeated restarts| LOGS[Inspect current and previous logs]
+```
+
+When debugging, record the exact level and field: `kubectl get pod` is a summary; `kubectl describe pod` exposes conditions, container states, restart counts and events. This prevents the common mistake of treating `CrashLoopBackOff` as a Pod phase or assuming `Running` means users can reach the application.
+
+
 ### Diagram: Pod phases
 
 ```mermaid
@@ -2693,6 +2740,11 @@ flowchart LR
 
 - `subPath` mounts never see updates. Mount the **directory** if the application needs new values without a restart.
 - Env vars from a ConfigMap are read once. A `kubectl rollout restart deployment/<name>` is the simplest way to make a config change take effect.
+
+### 📖 Explained: configuration update is not the same as application reload
+
+Kubernetes can update a projected ConfigMap volume eventually, but it cannot guarantee that your process notices the new file or reloads its configuration. Applications differ: some watch files, some read configuration only at startup, and others need a signal or restart. By contrast, values injected as environment variables are fixed for the lifetime of that container process. For a reliable rollout, change a Pod-template annotation or restart the workload when the application does not support live reload; verify the new Pod's environment or mounted file rather than assuming the change propagated.
+
 - `data` values must be valid UTF-8 text. Binary content goes in `binaryData` and is base64-encoded on write.
 - A 1 MiB limit is enforced on the **total** ConfigMap. Large config files belong in a separate object or an image.
 
@@ -3148,6 +3200,25 @@ kubectl get pod <pod> -o jsonpath='{.spec.containers[*].resources}'
 ```
 
 A Pod whose request is larger than any single node can ever provide stays `Pending` forever; the Events say `Insufficient cpu` or `Insufficient memory`.
+
+### 📖 Explained: scheduling capacity and runtime enforcement are different
+
+A request primarily influences **placement and relative resource allocation**; a limit constrains runtime use. CPU limits are enforced by throttling, while exceeding a memory limit can lead to an out-of-memory kill. A Pod can therefore be schedulable but perform badly under a tight CPU limit, or be terminated after it exceeds its memory limit. Increasing a request can also make scheduling harder because the scheduler must find a node with that much unallocated requested capacity.
+
+```mermaid
+flowchart TD
+    SPEC[Container resource settings] --> REQ[requests.cpu / requests.memory]
+    SPEC --> LIM[limits.cpu / limits.memory]
+    REQ --> SCHED[Scheduler checks allocatable requested capacity]
+    REQ --> SHARE[CPU share / HPA utilization denominator]
+    LIM --> CPU[CPU limit: throttling under sustained pressure]
+    LIM --> MEM[Memory limit: can trigger OOM kill]
+    SCHED -->|No node fits| PENDING[Pod remains Pending]
+    SCHED -->|Node fits| PLACE[Pod can be scheduled]
+```
+
+When a Pod is Pending with `Insufficient cpu`, look first at requests and node allocatable capacity. When a container is `OOMKilled`, inspect memory usage, limit, exit details and application behavior; do not change CPU settings to solve a memory failure.
+
 
 ### ⚡ Remember
 
@@ -3662,6 +3733,22 @@ kubectl exec -n dev sa-pod -- ls /var/run/secrets/kubernetes.io/serviceaccount  
 Authorization answers:
 
 > **What are you allowed to do?**
+
+### 📖 Explained: an API request passes multiple gates
+
+Authentication identifies the caller; authorization decides whether that identity may perform the requested action; admission controllers can then validate or mutate the proposed object before it is persisted. A failure at each gate looks different: authentication commonly returns `401 Unauthorized`, RBAC denial commonly returns `403 Forbidden`, and admission rejection returns a validation/policy message. Use the error and response stage to choose the next command instead of treating every failure as an RBAC problem.
+
+```mermaid
+flowchart LR
+    REQ[API request] --> AUTHN{Authenticated?}
+    AUTHN -->|No| E401[401: identity not established]
+    AUTHN -->|Yes| AUTHZ{Authorized?}
+    AUTHZ -->|No| E403[403: permission denied]
+    AUTHZ -->|Yes| ADM{Admission accepts object?}
+    ADM -->|No| REJ[Rejected with validation or policy error]
+    ADM -->|Yes| SAVE[(Persist accepted object)]
+```
+
 
 RBAC expresses permissions with Roles/ClusterRoles and attaches them to identities using Bindings.
 
@@ -4341,6 +4428,26 @@ spec:
 
 An Operator is a controller that watches custom resources and reconciles the cluster to implement domain-specific behavior.
 
+### 📖 Explained: a CRD adds a type; a controller adds behavior
+
+A CRD defines the API shape and schema for a new kind. A Custom Resource (CR) is one instance of that kind. The CRD alone does not deploy an application or implement failover: a controller must watch the CR and reconcile the requested state. An Operator is commonly used when that controller also encodes application-specific lifecycle knowledge, such as safe upgrades, backup, restore, or leader election.
+
+```mermaid
+flowchart TD
+    CRD[CRD defines kind and schema] --> API[API server can accept custom objects]
+    USER[User applies Custom Resource] --> API
+    API --> CR[(Custom Resource: spec + status)]
+    CR --> WATCH[Controller watch / reconcile request]
+    WATCH --> DIFF[Compare desired state with live resources]
+    DIFF --> CREATE[Create or patch owned resources]
+    CREATE --> OBS[Observe dependent-resource status]
+    OBS --> STATUS[Update CR status / conditions]
+    STATUS --> WATCH
+```
+
+A reliable controller must be idempotent: running reconciliation repeatedly should converge on the same desired state, not create duplicates. It must also handle missing dependencies, transient API errors, resource deletion, ownership, status reporting and data-retention decisions. Those behaviors are implemented by the controller, not supplied automatically by the CRD.
+
+
 ```mermaid
 flowchart TD
     CRD["CRD: defines the kind Database"] --> CR["Custom Resource: orders-db"]
@@ -4824,6 +4931,24 @@ Binding/provisioning waits until a Pod using the PVC is scheduled, which can hel
 
 `WaitForFirstConsumer` is required for topology-aware provisioning (zonal volumes, local SSDs); otherwise the volume can land in a different zone than the Pod and the Pod will not start.
 
+### 📖 Explained: why binding mode changes the order of events
+
+With `Immediate`, a PVC can trigger provisioning/binding as soon as the claim is created. This is suitable when volume placement is independent of the consuming Pod's location. With `WaitForFirstConsumer`, Kubernetes considers the scheduling constraints of the Pod that uses the claim before choosing/provisioning storage. That helps avoid binding a topology-constrained disk in a zone where the Pod cannot run.
+
+```mermaid
+flowchart TD
+    PVC[PVC created] --> MODE{StorageClass volumeBindingMode}
+    MODE -->|Immediate| PROV[Provision or bind volume now]
+    PROV --> POD1[Pod scheduling uses bound volume constraints]
+    MODE -->|WaitForFirstConsumer| CONSUMER[Create Pod that references PVC]
+    CONSUMER --> SCHED[Scheduler evaluates Pod and storage topology]
+    SCHED --> PROV2[Provision or bind in compatible topology]
+    PROV2 --> RUN[Pod can proceed if other requirements are met]
+```
+
+A `Pending` PVC is therefore not always broken. For `WaitForFirstConsumer`, it can be the expected intermediate state until a consuming Pod participates in scheduling. Always read the claim events before changing the StorageClass or recreating resources.
+
+
 ### Default StorageClass
 
 ```yaml
@@ -5010,6 +5135,25 @@ StatefulSets are for workloads where each instance needs a **stable identity** a
 | Network identity | Via Service only | Stable per-Pod DNS through a headless Service |
 
 A **headless Service** (`clusterIP: None`) has no virtual IP; DNS returns the individual Pod records instead.
+
+### 📖 Explained: the Pod can be replaced while its identity and claim remain
+
+A StatefulSet assigns predictable ordinal names (`db-0`, `db-1`, …) and pairs each replica with its own PVC generated from `volumeClaimTemplates`. If `db-1` is deleted, the controller can recreate the Pod as `db-1` and mount the existing `data-db-1` claim again. Its Pod IP may change; the stable DNS identity is provided through the governing Headless Service. Storage retention is a separate concern: deleting the StatefulSet, deleting the PVC, and deleting the underlying PV are different operations with different policies.
+
+```mermaid
+flowchart TD
+    STS[StatefulSet db] --> P[Pod db-1]
+    P --> PVC[PVC data-db-1]
+    PVC --> PV[PV / backing disk]
+    P --> DNS[db-1.db-headless namespace DNS]
+    DEL[Pod db-1 deleted] --> CTRL[StatefulSet controller notices missing ordinal]
+    CTRL --> NEW[Replacement Pod db-1]
+    NEW -->|mounts existing claim| PVC
+    NEW --> DNS2[Same stable DNS name; Pod IP may differ]
+```
+
+For stateful applications, stable naming and persistent storage do not replace database replication, consistency, backups, or restore testing. A recreated Pod may reattach the same disk, but Kubernetes does not automatically decide which database replica is primary or repair corrupted application data.
+
 
 ```mermaid
 flowchart TD
@@ -5335,6 +5479,27 @@ kubectl rollout undo deployment/web
 ```
 
 Only changes to the **Pod template** create a new revision; scaling does not. Verify the container name first with `kubectl get deploy web -o jsonpath='{.spec.template.spec.containers[*].name}'`.
+
+### 📖 Explained: a successful API update is not the same as a successful rollout
+
+Changing a Deployment's Pod template creates a new ReplicaSet. The Deployment controller scales new Pods up and old Pods down according to `maxSurge` and `maxUnavailable`, while readiness gates whether a Pod is considered available. If the new Pods never become Ready, the rollout can stall. Inspect the Deployment conditions, ReplicaSet events, Pod events and logs before deciding whether to correct the template or roll back.
+
+```mermaid
+flowchart TD
+    CHANGE[Pod template changed] --> NEWRS[Create new ReplicaSet]
+    NEWRS --> START[Create new Pods]
+    START --> READY{New Pods become Ready?}
+    READY -->|Yes| SHIFT[Scale down old ReplicaSet within strategy limits]
+    SHIFT --> DONE[Rollout completes]
+    READY -->|No| DIAG[Inspect events, probes, image, config and resources]
+    DIAG --> FIX[Fix and continue rollout]
+    DIAG --> ROLLBACK[Roll back if previous revision is safer]
+    FIX --> START
+```
+
+`kubectl rollout undo` is a recovery mechanism, not a diagnosis. Before using it, capture the failed Pod's events/logs and confirm which revision should be restored. A rollback also cannot undo external database migrations or side effects that the new application version already performed.
+
+Zero-downtime tuning example:
 
 Zero-downtime tuning example:
 
@@ -6208,6 +6373,28 @@ readinessProbe:
 ### Why it matters
 
 Without a readiness probe a container counts as ready the moment it starts, so a Service can send requests to an app that is still loading. During a rolling update the Deployment also waits for new Pods to become Ready before removing old ones, so a good readiness probe is what makes an update zero-downtime. A failing readiness probe never restarts the container; it only takes the Pod out of the Service's endpoints until the probe passes again.
+
+### 📖 Explained: choose a probe based on the failure you want Kubernetes to react to
+
+Readiness asks **“should this instance receive traffic now?”** Liveness asks **“is the process so unhealthy that restarting it may help?”** Startup asks **“has initialization completed yet?”** A liveness probe that checks a slow dependency too aggressively can restart healthy-but-busy processes and create an outage. Use readiness for temporary inability to serve traffic, startup for slow initialization, and liveness for a process that cannot recover on its own.
+
+```mermaid
+flowchart TD
+    START[Container starts] --> INIT{Slow initialization?}
+    INIT -->|Yes| STARTUP[Startup probe protects startup window]
+    INIT -->|No| SERVE[Evaluate readiness and liveness]
+    STARTUP -->|Success| SERVE
+    STARTUP -->|Fails threshold| RESTART[Restart container]
+    SERVE --> READY{Readiness succeeds?}
+    READY -->|No| REMOVE[Stop routing normal Service traffic]
+    READY -->|Yes| INCLUDE[Eligible for Service endpoints]
+    SERVE --> LIVE{Liveness fails threshold?}
+    LIVE -->|Yes| RESTART
+    LIVE -->|No| CONTINUE[Keep container running]
+```
+
+Tune `initialDelaySeconds`, `periodSeconds`, `timeoutSeconds` and `failureThreshold` as a group. The detection window is roughly based on repeated probe intervals and failure threshold, but actual timing also includes execution time and kubelet scheduling; do not assume a failure causes an instantaneous restart.
+
 
 ### Readiness gates
 
@@ -7236,6 +7423,23 @@ Check:
 5. Service `targetPort`.
 6. EndpointSlices.
 
+### 📖 Explained: follow the connection from name to listening process
+
+A Service is not an application process and does not make a non-listening port work. The Service selector determines which Pods are represented as endpoints; `port` is the client-facing Service port; `targetPort` is the destination port on the selected Pod. DNS resolves the Service name, then the cluster networking datapath forwards traffic to an eligible endpoint. Debug in that order so you do not change DNS when the real fault is a selector or target port.
+
+```mermaid
+flowchart LR
+    APP[Client Pod] --> DNS[CoreDNS resolves Service name]
+    DNS --> SVC[Service IP and port]
+    SVC --> ES[EndpointSlice: eligible Pod IPs and ports]
+    ES --> POD[Destination Pod IP]
+    POD --> PORT[Application listens on targetPort]
+    PORT --> RESP[Response returns to client]
+```
+
+If the name resolves but no connection is established, check Service/EndpointSlice data, the application listening port, NetworkPolicy and network plugin behavior. If EndpointSlices are empty, check selector labels and readiness before investigating lower-level packet routing.
+
+
 ### Diagram: how a Service finds its Pods
 
 ```mermaid
@@ -7386,6 +7590,31 @@ The mental model:
 - "Multiple policies" mean "the union of all their allow rules across all selecting policies" - still no explicit deny.
 
 That is why a "default-deny-all" policy plus several "allow" policies is the standard pattern: the deny is implicit (anything not explicitly allowed by any allow rule), and individual allows compose across policies.
+
+### 📖 Explained: debug policy failures direction by direction
+
+NetworkPolicy isolation is directional. A request from Pod A to Pod B may require A's egress policy to allow the destination **and** B's ingress policy to allow the source. If DNS is part of the request path, egress restrictions may also need to allow DNS traffic to the cluster DNS service. A policy allowing application traffic does not necessarily allow the name lookup that happens before the connection.
+
+```mermaid
+flowchart TD
+    APP[Client makes request by Service name] --> DNS{Can DNS resolve the name?}
+    DNS -->|No| DNSPOL[Check DNS service health and client egress DNS rules]
+    DNS -->|Yes| ISOE{Is client isolated for egress?}
+    ISOE -->|No| SVC[Service selects endpoint]
+    ISOE -->|Yes| EGRESS{Any egress rule allows destination?}
+    EGRESS -->|No| EFAIL[Check policies selecting source Pod]
+    EGRESS -->|Yes| SVC
+    SVC --> ISOI{Is destination isolated for ingress?}
+    ISOI -->|No| LISTEN{Application listening on targetPort?}
+    ISOI -->|Yes| INGRESS{Any ingress rule allows source?}
+    INGRESS -->|No| IFAIL[Check policies selecting destination Pod]
+    INGRESS -->|Yes| LISTEN
+    LISTEN -->|No| APPFAIL[Check targetPort and application logs]
+    LISTEN -->|Yes| OK[Inspect remaining network path if connection still fails]
+```
+
+When testing, separate **name resolution**, **TCP connection**, and **application response** into three checks. A timeout alone does not identify which layer failed.
+
 
 ### Default deny all ingress and egress
 
@@ -8745,6 +8974,27 @@ Read the event text in `kubectl describe pvc` first; the message is specific. If
 4. **Storage class exists but the provisioner cannot create the volume** -> look for `Failed to provision volume` events with a CSI error. The CSI driver may need credentials, may be unavailable, or may have hit a quota.
 5. **`WaitForFirstConsumer` and no Pod uses the PVC yet** -> the PVC stays `Pending` until a Pod is scheduled. This is normal; create the Pod and the PVC binds.
 
+### 📖 Explained: PVC Pending decision tree
+
+Use the PVC's events as the starting point, then check whether the issue is a missing class, no matching static PV, a provisioning error, or normal delayed binding. Do not delete and recreate a claim as the first response: that may discard useful evidence and can be dangerous if the claim contains data.
+
+```mermaid
+flowchart TD
+    P[PVC Pending] --> EVT[Describe PVC and read Events]
+    EVT --> CLASS{StorageClass correct and available?}
+    CLASS -->|No| FIXCLASS[Select an existing class or correct the name]
+    CLASS -->|Yes| MODE{WaitForFirstConsumer?}
+    MODE -->|Yes, no consumer Pod| CREATEPOD[Create/inspect the consuming Pod and scheduling events]
+    MODE -->|No or consumer exists| PROV{Provisioner or matching PV available?}
+    PROV -->|No| FIXPROV[Check provisioner, CSI driver, capacity and credentials]
+    PROV -->|Yes| MATCH{Capacity, access mode and topology match?}
+    MATCH -->|No| FIXMATCH[Correct size, mode, class or placement constraints]
+    MATCH -->|Yes| EVENTS[Inspect CSI/PV events and controller logs]
+```
+
+A `Pending` claim is a state, not a diagnosis. The event message plus the StorageClass's binding mode usually determines the next useful check.
+
+
 ### Common mistakes
 
 - A pre-created PV with a `storageClassName` of (say) `manual` and a PVC with no `storageClassName` on a cluster that has a default StorageClass. The PVC gets the default class at admission, and the PV is not a match. Fix: set `storageClassName: manual` on the PVC, or `""` on the PVC to opt out of dynamic provisioning.
@@ -9034,6 +9284,27 @@ STORAGE  : PV <-> PVC <- Pod ;  StorageClass -> dynamic provisioning
 NETWORK  : Pod -> Service -> Ingress ;  NetworkPolicy controls allowed traffic
 SECURITY : ServiceAccount -> RBAC ;  SecurityContext ;  admission (PSA, quota) ;  CRD -> CR -> Operator
 ```
+
+### End-to-end request path: from manifest to a healthy response
+
+This diagram ties together several chapters. Use it as a last-pass memory aid: deployment creates Pods, probes determine readiness, Service discovery identifies eligible endpoints, and NetworkPolicy can permit or block the connection. Troubleshooting should inspect each boundary rather than repeatedly restarting the Pod.
+
+```mermaid
+flowchart TD
+    MAN[Manifest or Helm/Kustomize output] --> API[API server accepts resource]
+    API --> CTRL[Workload controller reconciles desired replicas]
+    CTRL --> SCHED[Scheduler assigns Pod to node]
+    SCHED --> KUBELET[Kubelet and runtime start container]
+    KUBELET --> PROBE{Readiness probe succeeds?}
+    PROBE -->|No| INVESTIGATE[Inspect events, logs, config and resources]
+    PROBE -->|Yes| ENDPOINTS[Service endpoints become eligible]
+    CLIENT[Client resolves Service DNS] --> SVC[Service networking]
+    SVC --> POLICY{NetworkPolicy permits both directions?}
+    POLICY -->|No| NP[Inspect ingress and egress policy]
+    POLICY -->|Yes| ENDPOINTS
+    ENDPOINTS --> APP[Application receives request]
+```
+
 
 ## Last-minute checklist
 
