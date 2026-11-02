@@ -1,4 +1,3 @@
-
 name: Deploy CKAD Jekyll Website
 
 on:
@@ -14,32 +13,91 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: github-pages
   cancel-in-progress: true
 
 jobs:
+
   build:
+
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. Get the latest repository contents
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup GitHub Pages
+      # 2. Display the source version
+      - name: Check source Markdown
+        run: |
+          echo "Current commit:"
+          git rev-parse HEAD
+
+          echo "Markdown file information:"
+          wc -l -c CKAD_notes.md
+
+          echo "Checking all chapter headings:"
+          grep -nE '^# (1|2|3|4|5|6|7|8|9|10)\.' CKAD_notes.md
+
+          echo "Checking final revision sections:"
+          grep -nF "First 60 seconds of every task" CKAD_notes.md
+          grep -nF "Last-minute checklist" CKAD_notes.md
+
+      # 3. Configure GitHub Pages
+      - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
+      # 4. Build the Jekyll website
       - name: Build Jekyll website
         uses: actions/jekyll-build-pages@v1
         with:
-          source: .
+          source: ./
           destination: ./_site
 
-      - name: Upload website artifact
+      # 5. Verify the generated HTML
+      - name: Verify complete CKAD HTML
+        run: |
+          set -euo pipefail
+
+          echo "Checking generated HTML file..."
+
+          test -s _site/CKAD_notes.html
+
+          echo "Generated file size:"
+          wc -c _site/CKAD_notes.html
+
+          echo "Checking final chapter..."
+
+          grep -Fq "10. Final CKAD Revision Sheet" \
+            _site/CKAD_notes.html
+
+          echo "Checking first 60 seconds section..."
+
+          grep -Fq "First 60 seconds of every task" \
+            _site/CKAD_notes.html
+
+          echo "Checking final checklist..."
+
+          grep -Fq "Last-minute checklist" \
+            _site/CKAD_notes.html
+
+          echo "Checking Chapter 9..."
+
+          grep -Fq "9. Troubleshooting" \
+            _site/CKAD_notes.html
+
+          echo "SUCCESS: All final CKAD sections exist in generated HTML."
+
+      # 6. Upload generated website
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./_site
 
+  # 7. Publish website
   deploy:
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -49,6 +107,7 @@ jobs:
     needs: build
 
     steps:
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
