@@ -1,3 +1,7 @@
+---
+layout: default
+title: CKAD Quick-Read Notes
+---
 # CKAD Quick-Read Notes
 
 > **Revision note:** This edition improves explanations in the existing topics in place. The original chapter order and practice tasks are preserved; the main changes clarify cause-and-effect, controller behavior, and how to interpret verification output.
