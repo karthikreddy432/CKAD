@@ -245,11 +245,11 @@ flowchart TB
         C1["application container"]
         C2["sidecar container"]
         V[("declared shared volume")]
-        C1 <-->|"localhost:port"| C2
-        C1 ---|mountPath A| V
-        C2 ---|mountPath B| V
+        C1 ---|"localhost:port"| C2
+        C1 ---|"mountPath A"| V
+        C2 ---|"mountPath B"| V
     end
-    OUT["Other Pods / Service"] -->|"Pod IP + target port"| POD
+    OUT["Other Pods / Service"] -->|"Pod IP + target port"| C1
 ```
 
 Containers in one Pod share the same network namespace, so they reach one another through `localhost` and must avoid binding the same port. A declared volume is shared only with containers that mount it. Other Pods communicate with the Pod through its IP and a port, but that IP is not a durable service address: replacing a Pod normally gives the replacement a new UID and can give it a new IP. Use a Service or the appropriate StatefulSet DNS identity for stable discovery.
@@ -1480,17 +1480,17 @@ A scheduling decision is the intersection of constraints, not a single rule. The
 
 ```mermaid
 flowchart TD
-    S[Scheduler picks a Pod] --> F1{Node has enough<br/>free CPU/memory<br/>for requests?}
-    F1 -->|no| SKIP1[Skip node]
-    F1 -->|yes| F2{Pod tolerates<br/>all NoSchedule taints<br/>on the node?}
-    F2 -->|no| SKIP2[Skip node]
-    F2 -->|yes| F3{nodeSelector and<br/>required nodeAffinity match?}
-    F3 -->|no| SKIP3[Skip node]
-    F3 -->|yes| F4{Required pod (anti)affinity<br/>satisfied?}
-    F4 -->|no| SKIP4[Skip node]
-    F4 -->|yes| F5{Topology spread<br/>within maxSkew?}
-    F5 -->|no - DoNotSchedule| SKIP5[Stay Pending]
-    F5 -->|yes / soft| OK[Bind Pod to this node]
+    S["Scheduler picks a Pod"] --> F1{"Node has enough<br/>free CPU/memory<br/>for requests?"}
+    F1 -->|"no"| SKIP1["Skip node"]
+    F1 -->|"yes"| F2{"Pod tolerates<br/>all NoSchedule taints<br/>on the node?"}
+    F2 -->|"no"| SKIP2["Skip node"]
+    F2 -->|"yes"| F3{"nodeSelector and<br/>required nodeAffinity match?"}
+    F3 -->|"no"| SKIP3["Skip node"]
+    F3 -->|"yes"| F4{"Required pod (anti)affinity<br/>satisfied?"}
+    F4 -->|"no"| SKIP4["Skip node"]
+    F4 -->|"yes"| F5{"Topology spread<br/>within maxSkew?"}
+    F5 -->|"no - DoNotSchedule"| SKIP5["Stay Pending"]
+    F5 -->|"yes / soft"| OK["Bind Pod to this node"]
 ```
 
 If a Pod is `Pending` with `FailedScheduling` events, walk this diagram in reverse: read the event message to find which filter rejected the node. `taints`, `nodeAffinity`, `Insufficient cpu`, and `unbound PVC` are the four messages you will see most.
@@ -2169,14 +2169,13 @@ Put containers together only when they need to **share a lifecycle** (be schedul
 All containers in a Pod are scheduled to the **same node** and share the Pod IP.
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph POD["Pod - one IP, one lifecycle, one node"]
-        direction TB
         IC["Init container(s) - run to completion, in order"]
         APP["Main container(s)"]
         SC["Sidecar / Ambassador / Adapter - long-running alongside"]
-        IC -->|success| APP
-        SC -.->|shared localhost / emptyDir| APP
+        IC -->|"success"| APP
+        SC -.->|"shared localhost / emptyDir"| APP
     end
 ```
 
@@ -2364,10 +2363,11 @@ Typical uses:
 
 ```mermaid
 flowchart LR
-    S(["Pod scheduled"]) --> I1["init container 1 (runs to completion)"]
-    I1 --> I2["init container 2 (runs to completion)"]
+    S(["Pod scheduled"]) --> I1["init container 1 - runs to completion"]
+    I1 --> I2["init container 2 - runs to completion"]
     I2 --> A["app containers start together"]
-    I1 -. "fails: restarted" .-> I1
+    I1 -.->|"fails"| RT["container restarted"]
+    RT -.-> I1
 ```
 
 Init containers run one at a time, in order. Each must exit successfully before the next starts; the app containers start only after the last one finishes.
@@ -2599,7 +2599,7 @@ They should not try to bind the same network port.
 ```mermaid
 flowchart LR
     subgraph POD["Pod: one IP, one network namespace"]
-        A["container A listens on 8080"] <-->|localhost:8080| B["container B"]
+        A["container A listens on 8080"] ---|"localhost:8080"| B["container B"]
     end
     OUT["other Pods / Services"] -->|"Pod IP:8080"| A
 ```
@@ -4096,13 +4096,13 @@ RBAC expresses permissions with Roles/ClusterRoles and attaches them to identiti
 
 ```mermaid
 flowchart LR
-    REQ["API request: (user, verb, resource, namespace)"] --> LOOK[Authorization: collect all rules bound to the user]
-    LOOK --> R1[Role bindings in the namespace]
+    REQ["API request: (user, verb, resource, namespace)"] --> LOOK["Authorization: collect all rules bound to the user"]
+    LOOK --> R1["Role bindings in the namespace"]
     LOOK --> R2["ClusterRole bindings (role-wide or namespace-wide)"]
-    R1 --> UNION{Any rule allows this (verb, resource, namespace)?}
+    R1 --> UNION{"Any rule allows this (verb, resource, namespace)?"}
     R2 --> UNION
-    UNION -->|yes| OK[Allowed]
-    UNION -->|no| NO[403 Forbidden]
+    UNION -->|"yes"| OK["Allowed"]
+    UNION -->|"no"| NO["403 Forbidden"]
 ```
 
 RBAC is additive: the API server considers the rules granted through all applicable bindings, and a request is allowed if at least one rule matches the identity, verb, API group, resource/subresource, namespace, and optional resource name. There are no explicit deny rules that cancel another allow. When permission is missing, verify the exact API group and plural resource, the subresource (for example `pods/log`), the verb (`get` versus `create`), the binding scope, and the ServiceAccount namespace.
@@ -5477,7 +5477,7 @@ flowchart TD
     subgraph HS["Headless Service db - clusterIP: None"]
         DNS["DNS: db-0.db.dev.svc.cluster.local<br/>db-1.db.dev.svc.cluster.local<br/>db-2.db.dev.svc.cluster.local"]
     end
-    HS -.->|"returns A records per Pod"| CLIENT["Client resolves db-0.db, db-1.db, db-2.db explicitly"]
+    DNS -.->|"returns A records per Pod"| CLIENT["Client resolves db-0.db, db-1.db, db-2.db explicitly"]
     CLIENT --> P0["Pod db-0"] --> PVC0["PVC data-db-0"] --> PV0[PV] --> S0[(Storage)]
     CLIENT --> P1["Pod db-1"] --> PVC1["PVC data-db-1"] --> PV1[PV] --> S1[(Storage)]
     CLIENT --> P2["Pod db-2"] --> PVC2["PVC data-db-2"] --> PV2[PV] --> S2[(Storage)]
@@ -5723,23 +5723,19 @@ kubectl get pvc                    # data-db-0, data-db-1, data-db-2
 ## 6.1 Deployment strategies at a glance
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph CN["Canary"]
-        direction TB
         s2["Service selector: app=web"] --> st["9 x stable v1"]
         s2 --> ca["1 x canary v2"]
     end
     subgraph BG["Blue/Green"]
-        direction TB
         s1["Service selector: version=blue"] --> b1["3 x blue v1"]
         s1 -.->|"patch selector: version=green"| g1["3 x green v2"]
     end
     subgraph RC["Recreate"]
-        direction TB
         c1["3 x v1"] --> c2["0 Pods (downtime)"] --> c3["3 x v2"]
     end
     subgraph RU["RollingUpdate"]
-        direction TB
         r1["3 x v1"] --> r2["2 x v1 + 1 x v2"] --> r3["1 x v1 + 2 x v2"] --> r4["3 x v2"]
     end
 ```
@@ -5812,7 +5808,7 @@ flowchart LR
     subgraph OLD["Old ReplicaSet v1"]
         O1[v1] --- O2[v1] --- O3[v1]
     end
-    OLD -->|scale up by maxSurge| MID["Mix: 3 x v1 + 1 x v2 (maxSurge=1, maxUnavailable=0)"]
+    O3 -->|"scale up by maxSurge"| MID["Mix: 3 x v1 + 1 x v2 (maxSurge=1, maxUnavailable=0)"]
     MID --> MID2["Mix: 2 x v1 + 2 x v2"]
     MID2 --> MID3["Mix: 1 x v1 + 3 x v2"]
     MID3 --> NEW["New ReplicaSet v2 (3 pods)"]
@@ -7030,7 +7026,8 @@ This gives roughly 300 seconds of startup checks before failure, assuming the de
 ```mermaid
 flowchart TD
     S(["Container starts"]) --> SP{"startup probe passes?"}
-    SP -->|"not yet, within threshold"| SP
+    SP -->|"not yet, within threshold"| WAIT["retry after periodSeconds"]
+    WAIT --> SP
     SP -->|"threshold exceeded"| RST["container restarted"]
     SP -->|"yes"| RUN["liveness and readiness begin"]
     RUN --> LP{"liveness fails?"}
@@ -8197,17 +8194,17 @@ A NetworkPolicy declares which ingress and/or egress connections are allowed for
 
 ```mermaid
 flowchart LR
-    SRC["Source Pod"] --> E{ "Source egress isolated?" }
-    E -->|no| EOK["Egress allowed"]
-    E -->|yes| ER{"Matching egress rule?"}
-    ER -->|yes| EOK
-    ER -->|no| BLOCK1["Connection blocked"]
+    SRC["Source Pod"] --> E{"Source egress isolated?"}
+    E -->|"no"| EOK["Egress allowed"]
+    E -->|"yes"| ER{"Matching egress rule?"}
+    ER -->|"yes"| EOK
+    ER -->|"no"| BLOCK1["Connection blocked"]
     EOK --> DST["Destination Pod"]
     DST --> I{"Destination ingress isolated?"}
-    I -->|no| IOK["Ingress allowed"]
-    I -->|yes| IR{"Matching ingress rule?"}
-    IR -->|yes| IOK
-    IR -->|no| BLOCK2["Connection blocked"]
+    I -->|"no"| IOK["Ingress allowed"]
+    I -->|"yes"| IR{"Matching ingress rule?"}
+    IR -->|"yes"| IOK
+    IR -->|"no"| BLOCK2["Connection blocked"]
 ```
 
 Rules to keep in mind:
@@ -8221,13 +8218,13 @@ Rules to keep in mind:
 
 ```mermaid
 flowchart TD
-    P[Pod about to send/receive traffic] --> Q{Any NetworkPolicy selects this Pod?}
-    Q -->|no, in this direction| OK[Allowed]
-    Q -->|yes, but no rule allows this traffic| DEN[Denied - timeout]
-    Q -->|yes, and at least one rule allows it| ALLOW[Allowed]
+    P["Pod about to send/receive traffic"] --> Q{"Any NetworkPolicy selects this Pod?"}
+    Q -->|"no, in this direction"| OK["Allowed"]
+    Q -->|"yes, but no rule allows this traffic"| DEN["Denied - timeout"]
+    Q -->|"yes, and at least one rule allows it"| ALLOW["Allowed"]
     subgraph ADD["Additive: any matching allow wins"]
-        P1[Policy A allows frontend in ns X] --> ALLOW
-        P2[Policy B allows 10.0.0.0/16] --> ALLOW
+        P1["Policy A allows frontend in ns X"] --> ALLOW
+        P2["Policy B allows 10.0.0.0/16"] --> ALLOW
     end
 ```
 
@@ -8310,15 +8307,13 @@ from:
 ```
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph OR["OR: two separate from items"]
-        direction TB
         b1["frontend Pod in the policy's own namespace"] --> b1r[allowed]
         b2["any Pod in a team=platform namespace"] --> b2r[allowed]
         b3["frontend Pod in another namespace"] --> b3r[denied]
     end
     subgraph AND["AND: one from item with both selectors"]
-        direction TB
         a1["frontend Pod in a team=platform namespace"] --> a1r[allowed]
         a2["frontend Pod in the policy's own namespace"] --> a2r[denied]
         a3["other Pod in a team=platform namespace"] --> a3r[denied]
