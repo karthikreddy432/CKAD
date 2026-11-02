@@ -1,0 +1,57 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page.title | default: "CKAD Notes" }}</title>
+  <style>
+    body {
+      max-width: 1100px;
+      margin: 30px auto;
+      padding: 0 20px;
+      font-family: Arial, sans-serif;
+      line-height: 1.7;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 16px;
+      background: #f5f5f5;
+      border-radius: 6px;
+    }
+    .mermaid {
+      overflow-x: auto;
+      text-align: center;
+      margin: 24px 0;
+    }
+    img, svg {
+      max-width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+{{ content }}
+
+<script type="module">
+  import mermaid from
+    'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  document.querySelectorAll('pre code.language-mermaid').forEach(code => {
+    const diagram = document.createElement('div');
+    diagram.className = 'mermaid';
+    diagram.textContent = code.textContent;
+    code.closest('pre').replaceWith(diagram);
+  });
+
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'default',
+    securityLevel: 'strict'
+  });
+
+  await mermaid.run();
+</script>
+
+</body>
+</html>
