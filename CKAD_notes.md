@@ -17,7 +17,7 @@
 
 ## Scope
 
-As checked on **29 October 2026**, the Linux Foundation CKAD page says the exam is based on Kubernetes **v1.35**. The exam environment is also described as aligning with the most recent minor version within roughly 4–8 weeks of its release, so check the official [CKAD certification page](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/) and candidate handbook again shortly before your exam. Treat the published exam-environment information as authoritative for version-sensitive tasks; your local cluster may run a different version.
+As checked on **29 October 2026**, the Linux Foundation certification FAQ lists the CKA and CKAD environments on Kubernetes **v1.37** (CKS is still **v1.35**). Duration (2 hours) and the CKAD pass mark (66%) are unchanged. Some third-party sites still show v1.35, so trust the FAQ and handbook. The exam environment is also described as aligning with the most recent minor version within roughly 4–8 weeks of its release, so check the official [CKAD certification page](https://training.linuxfoundation.org/certification/certified-kubernetes-application-developer-ckad/) and candidate handbook again shortly before your exam. Treat the published exam-environment information as authoritative for version-sensitive tasks; your local cluster may run a different version.
 
 | Domain | Weight | Where in these notes |
 |---|---:|---|
@@ -60,6 +60,8 @@ These four habits can save time in a 2-hour exam, but the amount depends on your
 2. Generate YAML with `kubectl ... --dry-run=client -o yaml` and edit the few fields that matter.
 3. After every `apply`, **verify** with `get` / `describe` / `logs` / `auth can-i`; do not move on assuming it worked.
 4. Use `kubectl explain <resource>.<field>` for any field you cannot type from memory.
+
+**Before exam day:** re-check the Kubernetes version line in the [Linux Foundation FAQ](https://docs.linuxfoundation.org/tc-docs/certification/faq-cka-ckad-cks) (see Scope), then drill only the traps that show up in live tasks: namespace/context, `targetPort`, missing CPU requests on an HPA, `policyTypes` plus DNS egress, and `apply` then `describe` events. Treat Chapter 10 as the part you can recite; do not memorize the long chapters.
 
 ---
 
@@ -108,6 +110,57 @@ flowchart TD
 ```
 
 The API server is the supported coordination path for Kubernetes API objects, and it is the component that reads from and writes to etcd. Controllers and node components normally watch or update objects through the API server rather than writing directly to etcd. This central API path lets Kubernetes apply authentication, authorization, admission, validation, and consistent object semantics.
+
+### The core idea: desired state and control loops
+
+Kubernetes is built on one idea. You do not tell it *what to do*; you tell it *what you want to be true*, and software keeps working until it is.
+
+- Everything is an **object** stored through the API server (a Pod, a Deployment, a Service, a Node). Every object has a `spec`, which is **what you want** and is written by you, and a `status`, which is **what is observed** and is written by controllers and kubelets.
+- A **controller** is a loop that never stops: *observe* the current state, *compare* it with `spec`, *act* to close the gap, repeat. A thermostat works the same way: you set 21 degrees, and it heats or cools until the room matches, however the room got cold.
+- Controllers react to the **current difference**, not to a one-off command. If a controller is restarted and misses an event, it still sees "3 wanted, 2 exist" on its next pass and fixes it. This is why Kubernetes recovers from so many failures without special handling.
+- Controllers do not call each other. They only **read and write objects through the API server**. One controller's output (a new object) is the next controller's input. That is why the system is easy to extend and why you can see half-finished work, such as a Pod that exists but is not yet placed on a node.
+
+### Who watches what, and who writes what
+
+| Component | Watches | Writes |
+|---|---|---|
+| Deployment controller | Deployments, ReplicaSets | ReplicaSets |
+| ReplicaSet controller | ReplicaSets, Pods | Pods (creates or deletes) |
+| kube-scheduler | Pods that have no node yet | The node choice for each Pod (a "binding") |
+| kubelet | Pods bound to its own node | Pod status; starts containers through the runtime |
+| EndpointSlice controller | Services, Pods | EndpointSlices (the list of ready Pod IPs) |
+| kube-proxy | Services, EndpointSlices | Forwarding rules on its own node |
+| Node lifecycle controller | Node heartbeats | Taints on unhealthy Nodes, Pod evictions |
+
+### Walk-through: from `kubectl apply` to a running Pod
+
+1. `kubectl apply` sends the Deployment to the **API server**. It authenticates you, checks RBAC, runs admission (which may change or reject the object), validates the schema, and stores the object in etcd.
+2. The **Deployment controller** sees a Deployment with no ReplicaSet and creates one, marked as owned by the Deployment.
+3. The **ReplicaSet controller** sees "3 wanted, 0 exist" and creates 3 Pod objects. They exist now but have no node, so they show `Pending`.
+4. The **scheduler** sees Pods with no node, picks a suitable node for each, and records the choice.
+5. The **kubelet** on that node sees a Pod assigned to it, pulls the image, prepares volumes and networking, starts the containers through the runtime, and reports status back (`ContainerCreating`, then `Running`).
+6. Once the Pod passes its readiness check, the **EndpointSlice controller** adds its IP to the Service's endpoints, and **kube-proxy** on every node updates its rules.
+
+Each step is a separate loop with its own failure mode, which is why `Pending`, `ContainerCreating` and `Running but not Ready` are different problems with different fixes (Chapter 9).
+
+### Walk-through: what happens when a node dies
+
+1. The kubelet stops renewing its heartbeat (a `Lease` object in the `kube-node-lease` namespace).
+2. After a grace period (about 40 seconds by default) the **node lifecycle controller** marks the Node's `Ready` condition `Unknown` and adds the taint `node.kubernetes.io/unreachable:NoExecute`.
+3. Pods get a default toleration for that taint with `tolerationSeconds: 300`, so they are left alone for about 5 minutes (in case the node comes back) and are then evicted.
+4. The **ReplicaSet controller** now sees fewer Pods than wanted and creates replacements, and the **scheduler** places them on healthy nodes.
+
+"Self-healing" is nothing more than these loops closing gaps, at a pace of minutes by default. A bare Pod with no controller is **not** recreated, which is the main reason to run workloads under a Deployment or similar controller.
+
+### The glue between objects
+
+Objects are connected by three simple mechanisms, and most debugging is checking one of them:
+
+| Mechanism | Used for | Example |
+|---|---|---|
+| **Labels and selectors** | Loose, query-based links | A Service finds its Pods; a ReplicaSet counts its Pods |
+| **Owner references** | Parent and child ownership | Deployment -> ReplicaSet -> Pod; deleting the parent deletes the children |
+| **Names** | Direct references | A Pod uses `configMapRef: name: app-config`; a PVC names its StorageClass |
 
 ### ⚡ Remember
 
@@ -197,6 +250,75 @@ flowchart TB
 
 Containers in one Pod share the same network namespace, so they reach one another through `localhost` and must avoid binding the same port. A declared volume is shared only with containers that mount it. Other Pods communicate with the Pod through its IP and a port, but that IP is not a durable service address: replacing a Pod normally gives the replacement a new UID and can give it a new IP. Use a Service or the appropriate StatefulSet DNS identity for stable discovery.
 
+### Why a Pod, and not just a container?
+
+Some programs must run together: a web server and a log shipper that reads its files, or an app and a proxy that talks to it over `localhost`. Kubernetes needs a unit that is **placed on one node as a whole** and gives its containers a shared environment. That unit is the Pod.
+
+What the containers in a Pod share, and what they keep separate:
+
+| Shared | Separate |
+|---|---|
+| The network namespace: one Pod IP, one `localhost`, one port space | The container filesystem (each image brings its own) |
+| Volumes that are declared on the Pod and mounted into the containers | CPU and memory limits (set per container) |
+| Optionally the process namespace (`shareProcessNamespace: true`) | Environment variables and the command |
+
+Under the hood, the runtime first creates a **Pod sandbox** that owns the network namespace (older material calls this the `pause` container). The application containers are then started inside that sandbox. That is why the Pod IP survives a container restart, but a **new Pod** gets a new IP.
+
+### How Pods are networked
+
+Kubernetes sets one rule for networking: **every Pod gets its own IP address, and every Pod can reach every other Pod directly, without NAT**, whatever node it runs on. A **CNI plugin** installed in the cluster builds that network. Two consequences follow:
+
+- Two Pods can both listen on port 80 with no conflict, because each has its own IP. Two *containers in the same Pod* cannot, because they share one port space.
+- Pod IPs come and go with the Pods, so nothing should depend on a specific one. This is the problem that **Services** (§8.2) solve.
+
+### Pods are disposable
+
+A Pod is not repaired; it is replaced. If its node fails or you delete it, it is gone, and only a controller that owns it brings a new one (with a new name and IP). Treat a Pod as a short-lived instance of a template, and keep durable data in volumes and durable identity in Services.
+
+### Pod phase vs the STATUS column
+
+A Pod has a small, fixed set of **phases**: `Pending` (accepted, not all containers started), `Running`, `Succeeded` (all containers exited 0 and will not restart), `Failed`, and `Unknown`. The `STATUS` column of `kubectl get pods` is richer: it shows a derived reason such as `CrashLoopBackOff`, `ImagePullBackOff`, `Init:0/1`, `Terminating` or `Completed`. These are not phases. A crash-looping Pod is usually still in phase `Running`; a finished Job Pod shows `Completed` but is phase `Succeeded`.
+
+```bash
+kubectl get pod web -o jsonpath='{.status.phase}{"\n"}'
+kubectl get pod web -o jsonpath='{.status.containerStatuses[*].state}{"\n"}'
+```
+
+### Restarts: what the kubelet does
+
+`spec.restartPolicy` applies to **all** containers in the Pod and defaults to `Always`. The other values are `OnFailure` and `Never`. The kubelet restarts the failed *container* on the same node, with an exponential back-off (the `CrashLoopBackOff` wait, capped at five minutes). A restart is not a reschedule: the Pod keeps its node and its IP. If the whole Pod is gone, only a controller (Deployment, Job and so on) creates a replacement.
+
+### How a Pod shuts down
+
+1. The Pod is marked `Terminating` and removed from Service endpoints.
+2. A `preStop` hook, if defined, runs.
+3. The kubelet sends `SIGTERM` to each container's main process (PID 1).
+4. After `terminationGracePeriodSeconds` (default `30`), anything still running gets `SIGKILL`.
+
+A process that ignores `SIGTERM` (or a shell wrapper that does not pass it on) makes every deletion take the full 30 seconds. `kubectl delete pod web --grace-period=0 --force` skips the wait; use it only on a stuck test Pod, because it does not guarantee the containers have actually stopped.
+
+### What can be edited on a live Pod
+
+Almost nothing. In-place edits are allowed for container `image`, `activeDeadlineSeconds` and **adding** tolerations. Anything else (env, command, ports, volumes, labels you want in a selector) is rejected by `kubectl edit` or `apply`. Either let a controller roll the change out, or recreate the Pod:
+
+```bash
+kubectl replace --force -f pod.yaml        # delete + create from the edited file
+```
+
+### Worked example: reading a Pod at a glance
+
+```text
+$ kubectl get pod
+NAME    READY   STATUS             RESTARTS      AGE
+api     0/1     CrashLoopBackOff   5 (40s ago)   4m
+job-1   0/1     Completed          0             2m
+
+$ kubectl get pod api -o jsonpath='{.status.phase}'
+Running
+```
+
+Reading it: `api` is in phase `Running` even though it is failing; `READY 0/1` plus `RESTARTS 5` says the container keeps exiting, so go to `kubectl logs api --previous` and `describe` (§7.7). `job-1` is healthy: `Completed` means its containers exited 0.
+
 ### ⚡ Remember
 
 **Pod = shared execution boundary for one or more tightly coupled containers.**
@@ -244,6 +366,37 @@ apiVersion: networking.k8s.io/v1
 ```
 
 Do **not** write `core/v1` in a normal manifest.
+
+### Finding the right `apiVersion` and `kind`
+
+Never guess; the cluster can tell you, and this works on the exam with no extra docs:
+
+```bash
+kubectl api-resources | grep -i -E 'NAME|deployment|networkpolicy|cronjob'
+kubectl explain deployment | head -5                  # shows GROUP/VERSION
+kubectl explain deployment.spec.strategy              # drill into any field path
+```
+
+`api-resources` prints `APIVERSION` and `NAMESPACED` for every kind, so it also answers "does this kind need `-n`?".
+
+### Rules that make a manifest valid
+
+- Every manifest needs `apiVersion`, `kind` and `metadata.name`. `spec` is required for almost everything (ConfigMap and Secret use `data`; RBAC objects use `rules`/`subjects`).
+- Set `metadata.namespace` in the file only when the task names a namespace, and make sure it matches the `-n` you apply with; a mismatch is an error.
+- A list item starts with `-`; fields of that item are indented under it. A missing or extra indent is the most common reason `apply` fails.
+- One file can hold several objects separated by a line containing only `---`.
+- Quote values that YAML would reinterpret: `"true"`, `"8080"` in env values, versions like `"1.20"`, and anything starting with `*`, `&` or `{`.
+- `metadata.generateName: web-` asks the API server to append a random suffix; it only works with `kubectl create`, not `apply`.
+
+### Check before you commit
+
+```bash
+kubectl apply -f x.yaml --dry-run=client     # syntax and local validation only
+kubectl apply -f x.yaml --dry-run=server     # the API server validates, nothing is stored
+kubectl diff -f x.yaml                       # what would change in the live object
+```
+
+`--dry-run=client` does not know about admission rules, quotas or CRDs; `--dry-run=server` does. After the real `apply`, read the object back with `kubectl get <kind> <name> -o yaml` to see the defaults the server filled in.
 
 ### ⚡ Remember
 
@@ -498,8 +651,35 @@ The Deployment API hides ReplicaSets, but a Deployment's *rollout* is implemente
 ### Common mistakes
 
 - The ReplicaSet's `spec.selector` is **immutable**. You cannot add a label to widen the match; you have to delete and recreate the ReplicaSet (and the Pods it owns).
-- A Deployment's `spec.selector` must match its Pod template's labels, but the *ReplicaSet's* selector is also fixed once the Deployment is created. Changing a Pod template label in a Deployment is rejected by `kubectl apply` for the same reason.
+- A Deployment's `spec.selector` must match its Pod template's labels, but the *ReplicaSet's* selector is also fixed once the Deployment is created. A Deployment's template labels must always still satisfy its selector, so `kubectl apply` rejects a change that breaks the match. Adding an extra template label that the selector does not use is fine.
 - A manually created Pod that happens to carry the ReplicaSet's labels is **adopted**: when the ReplicaSet sees fewer than `replicas` matching Pods, it counts the orphan and does not create a replacement until one of its own Pods dies. This is the right behavior, but it can look like "the ReplicaSet did not honor `replicas`."
+
+### Ownership and adoption in practice
+
+Every Pod made by a ReplicaSet carries an `ownerReferences` entry naming it. That link is what lets deletion cascade and what the controller uses to tell "my Pods" from strays:
+
+```bash
+kubectl get pod <pod> -o jsonpath='{.metadata.ownerReferences[*].kind}/{.metadata.ownerReferences[*].name}{"\n"}'
+```
+
+A Pod with matching labels and **no** controller owner is adopted. That can destroy your test Pod:
+
+```text
+$ kubectl get rs web-rs          # DESIRED 3, CURRENT 3
+$ kubectl run extra --image=nginx:1.27 --labels=app=web
+$ kubectl get pods -l app=web    # briefly 4 Pods, then one is terminated
+```
+
+The ReplicaSet adopts `extra`, sees 4 Pods for `replicas: 3`, and deletes one; which one it picks is not something to rely on. Rule of thumb: never give a hand-made Pod the labels of a live workload. Use a different label, or delete the controller first.
+
+Selector and template must agree, or the ReplicaSet creates Pods it does not then count:
+
+```text
+spec.selector.matchLabels: app=web      template labels: app=webapp
+-> API server rejects the object (selector does not match template labels)
+```
+
+`kubectl delete rs web-rs --cascade=orphan` removes the ReplicaSet but leaves its Pods running as orphans; a new ReplicaSet with a matching selector adopts them again.
 
 ### ⚡ Remember
 
@@ -560,6 +740,34 @@ The Deployment `selector.matchLabels` must match `template.metadata.labels`, and
 - Scaling a Deployment (`--replicas=N`) does **not** create a new revision. Only changes to the Pod template do. `kubectl rollout history` will not show scale changes.
 - A stalled rollout can leave both the old and new ReplicaSets present. Inspect `kubectl describe deployment`, the ReplicaSets, Pod events, and readiness before deciding what to do. `kubectl rollout undo deployment/web` changes the Pod template back to an earlier revision and lets the Deployment controller scale the ReplicaSets accordingly; it is not simply a command to delete the new ReplicaSet.
 - `kubectl rollout restart` updates a restart annotation on the Pod template, which triggers a new rollout/revision even though the image and application settings need not change. It is useful when environment variables were read from a changed ConfigMap/Secret at container start; mounted ConfigMap/Secret files have different update behavior.
+
+### Reading the Deployment output
+
+```text
+$ kubectl get deploy,rs,pods -l app=web
+NAME                  READY   UP-TO-DATE   AVAILABLE
+deployment.apps/web   3/3     1            3
+
+NAME                            DESIRED   CURRENT   READY
+replicaset.apps/web-7d9f8c5b4   1         1         0
+replicaset.apps/web-5c6d7b9f8   3         3         3
+
+NAME                      READY   STATUS             
+pod/web-7d9f8c5b4-x2k9p   0/1     ErrImagePull       
+pod/web-5c6d7b9f8-abcde   1/1     Running            (and two more)
+```
+
+| Column | Meaning |
+|---|---|
+| `READY` | Ready replicas / desired replicas |
+| `UP-TO-DATE` | Replicas already on the **latest Pod template** |
+| `AVAILABLE` | Replicas ready for at least `minReadySeconds` (default `0`, so usually the same as Ready) |
+
+Names tell you the ownership chain: **Pod `web-7d9f8c5b4-x2k9p` = Deployment `web` + ReplicaSet hash `7d9f8c5b4` + random suffix**. The hash identifies the Pod template, so Pods with different hashes are on different revisions.
+
+Reading the example: `UP-TO-DATE 1` with `READY 3/3` means a rollout is in flight: one new-template Pod exists but is not ready (`ErrImagePull`), while three old Pods keep serving. The Deployment is healthy for users but stuck for the rollout. Fix the image reference or `kubectl rollout undo` (§6.4).
+
+`minReadySeconds` makes a new Pod count as available only after it has been Ready for that long, which slows a rollout on purpose and catches Pods that become Ready and then crash straight away.
 
 ### Diagram: Deployment, ReplicaSets and Pods
 
@@ -673,6 +881,38 @@ Then change `kind` to `DaemonSet`, remove Deployment-only fields such as `replic
 **Deployment -> desired number of replicas.**  
 **DaemonSet -> workload on eligible nodes.**
 
+### Reading `kubectl get ds`
+
+```text
+$ kubectl get nodes
+NAME            STATUS   ROLES           AGE
+cp-1            Ready    control-plane   20d
+worker-1        Ready    <none>          20d
+worker-2        Ready    <none>          20d
+
+$ kubectl get ds node-agent
+NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR
+node-agent   2         2         2       2            2           <none>
+```
+
+`DESIRED` is the number of nodes the DaemonSet is **eligible** for, not the number of nodes in the cluster. Here 3 nodes exist but `DESIRED` is 2: the control-plane node carries a `NoSchedule` taint and the Pod template has no matching toleration. Adding the toleration (see above) raises `DESIRED` to 3 and a Pod appears on `cp-1`. The same check applies to `nodeSelector` and node affinity: if `DESIRED` is smaller than you expect, list the node taints and labels before touching anything else.
+
+### Rules worth remembering
+
+- There is no `replicas` field. The node count decides the Pod count: a node that joins gets a Pod automatically, and a node that leaves loses it.
+- The DaemonSet controller adds tolerations for node-condition taints on its own (for example `not-ready`, `unreachable`, `disk-pressure`), so agent Pods stay on a struggling node. Your own taints, such as the control-plane one, are **not** tolerated unless you add a toleration.
+- `spec.updateStrategy` defaults to `RollingUpdate` with `maxUnavailable: 1` (one node's Pod is replaced at a time). `OnDelete` updates a Pod only when you delete it by hand.
+- Rollout commands work the same as for Deployments: `kubectl rollout status ds/node-agent`, `kubectl rollout history ds/node-agent` and `kubectl rollout undo ds/node-agent`.
+- Agents often need node access: `hostPath` volumes (to read `/var/log`), `hostNetwork: true` or a `privileged` container. These are blocked by the Pod Security `baseline` and `restricted` levels (§4.9), so a namespace that enforces them rejects the Pod.
+
+### DaemonSet or Deployment?
+
+| Need | Use |
+|---|---|
+| Exactly one Pod on every (eligible) node, following the node count | DaemonSet |
+| A fixed number of replicas anywhere in the cluster | Deployment |
+| Scale on load | Deployment + HPA (a DaemonSet cannot be autoscaled) |
+
 ### 🧪 Practice task
 
 **Task:** Create a DaemonSet `node-logger` running `busybox:1.36` with `sleep 3600` on every node, including control-plane nodes (which are tainted `node-role.kubernetes.io/control-plane:NoSchedule`).
@@ -770,12 +1010,12 @@ A Job tracks whether a batch of work has reached its required successful complet
 |---|---|
 | One task | `completions: 1`, `parallelism: 1` (the defaults) |
 | Run 5 tasks, 2 at a time | `completions: 5`, `parallelism: 2` |
-| Parallel workers that coordinate themselves | `parallelism: N`, `completions` unset; the Job completes when a Pod succeeds and all Pods have terminated |
+| Parallel workers that coordinate themselves | `parallelism: N`, `completions` omitted; the Job completes when a Pod succeeds and all Pods have terminated |
 | Fail fast | `backoffLimit: 0` and/or `activeDeadlineSeconds: 60` |
 
 #### Work-queue pattern (parallel workers, completion via success)
 
-When the application decides when it has finished (for example it consumed all queue items), set `completions` unset and `parallelism` to the desired worker count. The Job completes when **any** Pod succeeds and **all** Pods have terminated:
+When the application decides when it has finished (for example it consumed all queue items), omit `completions` and set `parallelism` to the desired worker count. Once one Pod succeeds, no new Pods are created and the other workers are allowed to finish. The Job completes only when at least one Pod has succeeded **and** every Pod has terminated; if the other workers hang, the Job does not complete:
 
 ```mermaid
 flowchart LR
@@ -787,10 +1027,12 @@ flowchart LR
     W2 -.->|"item"| Q
     W3 -.->|"item"| Q
     W4 -.->|"item"| Q
-    W2 -->|"all done, exit 0"| DONE[Job complete]
-    W1 -->|"still running when W2 succeeds"| STOP[Terminated by Job controller]
-    W3 --> STOP
-    W4 --> STOP
+    W2 -->|"queue empty, exit 0"| OK[One Pod succeeded]
+    OK -->|"no new Pods created"| WAIT[Other workers finish on their own]
+    W1 --> WAIT
+    W3 --> WAIT
+    W4 --> WAIT
+    WAIT -->|"all Pods terminated"| DONE[Job complete]
 ```
 
 ```yaml
@@ -800,7 +1042,7 @@ metadata:
   name: queue-workers
 spec:
   parallelism: 4
-  completions: unset
+  # completions omitted on purpose (work-queue mode)
   backoffLimit: 3
   template:
     spec:
@@ -811,17 +1053,77 @@ spec:
           command: ["sh", "-c", "process items until queue empty; exit 0"]
 ```
 
-This is the standard pattern when the work is "process N items, any worker can pick any item."
+This is the standard pattern when the work is "process N items, any worker can pick any item." `kubectl describe job` prints `Completions: <unset>`; that is display text, not a manifest value. Never write `completions: unset` (it is not an integer and `kubectl apply` rejects it).
 
 When a Job fails, `kubectl describe job <n>` shows the reason: `BackoffLimitExceeded` (too many failed Pods) or `DeadlineExceeded` (ran past `activeDeadlineSeconds`). Read the Pod logs with `kubectl logs job/<n>` or `kubectl logs <pod>`.
 
 ### Common mistakes
 
 - A Job's Pod template **must** set `restartPolicy: Never` or `OnFailure`. `Always` is rejected on creation. With `Never`, each retry uses a new Pod; with `OnFailure`, the same Pod is restarted and keeps its identity.
-- `backoffLimit` counts Pods, not application attempts. A Pod that retries its container six times still counts as one failed Pod.
+- `backoffLimit` counts failed Pods when `restartPolicy: Never`. With `OnFailure`, container restarts inside Pending/Running Pods also count toward it. Either way, it is not a count of application-level attempts.
 - `kubectl logs job/<n>` only works while a Pod still exists. After cleanup, the logs are gone - read them while the Job is active, or save them with `kubectl logs job/<n> > /tmp/job.log`.
 - A Job that ran to completion is not deleted automatically; it lives on as a record. Use `kubectl delete job <n>` (or set `ttlSecondsAfterFinished`) to clean up.
 - A successful Job shows `Completions: 1/1` in `kubectl get job`. A failure shows `0/1` and `BackoffLimitExceeded` in events - read the Pod's `--previous` log to see the actual error.
+
+### Retries and failure, with numbers
+
+`backoffLimit: N` allows failures to be retried up to `N` times, so a Job can create **up to `N + 1` Pods in total**. With `backoffLimit: 0` the first failure ends the Job. Retries wait with an exponential delay (10 s, 20 s, 40 s, and so on, capped at 6 minutes), which is why a failing Job can seem to sit idle. When testing a failure on purpose, set `backoffLimit: 0` or a small value so you do not wait.
+
+| `restartPolicy` | What a failed attempt looks like | What `backoffLimit` counts |
+|---|---|---|
+| `Never` | A Pod in `Error`; the Job creates a **new Pod** for the retry | Failed Pods |
+| `OnFailure` | The same Pod stays and its container restarts (`RESTARTS` climbs) | Container restarts (see the note above) |
+
+Two separate failure reasons appear in `kubectl describe job`:
+
+| Reason | Cause |
+|---|---|
+| `BackoffLimitExceeded` | Too many failed Pods or restarts |
+| `DeadlineExceeded` | The Job ran longer than `activeDeadlineSeconds`; running Pods are terminated |
+
+### Worked example: a Job that always fails
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bad
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: c
+          image: busybox:1.36
+          command: ["sh", "-c", "exit 1"]
+```
+
+```text
+$ kubectl get pods -l job-name=bad
+NAME        READY   STATUS   RESTARTS   AGE
+bad-4xk2p   0/1     Error    0          70s
+bad-9mq7t   0/1     Error    0          40s
+bad-r2w8z   0/1     Error    0          10s
+
+$ kubectl get job bad
+NAME   STATUS   COMPLETIONS   DURATION   AGE
+bad    Failed   0/1           75s        75s
+```
+
+Reading it: three Pods (`backoffLimit: 2` means up to 3 attempts), each in `Error` with `RESTARTS 0` because `Never` creates a new Pod rather than restarting one. `describe job` shows `BackoffLimitExceeded`. Read the cause from the Pod, not the Job: `kubectl logs bad-r2w8z`.
+
+### Handy commands
+
+```bash
+kubectl wait --for=condition=complete job/report --timeout=60s    # blocks until the Job finishes
+kubectl get pods -l job-name=report                               # the Job's Pods
+kubectl delete job report                                         # also removes its Pods
+```
+
+- A Job's `spec.template` cannot be edited after creation. To change the image or command, delete the Job and create it again; the Job object is a one-time record of a run.
+- Add `ttlSecondsAfterFinished: 300` so finished Jobs and their Pods clean up on their own.
+- `spec.suspend: true` pauses a Job (no Pods run) until you set it back to `false`.
 
 ### ⚡ Remember
 
@@ -1189,6 +1491,22 @@ flowchart TD
 
 If a Pod is `Pending` with `FailedScheduling` events, walk this diagram in reverse: read the event message to find which filter rejected the node. `taints`, `nodeAffinity`, `Insufficient cpu`, and `unbound PVC` are the four messages you will see most.
 
+### How the scheduler decides: filter, score, bind
+
+The scheduler is a loop that handles one unplaced Pod at a time (a Pod whose `spec.nodeName` is still empty):
+
+1. **Filter.** Remove every node that cannot run the Pod: not enough free CPU or memory for its requests, a taint the Pod does not tolerate, a `nodeSelector` or required affinity that does not match, an unbound volume, and so on. If **no** node survives, the Pod stays `Pending` and gets a `FailedScheduling` event that lists the reasons.
+2. **Score.** Rank the remaining nodes with a set of scoring plugins (for example, spread Pods out, prefer nodes that already hold the image, honour preferred affinity). Each node gets a score.
+3. **Bind.** The best-scoring node wins (ties are broken at random), and the scheduler writes that choice to the Pod. The kubelet on that node takes over from there.
+
+Things that surprise people:
+
+- **The scheduler counts requests, not real usage.** A node with 2 CPUs where existing Pods *request* 1.8 CPUs is "full" for a new Pod requesting 0.5, even if those Pods are using only 0.2 CPUs. The new Pod is `Pending` with `Insufficient cpu` on an idle node. A Pod with **no requests** counts as zero, so many of them can be packed onto one node.
+- **Allocatable is not capacity.** `kubectl describe node` shows `Capacity` (the machine) and `Allocatable` (what Pods may use after the system and kubelet take their share), plus an `Allocated resources` table of requests already placed. Compare the new Pod's request against `Allocatable` minus `Allocated`.
+- **Placement happens once.** The scheduler never moves a running Pod. If a node is added later, existing Pods stay where they are; only new Pods can use it. (Rebalancing needs a separate tool, or you recreate Pods.)
+- **A Pending Pod is retried.** The scheduler tries again when the cluster changes (a node joins, a Pod is deleted, a taint is removed), so fixing the cause often lets the Pod schedule with no further action.
+- **You can bypass it.** Setting `spec.nodeName` yourself assigns the Pod directly and skips scheduling checks such as taints and resource fit. It is useful for learning, rarely correct for real workloads.
+
 ### Taint effects and commands
 
 | Effect | Behavior |
@@ -1249,8 +1567,8 @@ spec:
 
 ### Common mistakes
 
-- Picking a `topologyKey` that no node has. If no node carries `topology.kubernetes.io/region`, the constraint applies to a single "no region" domain and spreads nothing. Verify with `kubectl get nodes --show-labels`.
-- Setting `whenUnsatisfiable: DoNotSchedule` with `maxSkew: 1` on a single-node cluster. The Pod will stay `Pending` forever because the skew can never reach 1 with one domain.
+- Picking a `topologyKey` that no node has. Nodes that lack the key are skipped (they do not form a "no region" domain). If no node carries `topology.kubernetes.io/region`, a `DoNotSchedule` Pod stays `Pending`. Verify with `kubectl get nodes --show-labels`.
+- Treating `maxSkew` as a target. It is a ceiling: with one domain, skew after placement is 1 and `1 <= maxSkew`, so the Pod schedules. `Pending` happens when no node has the `topologyKey`, or when `minDomains` cannot be met - not simply because there is a single domain.
 - Forgetting `labelSelector`. Without it, the scheduler counts **every** Pod on the node when computing skew, which leads to surprising results. Always set `labelSelector.matchLabels` to the workload's own labels.
 - Confusing `topologySpreadConstraints` (preferred) with the older `podAntiAffinity` with `topologyKey`. Both spread Pods; topology spread is more flexible and supports `ScheduleAnyway`.
 
@@ -1263,7 +1581,7 @@ spec:
   priorityClassName: high-priority
 ```
 
-System classes shipped with Kubernetes include `system-cluster-critical` and `system-node-critical` (used by core cluster components). User-defined PriorityClass objects are namespaced-cluster-scoped (cluster-wide, but in a namespace):
+System classes shipped with Kubernetes include `system-cluster-critical` and `system-node-critical` (used by core cluster components). User-defined PriorityClass objects are **cluster-scoped** (no `metadata.namespace`):
 
 ```yaml
 apiVersion: scheduling.k8s.io/v1
@@ -1690,7 +2008,46 @@ spec:
 | `Object` | A metric on a single Kubernetes object (Ingress, Service) | Custom adapter |
 | `External` | A metric from outside the cluster (queue depth, SQS) | Custom adapter |
 
-For exam purposes: CPU HPA needs `requests.cpu` on every container; memory HPA needs `requests.memory`. Without them the HPA prints `<unknown>/0%` and never changes the replica count.
+For exam purposes: CPU HPA needs `requests.cpu` on every container; memory HPA needs `requests.memory`. Without them the HPA shows `<unknown>` as the current value (for example `<unknown>/50%`) and never changes the replica count.
+
+### How the replica count is calculated
+
+```text
+desiredReplicas = ceil( currentReplicas x currentMetric / targetMetric )
+```
+
+Example: 3 replicas, the average CPU is 90% of the **request**, and the target is 60%. `ceil(3 x 90 / 60) = ceil(4.5) = 5` replicas. If the current value is within about 10% of the target (the default tolerance), the HPA does nothing, which stops constant flapping. The result is always clamped to `minReplicas`..`maxReplicas`.
+
+Utilization is relative to the **sum of the requests** of the Pod's containers. A sidecar with no CPU request makes the whole calculation unavailable, so every container needs a request. Scaling is deliberately asymmetric: scale-up reacts quickly, scale-down waits out `stabilizationWindowSeconds` (300 s by default) so a short dip does not remove Pods.
+
+### Reading `kubectl get hpa` and `describe hpa`
+
+```text
+$ kubectl get hpa web
+NAME   REFERENCE        TARGETS         MINPODS   MAXPODS   REPLICAS   AGE
+web    Deployment/web   <unknown>/50%   2         6         2          3m
+
+$ kubectl describe hpa web
+Conditions:
+  Type           Status  Reason                   Message
+  AbleToScale    True    SucceededGetScale        ...
+  ScalingActive  False   FailedGetResourceMetric  failed to get cpu utilization: missing request for cpu in container ...
+```
+
+Reading it: `TARGETS` shows `<unknown>` and `ScalingActive` is `False` with a message about a missing CPU request. The HPA exists but cannot compute anything, so `REPLICAS` never changes. Fix the Deployment's container requests (`kubectl set resources deployment web --requests=cpu=100m`), wait for the new Pods, and watch `TARGETS` turn into a number such as `0%/50%`. If the message is about the metrics API instead, `kubectl top pods` will fail too; that points at metrics-server, not at your manifest.
+
+| `describe` condition | Meaning |
+|---|---|
+| `AbleToScale: True` | The HPA can read and change the replica count of its target |
+| `ScalingActive: False` | It cannot compute a recommendation (missing requests or no metrics) |
+| `ScalingLimited: True` | The calculation wanted more or fewer replicas than `maxReplicas`/`minReplicas` allows |
+
+### Interactions to know
+
+- **Do not fight the HPA.** Remove `replicas` from the Deployment manifest when an HPA owns the count; otherwise every `kubectl apply` resets the number. A manual `kubectl scale` is overwritten at the next HPA sync.
+- **Memory is a poor trigger.** Many applications keep memory after load drops, so a memory-based HPA scales up but rarely back down. CPU is the usual choice.
+- `minReplicas` cannot be `0` with the standard resource metrics; at least one Pod must exist to be measured.
+- A `PodDisruptionBudget` and an HPA are independent: the HPA changes the count, the PDB limits voluntary evictions.
 
 ### ⚡ Remember
 
@@ -1756,6 +2113,30 @@ Only one of `minAvailable` / `maxUnavailable` may be set; both may be expressed 
 - The PDB `selector` must select the **Pods** whose availability you want to protect; it does not select the Deployment object itself. Usually, reuse the application's stable labels from the Pod template (often the same labels used by the Deployment selector), and make sure those labels do not unintentionally match unrelated Pods. Do not normally include the generated `pod-template-hash`, because it changes when a Deployment rolls out and could make the PDB stop matching the workload's new Pods.
 - A PDB constrains eligible voluntary disruptions requested through the **Eviction API**, such as the evictions performed by `kubectl drain`. A direct `kubectl delete pod` or deletion of the owning workload can bypass that protection even though the action is voluntary. Node failure and other involuntary disruptions cannot be prevented by a PDB, although unavailable Pods count against the budget. A container OOM kill is not itself an eviction request.
 - `policy/v1` is the current stable API; `policy/v1beta1` was removed in 1.25.
+
+### Reading `kubectl get pdb`
+
+```text
+$ kubectl get pdb web-pdb
+NAME      MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+web-pdb   2               N/A               1                     5m
+```
+
+`ALLOWED DISRUPTIONS` is the number to watch: it is how many matching Pods can be evicted right now. With 3 healthy replicas and `minAvailable: 2` it is `1`. If one Pod is already not Ready, it drops to `0`, because unavailable Pods count against the budget.
+
+### Worked example: a drain that hangs
+
+```text
+Deployment web: replicas 3
+PDB: minAvailable: 3             -> ALLOWED DISRUPTIONS = 0
+
+$ kubectl drain node-1 --ignore-daemonsets
+error when evicting pod "web-..." : Cannot evict pod as it would violate the pod's disruption budget.
+```
+
+Reading it: the budget demands all 3 Pods stay up, so no eviction is ever allowed and `drain` keeps retrying. The PDB is too strict for the replica count. Use `maxUnavailable: 1` (or `minAvailable: 2`) so one Pod can move at a time, then retry the drain.
+
+Prefer `maxUnavailable` for Deployments: it keeps working when you scale the replica count, whereas `minAvailable: 2` becomes meaningless at `replicas: 1`. A PDB with `minAvailable` equal to the replica count (or `maxUnavailable: 0`) blocks node maintenance entirely, so only use it when that is truly the requirement.
 
 ### ⚡ Remember
 
@@ -2094,7 +2475,7 @@ initContainers:
 
 This combines the startup ordering guarantees of init containers with a long-running sidecar lifecycle.
 
-Native sidecars are GA since Kubernetes v1.33 (beta and on by default since v1.29). They start before the main containers, keep running for the life of the Pod, and are stopped after the main containers finish, which also lets a Job's Pod complete cleanly.
+Native sidecars are GA since Kubernetes v1.33 (alpha in v1.28, beta and on by default since v1.29). They start before the main containers, keep running for the life of the Pod, and are stopped after the main containers finish (in reverse spec order), which also lets a Job's Pod complete cleanly.
 
 ### Init container vs sidecar vs main container
 
@@ -2781,6 +3162,30 @@ Secrets are intended for sensitive values such as passwords, tokens, TLS materia
 
 Base64 is only a text encoding used in the API representation; it does **not** protect the value from anyone who can read the Secret. Treat Secret access as a security permission: restrict RBAC, do not put credentials in Git or logs, and use cluster encryption-at-rest/external secret management where required.
 
+### What a Secret is, and what it is not
+
+A Secret is an API object shaped like a ConfigMap, but the platform handles it with extra care. The differences are real, though modest:
+
+| | ConfigMap | Secret |
+|---|---|---|
+| Intended for | Ordinary settings | Passwords, tokens, keys, certificates |
+| Mounted as a volume | Written to the node's disk | Backed by **in-memory** storage (`tmpfs`) on the node, so it is not written to disk |
+| Which nodes receive it | Any | The kubelet is only given Secrets referenced by Pods running **on its own node** |
+| `kubectl describe` | Shows the values | Shows only the size of each value |
+| RBAC | Can be granted separately | Can be granted separately, so "read ConfigMaps" does not mean "read Secrets" |
+| Stored in etcd | In plain text | In plain text **unless** encryption at rest is enabled by the cluster admin |
+
+**Base64 is not encryption.** Values are base64-encoded only because a Secret can hold binary data (a certificate, a key file) that must still fit in JSON and YAML. Anyone who can `get` the Secret, read etcd, or open a backup can decode it in one command.
+
+### Where Secrets really leak
+
+- **Environment variables** are visible to `kubectl exec ... env`, to child processes, to crash dumps and often to application logs. Mounting a Secret as a file is generally safer.
+- **People with `get secret`** (or `list`, which also returns the values) in the namespace.
+- **Git and shell history**: a manifest with real values, or `--from-literal=password=...` typed on a shared machine.
+- **Stale copies**: environment variables are read once at container start, so a rotated Secret is not seen until the Pod restarts. Mounted files do refresh eventually, except when mounted with `subPath`.
+
+In real clusters the answer is layered: tight RBAC, encryption at rest, and often an external secret manager (for example a cloud vault synced into the cluster) so the source of truth is not a YAML file in Git.
+
 ### Create
 
 ```bash
@@ -3271,7 +3676,7 @@ Kubernetes assigns a Pod a QoS class from its resource configuration:
 
 | Class | Rule | Under node memory pressure |
 |---|---|---|
-| **Guaranteed** | Every relevant container has CPU **and** memory requests and limits, and requests equal limits | Generally least likely to be evicted under node pressure |
+| **Guaranteed** | Every app **and init** container has CPU **and** memory requests and limits, and requests equal limits | Generally least likely to be evicted under node pressure |
 | **Burstable** | At least one request or limit is set, but the Pod does not meet Guaranteed rules | Depends on priority and usage relative to requests |
 | **BestEffort** | No requests or limits on any container | Generally most vulnerable under node pressure |
 
@@ -3527,6 +3932,22 @@ Before every task, verify **current context + namespace**.
 ## 4.3 ServiceAccounts
 
 A ServiceAccount provides an identity for workloads that interact with the Kubernetes API.
+
+### Why ServiceAccounts exist
+
+Anything that calls the Kubernetes API has to prove who it is. **People** (administrators, developers) authenticate from outside the cluster with client certificates or an external login system such as OIDC; Kubernetes has no "User" object. **Programs running inside the cluster** (a controller, an operator, a CI job, an app that lists Pods) need an identity too, and that is what a **ServiceAccount** is: a small, namespaced API object that represents a workload.
+
+### How a Pod's identity travels
+
+1. A Pod is created with `serviceAccountName: app-sa` (or the namespace's `default`).
+2. The kubelet asks the API server for a **token** for that ServiceAccount: a signed JWT that is **bound to this Pod**, has an audience, and expires. It is mounted as a file in the container.
+3. The application sends it with each API call: `Authorization: Bearer <token>`.
+4. The API server checks the signature, expiry and audience (**authentication**), and turns the token into an identity: `system:serviceaccount:<namespace>:<name>`, plus the groups `system:serviceaccounts` and `system:serviceaccounts:<namespace>`.
+5. **Authorization** (RBAC) then decides what that identity may do. A ServiceAccount has **no permissions of its own**; only a Role or ClusterRole bound to it grants any.
+
+Because the token is bound to the Pod, it stops being valid when the Pod is deleted, and the kubelet renews it before it expires. This replaced the old design in which every ServiceAccount had a never-expiring token stored in a Secret.
+
+Authentication answers "who are you?" and RBAC answers "what may you do?". Mixing these up is the root of most ServiceAccount confusion: a Pod can have a perfectly valid identity and still get `403 Forbidden` for every request.
 
 ### Create and use
 
@@ -4034,7 +4455,7 @@ The "block X" list is the part CKAD tasks actually test. Pick the level that mat
 | `capabilities` not dropped | allowed | allowed | **rejected** (must `drop: ["ALL"]`) |
 | `seccompProfile.type` not `RuntimeDefault` or `Localhost` | allowed | allowed | **rejected** (must be one of these) |
 | `runAsUser: 0` (root) | allowed | allowed | **rejected** |
-| Adding capabilities beyond `NET_BIND_SERVICE` | allowed | allowed | **rejected** |
+| Adding capabilities beyond `NET_BIND_SERVICE` | allowed | allowed only from Baseline's short list; dangerous ones (for example `SYS_ADMIN`, `NET_ADMIN`) **rejected** | **rejected** |
 
 If a Pod is rejected with `violates PodSecurity`, the admission response identifies the enforced profile and the violated field. Fix the actual field (for example, remove `hostPath`, drop capabilities, or set the required non-root/security settings) and retry. The `warn` and `audit` labels report violations but do not enforce rejection; `enforce` is the mode that blocks the Pod. For controller-managed workloads, inspect the ReplicaSet or controller events as well as the top-level Deployment.
 
@@ -4782,6 +5203,35 @@ A PVC binds only to a PV that offers the requested mode, so a mismatch is a clas
 
 `kubectl describe pvc` shows both `accessModes` and `volumeMode`. A `Filesystem` PVC binding to a `Block` PV (or vice versa) is a common `Pending` cause.
 
+### Choosing a mode
+
+| What the app needs | Mode | Notes |
+|---|---|---|
+| One Pod writes (database, single-writer app) | `ReadWriteOnce` | Most common; the Pod's node attaches the volume |
+| Strictly one Pod in the whole cluster | `ReadWriteOncePod` | Enforces single-user even on one node |
+| Many Pods read the same data | `ReadOnlyMany` | Use `readOnly: true` in the Pod too |
+| Many Pods write shared files | `ReadWriteMany` | Needs NFS/CephFS-style storage; many default classes do not offer it |
+
+### RWO and RWOP in rollouts
+
+- With plain RWO, replicas of one Deployment can run on the same node and share the volume, but on different nodes the second Pod fails to attach (`Multi-Attach error`, see §9.14). Scheduling Pods onto one node (affinity) or switching to RWX fixes this.
+- With RWOP, a `RollingUpdate` can get stuck: the new Pod cannot start while the old Pod still holds the claim, and the old Pod is only removed once the new one is Ready. Use `strategy: Recreate` for a Deployment that mounts a RWOP claim.
+
+### Worked example: PVC stuck in `Pending` on mode
+
+```text
+$ kubectl get pv,pvc
+NAME                   CAPACITY   ACCESS MODES   STORAGECLASS
+persistentvolume/pv1   1Gi        RWO            manual
+NAME                      STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS
+persistentvolumeclaim/c1  Pending                                      manual
+
+$ kubectl describe pvc c1        # requests ReadWriteMany
+Events: ... no persistent volumes available for this claim ...
+```
+
+Reading it: the claim asks for `ReadWriteMany`, the only PV offers `ReadWriteOnce`, so nothing can bind (event wording varies by cluster). Change the claim to `ReadWriteOnce` (delete and recreate it; access modes of an existing claim are not editable) or provide a PV that supports RWX. Check the other binding rules too: same `storageClassName`, requested size no larger than the PV, and matching `volumeMode`.
+
 ### ⚡ Remember
 
 Do not assume an arbitrary storage backend supports every access mode.
@@ -5034,6 +5484,20 @@ flowchart TD
 
 A Headless Service has no virtual ClusterIP to load-balance connections. DNS can publish individual endpoint addresses, and a StatefulSet’s governing Service gives each ordinal a predictable name such as `db-0.db`. The client or database protocol must decide which member to use; DNS does not know which replica is the primary and does not perform database failover. Whether unready endpoints are published depends on readiness behavior and Service settings such as `publishNotReadyAddresses`.
 
+### Why StatefulSets exist
+
+A Deployment treats Pods as **interchangeable**: any replica can be replaced by any other, with a random name, and they share one template. That is wrong for software such as databases, Kafka or etcd, where each member has its own **identity** (who is the primary, who holds which data), its own **disk**, and peers that find each other **by name**. If `db-1` is replaced, the new Pod must come back as `db-1`, with `db-1`'s data, at the name the others already know.
+
+A StatefulSet adds the three guarantees a Deployment does not give:
+
+| Need | How a StatefulSet provides it |
+|---|---|
+| A stable name | Pods are numbered `db-0`, `db-1`, `db-2`, and a replacement reuses its number |
+| A stable address | A headless Service gives each Pod its own DNS name (`db-1.db`) |
+| Its own data that follows it | `volumeClaimTemplates` create one PVC per Pod, and the same PVC is reattached when that Pod comes back |
+
+Order and gentle changes (start in sequence, update one at a time) are added on top, because members often must join and leave a cluster carefully.
+
 ### Ordered lifecycle (default `podManagementPolicy: OrderedReady`)
 
 A StatefulSet creates, updates and terminates Pods **one at a time, in ordinal order**. `web-1` does not start until `web-0` is `Ready`; on a scale-down, the highest-ordinal Pod is terminated first. This matters for clustered software (etcd, ZooKeeper, Kafka) where joining members must contact existing peers by stable name.
@@ -5143,6 +5607,41 @@ The combination is what makes a StatefulSet useful, not any single field:
 | Ordered operations | Default `podManagementPolicy: OrderedReady` |
 
 A normal Service's `ClusterIP` does not help here: it load-balances across all Pods. The headless Service's per-Pod DNS is what makes `db-0` resolve to that one Pod's IP.
+
+### What happens when a member fails or is removed
+
+```text
+$ kubectl delete pod db-1
+$ kubectl get pods -l app=db
+NAME   READY   STATUS              AGE
+db-0   1/1     Running             20m
+db-1   0/1     ContainerCreating   3s       # same name, new Pod (new UID, usually a new IP)
+db-2   1/1     Running             19m
+
+$ kubectl get pvc
+NAME        STATUS   VOLUME     CAPACITY
+data-db-0   Bound    pvc-aaa    1Gi
+data-db-1   Bound    pvc-bbb    1Gi         # the same claim; the data is still there
+data-db-2   Bound    pvc-ccc    1Gi
+```
+
+Reading it: the StatefulSet controller recreated the missing ordinal with the **same name and the same PVC**, so `db-1` rejoins with its data. Because the IP may change but the DNS name `db-1.db` does not, peers that connect by name reconnect without any reconfiguration.
+
+Scaling follows the same logic. `kubectl scale statefulset db --replicas=2` removes the **highest** ordinal (`db-2`) first, but its PVC is kept by default, so scaling back to 3 brings `db-2` back with its old data. Remove the claim yourself (or set `persistentVolumeClaimRetentionPolicy`) when you really want the data gone.
+
+### Updating a StatefulSet safely
+
+Updates default to `RollingUpdate`: Pods are replaced **one at a time, from the highest ordinal down** (`db-2`, then `db-1`, then `db-0`), each waiting to be Ready. The `partition` setting turns this into a staged rollout:
+
+```yaml
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 2        # only ordinals >= 2 receive the new template
+```
+
+With `partition: 2` and 3 replicas, only `db-2` is updated; `db-0` and `db-1` keep the old version. If `db-2` looks healthy, lower `partition` to `1`, then `0`, to roll the update through the rest. `updateStrategy.type: OnDelete` updates a Pod only when you delete it yourself.
 
 ### ⚡ Remember
 
@@ -5255,7 +5754,7 @@ Read the task for one of these signals and match the strategy:
 | Task says... | Pick | Why |
 |---|---|---|
 | "No downtime" / "zero-downtime deploy" | `RollingUpdate` with `maxSurge: 1`, `maxUnavailable: 0` | Guarantees `replicas` Pods stay Ready |
-| "Old and new cannot coexist" (schema, RWO volume, single-instance license) | `Recreate` | Only strategy that fully replaces before bringing up new |
+| "Old and new cannot coexist" (schema, RWOP volume, single-instance license) | `Recreate` | Only strategy that fully replaces before bringing up new |
 | "Instant cutover" / "switch traffic atomically" / "rollback by flipping back" | Blue/Green | Two Deployments + a Service selector change does it in one command |
 | "Gradual rollout to a small subset" / "test in production with 5-10% of users" | Canary | Two Deployments, same Service selector; replica count is the share |
 | "Update the image and keep all replicas serving" | `RollingUpdate` (default) | You almost never need to specify a strategy for the default behavior |
@@ -5321,7 +5820,7 @@ The "current" pod count is constrained by:
 desired - maxUnavailable <= current <= desired + maxSurge
 ```
 
-So with `replicas: 3` and the defaults (`maxSurge: 25%`, `maxUnavailable: 25%`) the rollout is allowed to run between `3` and `4` Pods, replacing one at a time. Common presets:
+So with `replicas: 3` and the defaults (`maxSurge: 25%`, `maxUnavailable: 25%`) the rollout is allowed to run between `3` and `4` Pods, replacing one at a time. The percentages round differently: `maxSurge` rounds **up** (0.75 -> 1) and `maxUnavailable` rounds **down** (0.75 -> 0). Without that rounding the formula would look like it allows 2 Pods. Common presets:
 
 | Preset | Trade-off |
 |---|---|
@@ -5418,7 +5917,7 @@ kubectl rollout undo deployment/web --to-revision=2
 
 ### When to choose Recreate
 
-Use it when two versions must never run together: a schema change the old code cannot read, a `ReadWriteOnce` volume only one Pod may mount, or a licence that allows a single instance. The trade-off is downtime between the last old Pod stopping and the first new Pod becoming Ready.
+Use it when two versions must never run together: a schema change the old code cannot read, a volume that only one Pod may use at a time (`ReadWriteOncePod`; plain `ReadWriteOnce` is one **node**, and several Pods on that node can mount it), or a licence that allows a single instance. The trade-off is downtime between the last old Pod stopping and the first new Pod becoming Ready.
 
 `rollout pause` is useful with either strategy: make several edits (image, env, resources) while paused, then `rollout resume` to apply them as a single rollout.
 
@@ -5448,6 +5947,46 @@ Do not rely on the old `--record` habit; it has been deprecated for a long time 
 kubectl annotate deployment/web kubernetes.io/change-cause="upgrade to nginx 1.28"
 kubectl rollout history deployment/web
 ```
+
+### What creates a revision
+
+- Only a change to the **Pod template** (image, env, command, probes, resources, labels in the template) creates a new revision. `kubectl scale`, `rollout pause` and `rollout resume` do not.
+- Each revision is one ReplicaSet. Old ReplicaSets stay at `0` replicas as the rollback history; list them with `kubectl get rs`.
+- `spec.revisionHistoryLimit` (default `10`) caps how many are kept. With `revisionHistoryLimit: 0` there is nothing to roll back to.
+
+### What `rollout undo` really does
+
+`undo` copies the old Pod template back into the Deployment as a **new** revision. Revision numbers never go backwards: the restored revision gets a new, higher number and its old number disappears.
+
+```text
+$ kubectl rollout history deployment/web
+REVISION  CHANGE-CAUSE
+1         initial nginx 1.26
+2         upgrade to nginx 1.27
+3         bad tag test
+
+$ kubectl rollout undo deployment/web --to-revision=1
+$ kubectl rollout history deployment/web
+REVISION  CHANGE-CAUSE
+2         upgrade to nginx 1.27
+3         bad tag test
+4         initial nginx 1.26
+```
+
+Before undoing to a named revision, check what it contains: `kubectl rollout history deployment/web --revision=1` shows the image and template. A paused Deployment cannot be rolled back until you `rollout resume` it.
+
+### A failed rollout does not roll itself back
+
+With a bad image, the new Pod sits in `ErrImagePull` or `ImagePullBackOff`. The rolling-update limits (see the rounding rule in §6.2) usually keep the old Pods serving, so users may notice nothing. After `progressDeadlineSeconds` (default `600`) the Deployment condition `Progressing` becomes `False` with reason `ProgressDeadlineExceeded`, and Kubernetes still does **not** undo anything. You must act:
+
+```bash
+kubectl rollout status deployment/web --timeout=60s; echo "exit=$?"   # non-zero when it times out or fails
+kubectl get rs -l app=web                                               # new RS stuck at 0 READY
+kubectl describe pod <new-pod>                                          # Events: the real reason
+kubectl rollout undo deployment/web                                     # or fix the image and apply again
+```
+
+**Exam move:** if a task says "roll back", run `rollout history` first, `undo` (with `--to-revision` when a revision is named), then confirm with `rollout status` and `kubectl get pods`. Do not stop at the `undo` command succeeding.
 
 ### ⚡ Remember
 
@@ -5671,20 +6210,20 @@ spec:
       targetPort: 80
 ```
 
-The Service selects only `app: web`, so it spreads traffic over stable and canary Pods; the split is roughly the replica ratio (here about 1 in 4). Shift the share by scaling:
+The Service selects only `app: web`, so it spreads traffic over stable and canary Pods; the split is roughly the replica ratio (here 3 stable + 1 canary, about 75% / 25%; kube-proxy is not strict per-request round-robin). The 9 + 1 (about 90% / 10%) split is in the practice task below. Shift the share by scaling:
 
 ```bash
 kubectl scale deployment web-canary --replicas=2
 kubectl scale deployment web-canary --replicas=0   # abort the canary
 ```
 
-### Diagram: canary traffic split
+### Diagram: canary traffic split (9 stable + 1 canary, as in the practice task)
 
 ```mermaid
 flowchart LR
     U["clients"] --> SVC["Service web (selector: app=web)"]
-    SVC -->|"about 90 percent"| ST["web-stable (9 Pods)"]
-    SVC -->|"about 10 percent"| CA["web-canary (1 Pod)"]
+    SVC -->|"roughly 90 percent"| ST["web-stable (9 Pods)"]
+    SVC -->|"roughly 10 percent"| CA["web-canary (1 Pod)"]
 ```
 
 The Service selects both Deployments because they share `app=web`, so the traffic split follows the Pod count. For exact percentages you need an Ingress controller or service mesh feature.
@@ -5728,6 +6267,38 @@ kubectl delete deployment web-canary
 ## 6.7 Helm fundamentals
 
 Helm is a Kubernetes package manager. A chart contains templates and metadata used to install an application as a release.
+
+### Why Helm exists
+
+A real application is not one YAML file; it is a Deployment, Service, ConfigMap, Ingress, ServiceAccount and more. Installing it by copying files has problems: values differ per environment, upgrading means working out which files changed, and rolling back means remembering what was running. Helm packages the set of manifests as a **chart**, lets you **parameterize** it with values, and tracks each installation as a **release** with its own history.
+
+| Term | Meaning |
+|---|---|
+| **Chart** | A package: templated manifests plus default values and metadata |
+| **Values** | The settings that fill the templates (`values.yaml`, `-f file`, `--set key=val`) |
+| **Release** | One named installation of a chart in a namespace (`web`), which can be upgraded and rolled back |
+| **Repository** | A place charts are published, searched and downloaded from |
+| **Revision** | A numbered snapshot of a release; every install, upgrade and rollback creates a new one |
+
+### What `helm install` does
+
+1. Loads the chart and merges the values: **chart defaults, then `-f` files in order, then `--set`** (later wins).
+2. Renders the Go templates with those values into ordinary Kubernetes YAML, entirely on your machine.
+3. Sends the YAML to the API server, which creates the objects as usual.
+4. Records the release (the rendered manifest and the values) as a Secret named like `sh.helm.release.v1.web.v1` in the release's namespace. There is no server-side component; **the cluster holds the history in Secrets**.
+
+`helm upgrade` repeats the steps with new values or a new chart and stores a new revision (`...v2`). `helm rollback web 1` re-applies revision 1's manifests as a **new** revision (`v3`), the same way `kubectl rollout undo` creates a new revision: history only moves forward.
+
+### See the result before the cluster does
+
+```bash
+helm template web bitnami/nginx -f values.yaml     # render locally, print the YAML, touch nothing
+helm install web bitnami/nginx --dry-run           # simulate the install and print what would be created
+helm get manifest web                              # the YAML Helm actually applied for a release
+helm get values web                                # the values you supplied
+```
+
+When a chart misbehaves, render it first: most "Helm problems" are really a value that produced the wrong YAML.
 
 ### Common commands
 
@@ -5923,6 +6494,59 @@ helm uninstall my-nginx -n web
 ## 6.8 Kustomize
 
 Kustomize customizes existing Kubernetes manifests without requiring a template language.
+
+### Why Kustomize exists
+
+The same application usually runs in several environments with small differences: replicas, image tag, namespace, a resource limit. Copying the YAML for each environment creates drift: a fix made in one copy is forgotten in the others. Kustomize keeps **one plain, valid base** and describes each environment as a short list of **changes layered on top**. There are no placeholders and no template language: the base stays ordinary YAML you can apply on its own.
+
+### How it works
+
+`kustomize build` (also `kubectl kustomize <dir>`) reads a `kustomization.yaml` and produces a final YAML stream. In order, it:
+
+1. Loads the files listed under `resources` (for an overlay, that includes the base directory).
+2. Runs generators (for example `configMapGenerator`) to create objects.
+3. Applies transformers and patches: name prefix, namespace, labels, images, replicas and your own patches.
+4. Prints the result. **The base files on disk are never modified.**
+
+`kubectl apply -k <dir>` does the same build and applies the output. Nothing is remembered in the cluster: Kustomize is a build step, not a package manager.
+
+### Worked example: one base, a `prod` overlay
+
+```yaml
+# base/kustomization.yaml
+resources:
+  - deployment.yaml          # Deployment "web": replicas 1, image nginx:1.26
+```
+
+```yaml
+# overlays/prod/kustomization.yaml
+resources:
+  - ../../base
+namespace: prod
+namePrefix: prod-
+replicas:
+  - name: web
+    count: 5
+images:
+  - name: nginx
+    newTag: "1.27"
+```
+
+```text
+$ kubectl kustomize overlays/prod        # (abridged)
+kind: Deployment
+metadata:
+  name: prod-web                 # prefix applied
+  namespace: prod                # namespace applied
+spec:
+  replicas: 5                    # replaced
+  template:
+    spec:
+      containers:
+        - image: nginx:1.27      # tag replaced
+```
+
+Reading it: the overlay states only the **differences**; everything else comes from the base unchanged. Always run `kubectl kustomize` first to review what will be applied, then `kubectl apply -k`.
 
 ### Typical structure
 
@@ -6179,6 +6803,20 @@ kubectl apply -k overlays/prod
 | Releases | Rendered manifests |
 | Strong for reusable packaged applications | Strong for environment-specific customization |
 
+### The same change in both tools
+
+Requirement: "production runs 5 replicas of `nginx:1.27`."
+
+| Step | Helm | Kustomize |
+|---|---|---|
+| Where the knob lives | The chart author wrote `replicas: {{ .Values.replicaCount }}` in a template | Nothing to prepare: the base is plain YAML with `replicas: 1` |
+| How you change it | `helm upgrade --install web ./chart -f values-prod.yaml` with `replicaCount: 5` and `image.tag: "1.27"` | An overlay with `replicas: [{name: web, count: 5}]` and `images: [{name: nginx, newTag: "1.27"}]` |
+| What can be changed | Only what the chart exposes as a value (or by editing the chart) | Any field of any manifest, through a patch |
+| Loops, conditions, logic | Yes (Go templates) | No (by design) |
+| History and rollback | `helm history`, `helm rollback` (stored in the cluster) | None: use `git`, or `kubectl rollout undo` on the workload |
+
+The trade-off in one sentence: **Helm lets a package author decide what is configurable and ships it as a versioned product; Kustomize lets you change anything in manifests you already have, with no new language to learn.**
+
 ### When to use which
 
 - Use **Helm** to install third-party or reusable packaged software (databases, ingress controllers), when you want one-command upgrade and rollback with release history, or when many settings are driven by values.
@@ -6431,7 +7069,7 @@ The three probes answer three different questions and have different consequence
 | `livenessProbe` | Is the app still healthy? | Restart | For the whole Pod life |
 | `readinessProbe` | Can it accept traffic right now? | Remove from Service endpoints (no restart) | For the whole Pod life |
 
-The probes share the same `httpGet`/`exec`/`tcpSocket`/`grpc` mechanism and the same timing fields, but a single failure in liveness eventually causes a Pod restart, while a single failure in readiness only pauses traffic.
+The probes share the same `httpGet`/`exec`/`tcpSocket`/`grpc` mechanism and the same timing fields, but after `failureThreshold` consecutive failures (3 by default) liveness restarts the container, while readiness only pauses traffic. A single failed check does neither unless the threshold is 1.
 
 Each probe uses one mechanism:
 
@@ -6450,7 +7088,40 @@ Useful defaults:
 | `failureThreshold` | 3 |
 | `successThreshold` | 1 |
 
-`successThreshold` must be `1` for liveness and startup probes.
+`successThreshold` must be `1` for liveness and startup probes. With the default `failureThreshold: 3` on all three probe types, one liveness failure does not restart the container and one readiness failure does not remove the Pod from Endpoints; it takes `failureThreshold` consecutive failures (so only a threshold of 1 reacts to a single failure).
+
+### The life of a Pod with all three probes
+
+Take a Pod with these probes:
+
+```yaml
+startupProbe:   {httpGet: {path: /healthz, port: 8080}, periodSeconds: 5,  failureThreshold: 12}   # up to 60 s to start
+readinessProbe: {httpGet: {path: /ready,   port: 8080}, periodSeconds: 5}
+livenessProbe:  {httpGet: {path: /healthz, port: 8080}, periodSeconds: 10}                          # failureThreshold 3 (default)
+```
+
+| Time | What happens | Effect |
+|---|---|---|
+| `t=0 s` | Container starts. Only the **startup** probe runs (every 5 s). Liveness and readiness are paused | Pod is `Running` but `0/1` Ready: no traffic |
+| `t=35 s` | The app finishes loading; the startup probe succeeds and then stops running | Liveness and readiness begin |
+| `t=40 s` | First readiness check passes | Pod becomes Ready; the EndpointSlice controller adds it; the Service now sends it traffic |
+| `t=300 s` | A database the app needs goes down; `/ready` fails 3 times in a row (about 15 s) | Pod is removed from the Service endpoints. **The container keeps running** and is not restarted |
+| `t=330 s` | The database returns; `/ready` passes again | Pod is added back to the endpoints |
+| `t=600 s` | The app deadlocks; `/healthz` fails 3 times (about 30 s) | The kubelet kills and restarts the container; the startup probe runs again from the beginning |
+
+Notice the division of labour: **readiness controls traffic, liveness controls restarts, startup protects a slow boot from being killed by liveness.**
+
+### Why probes matter beyond a single Pod
+
+- **Rolling updates depend on readiness.** A Deployment only counts a new Pod as available once it is Ready, then removes an old one. Without a readiness probe, "Ready" simply means "the container started", so traffic can reach a Pod before the app can serve it, and a broken version can replace a working one.
+- **Services depend on readiness.** The endpoint list only contains Ready Pods, so readiness is the switch that keeps users away from a Pod that is starting, overloaded or shutting down.
+
+### Design rules
+
+- Keep **liveness shallow**: check that the process itself is alive, not that a database or another service is reachable. If liveness depends on a shared dependency and that dependency fails, every Pod restarts in a loop and makes the outage worse.
+- Let **readiness reflect the ability to serve**. It may include critical dependencies, but remember the effect: if every Pod becomes not Ready at once, the Service has no endpoints.
+- Use a **startup probe** for slow starters, instead of a long `initialDelaySeconds` on liveness, so a hang after startup is still caught quickly.
+- Keep checks cheap and fast, and set `timeoutSeconds` above the endpoint's normal response time.
 
 ### Timing math
 
@@ -6683,6 +7354,52 @@ Useful event reasons to recognize (their fixes are in Chapter 9):
 - `BackOff` - container repeatedly crashing
 - `Unhealthy` - probe failure
 - `FailedPull`, `ErrImagePull` - image name, tag, or registry credentials
+
+### Reading `describe pod` in the right order
+
+1. **Events** at the very bottom: the newest `Warning` lines usually name the cause (`FailedScheduling`, `FailedMount`, `BackOff`, `Unhealthy`).
+2. **Containers**: `State`, `Last State`, `Reason`, `Exit Code` and `Restart Count`. `State: Waiting` explains why it is not running; `Last State: Terminated` explains why it died before.
+3. **Conditions**: tells you *which stage* failed.
+
+| Condition that is `False` | Stage | Go to |
+|---|---|---|
+| `PodScheduled` | Scheduler could not place the Pod | §9.2 Pending Pod |
+| `Initialized` | An init container has not finished | §9.7 |
+| `ContainersReady` / `Ready` | Containers running but a probe is failing | §9.8 |
+
+### Common exit codes
+
+| Exit code | Usual meaning | Next step |
+|---|---|---|
+| `0` | Finished normally (a short-lived command in a Deployment ends in `CrashLoopBackOff`) | Use a long-running command or a Job |
+| `1` | Application error | `kubectl logs --previous` |
+| `126` / `127` | Command not executable / command not found | Check `command`, `args` and the image |
+| `137` | Killed with SIGKILL; with `Reason: OOMKilled` it hit the memory limit | Raise `limits.memory` or fix the leak |
+| `143` | Stopped with SIGTERM (normal during shutdown or a liveness restart) | Check whether a probe or a rollout caused it |
+
+### Event handling tips
+
+- Events are short-lived (about an hour by default), so look soon after the failure.
+- `kubectl events --types=Warning` hides the noise; `kubectl events --for pod/web` narrows to one object.
+- `describe` for a controller (Deployment, ReplicaSet, Job) shows events that the Pod's own `describe` will not, such as `FailedCreate` from quota or Pod Security admission.
+
+### Worked example
+
+```text
+$ kubectl describe pod web-6d5c
+Containers:
+  app:
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    127
+    Restart Count:  5
+Events:
+  Warning  BackOff  kubelet  Back-off restarting failed container app
+```
+
+Reading it: the container starts and dies at once (`Restart Count` climbing), and exit code `127` means "command not found". The fix is in `command`/`args` or the image, not in resources or probes. Confirm with `kubectl logs web-6d5c --previous`, correct the spec, apply, and verify the Pod becomes `Running`.
 
 ### ⚡ Remember
 
@@ -6976,6 +7693,33 @@ The flow has three stages:
 2. **Service forwarding.** In a common kube-proxy-based cluster, the dataplane handles traffic addressed to the ClusterIP and forwards it to an eligible Pod IP and `targetPort`. The ClusterIP is virtual and usually is not assigned to a physical interface. Some networking implementations provide a replacement Service dataplane, so the exact mechanism varies.
 3. **Forward.** The connection reaches the chosen Pod. The EndpointSlice controller publishes endpoint readiness conditions, and the Service dataplane consumes those endpoints to stop selecting an unready Pod for new traffic. Existing connections and endpoint-removal timing can behave differently, so do not assume every in-flight connection instantly moves to a different Pod.
 
+### Why Services exist
+
+Pods are disposable and their IPs change, and a Deployment runs many copies at once. A client needs **one stable address**, spreading across the copies, that only ever points at **healthy** Pods. A Service provides exactly that: a fixed name and virtual IP in front of whichever Pods currently match its selector.
+
+Four pieces work together, each doing one job:
+
+| Piece | Job |
+|---|---|
+| **Service object** | Holds the stable name, the virtual IP (ClusterIP), the ports and the selector |
+| **EndpointSlice controller** | Watches Pods that match the selector and keeps a list of the **Ready** ones (IP and port) |
+| **kube-proxy** (on every node) | Watches Services and EndpointSlices and programs the node's packet-forwarding rules (iptables, IPVS or nftables, depending on the setup) |
+| **CoreDNS** | Answers "what is the IP of `web`?" with the Service's ClusterIP |
+
+### What really happens on `curl http://web`
+
+1. The client's resolver asks CoreDNS for `web`, and gets the ClusterIP, say `10.96.14.20`.
+2. The client opens a connection to `10.96.14.20:80`. No machine has that IP; it is virtual.
+3. The forwarding rules **on the client's own node** match that address and port, choose one ready endpoint, and rewrite the destination to a real Pod, say `10.244.2.4:8080`. (This rewrite is called DNAT.)
+4. The packet travels across the Pod network to that Pod, and replies are translated back so the client believes it talked to the ClusterIP.
+
+Two lessons follow from this design:
+
+- **There is no proxy process in the middle** for ClusterIP traffic. The choice is made **once per connection**, not per request. A client that keeps one long-lived connection (HTTP keep-alive, gRPC) stays on one Pod, which is why load can look uneven.
+- **The ClusterIP does not answer ping**, because nothing owns it. Test a port with `curl` or `wget`, not `ping`.
+
+Because the endpoint list only contains **Ready** Pods, readiness probes are what keeps traffic away from a Pod that is starting up or unhealthy.
+
 ### Port meanings
 
 | Field | Meaning |
@@ -7095,6 +7839,34 @@ Typical use: service-to-service communication within the cluster.
 The ClusterIP is a **virtual IP** that no network interface owns. `kube-proxy` (or the CNI's replacement for it) programs rules on every node that rewrite traffic sent to the Service IP and port to the IP and `targetPort` of one ready Pod. Cluster DNS maps the Service name to the ClusterIP, so clients use `web` instead of an address. Because the IP is virtual you usually cannot `ping` it; test with `curl` or `wget` against the port.
 
 By default, Services send normal traffic to ready endpoints. A failed readiness probe normally marks the endpoint not ready, but settings such as `publishNotReadyAddresses` can intentionally change publication behavior. When the result is surprising, inspect the EndpointSlice's `ready` and `serving` conditions rather than relying only on the Pod's STATUS column.
+
+### Ways to reach a ClusterIP Service
+
+| From | Address to use |
+|---|---|
+| A Pod in the same namespace | `web` (or `web:80`) |
+| A Pod in another namespace | `web.<namespace>` or `web.<namespace>.svc.cluster.local` |
+| Your own terminal (testing) | `kubectl port-forward svc/web 8080:80`, then `curl localhost:8080` |
+| Any Pod, by IP | The `CLUSTER-IP` from `kubectl get svc` |
+
+Service environment variables (`WEB_SERVICE_HOST`, `WEB_SERVICE_PORT`) are injected only for Services that already existed **when the Pod started**. A Pod created before the Service will not have them, so prefer DNS names.
+
+### Things that are fixed or optional
+
+- `spec.clusterIP` cannot be changed after creation; to get a different address, delete and recreate the Service. Setting `clusterIP: None` makes a headless Service (no virtual IP; DNS returns Pod IPs), which StatefulSets use.
+- `sessionAffinity: ClientIP` keeps one client on the same Pod for a period. The default is `None`, which spreads connections roughly evenly, not strictly round-robin.
+- A ClusterIP Service is not reachable from outside the cluster. If a task needs outside access, the answer is NodePort, LoadBalancer or Ingress, not a firewall change.
+
+### Worked example: create and test
+
+```bash
+kubectl create deployment web --image=nginx:1.27 --replicas=2
+kubectl expose deployment web --port=80 --target-port=80
+kubectl get svc,endpointslices -l kubernetes.io/service-name=web
+kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- -T2 http://web
+```
+
+Expected: the Service shows a `CLUSTER-IP`, the EndpointSlice lists two Pod IPs on port 80, and the `wget` prints the nginx welcome page. If `wget` hangs or is refused, work the table in §8.7 instead of recreating the Service.
 
 ### ⚡ Remember
 
@@ -7254,6 +8026,59 @@ flowchart LR
 
 The control plane keeps the EndpointSlice in sync with Pods that match the selector **and** are Ready. An empty slice means no label match or no Ready Pod.
 
+### The ports that cause most Service failures
+
+| Field | Lives on | Meaning |
+|---|---|---|
+| `port` | Service | The port clients use on the Service (`web:80`) |
+| `targetPort` | Service | The port on the **Pod** that traffic is sent to. Defaults to `port` if omitted. Can be a number or the **name** of a container port |
+| `containerPort` | Pod | Documentation only: it does not open, block or redirect anything |
+| `nodePort` | NodePort Service | Port opened on every node (30000-32767 by default) |
+
+The path is `client -> web:80 -> ClusterIP -> PodIP:targetPort`. If `targetPort` is not the port the process actually listens on, the selector, labels and readiness can all be perfect and the Service still fails: the EndpointSlice is populated, but connections are refused or time out. A named `targetPort` (for example `targetPort: http`) is looked up in each Pod's `containerPort` names; if the name is missing, that Pod gets no usable endpoint.
+
+A Service with several ports must give every port a `name`.
+
+### Symptom -> first check
+
+| Symptom | Most likely cause | First command |
+|---|---|---|
+| `Endpoints: <none>` | Selector/label mismatch, Pods not Ready, or Pods in another namespace | `kubectl get pods --show-labels`, then `kubectl get svc web -o wide` |
+| Endpoints are listed, but "connection refused" | Wrong `targetPort` | Test the Pod IP directly on the suspected port |
+| Endpoints are listed, but it hangs (timeout) | NetworkPolicy, or wrong Pod IP/port | `kubectl get networkpolicy` |
+| `web` does not resolve | Wrong namespace (use `web.<ns>`) or an egress policy blocking DNS | `nslookup web` from a temporary Pod |
+| Works from one Pod, not from another | Different namespace or NetworkPolicy | Compare the two Pods' namespaces and labels |
+
+### Worked example: endpoints exist, connection refused
+
+```text
+$ kubectl describe svc web
+Selector:    app=web
+Port:        <unset>  80/TCP
+TargetPort:  8080/TCP
+Endpoints:   10.244.1.7:8080,10.244.2.4:8080
+
+$ kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- -T2 10.244.1.7:8080
+wget: can't connect to remote host: Connection refused
+$ kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- -T2 10.244.1.7:80
+<!DOCTYPE html> ...
+```
+
+Reading it: the selector works (two endpoints), so the problem is not labels or readiness. The Pod answers on 80 but not 8080, so the Service sends traffic to the wrong port. Fix `targetPort` to `80` (or make the app listen on 8080), then re-test through the Service name.
+
+```bash
+kubectl patch svc web -p '{"spec":{"ports":[{"port":80,"targetPort":80}]}}'
+kubectl run tmp --rm -it --restart=Never --image=busybox:1.36 -- wget -qO- -T2 http://web:80
+```
+
+Testing the Pod IP directly separates "the app is broken" from "the Service is broken". `kubectl port-forward svc/web 8080:80` is a quick way to test from your own terminal.
+
+### Creating Services quickly (and the selector trap)
+
+- `kubectl expose deployment web --port=80 --target-port=8080` copies the **Deployment's selector** and uses your `--target-port`.
+- `kubectl create service clusterip web --tcp=80:8080` always sets the selector to `app=web` (the Service name). If your Pods carry different labels, the Service starts with no endpoints. Check `kubectl get svc web -o jsonpath='{.spec.selector}'` straight after.
+- `kubectl get endpoints web` is the quickest view and still works on the exam. The Endpoints API has been deprecated in favour of EndpointSlices (v1.33), and EndpointSlices additionally show the `ready` and `serving` conditions.
+
 ### ⚡ Remember
 
 No endpoints usually means **selector, readiness or Pod availability** should be checked before blaming the client.
@@ -7382,7 +8207,7 @@ Rules to keep in mind:
 - `spec.podSelector` chooses the Pods the policy applies to; `{}` selects **all** Pods in the policy's namespace.
 - A Pod selected by no policy is unrestricted. Once a policy selects it for `Ingress` (or `Egress`), only what is allowed is permitted in that direction.
 - Policies are **additive**: the union of all allow rules applies. There are no deny rules.
-- `policyTypes` says which directions the policy governs; list `Egress` explicitly to restrict egress.
+- `policyTypes` says which directions the policy governs. If omitted, it is inferred: `Ingress` is always included, and `Egress` is added when an `egress:` section exists. Set it explicitly (for example `["Egress"]` for egress-only) so the intent is clear.
 
 ### How the "no policy vs one policy vs many policies" rules combine
 
@@ -7565,7 +8390,7 @@ When traffic to a Pod times out (not "refused"), work through this list:
 
 1. **Does a NetworkPolicy isolate the Pod in the direction being tested?** Run `kubectl get networkpolicy -A`, then inspect `podSelector` and `policyTypes`. If no policy selects the destination Pod for ingress, NetworkPolicy does not isolate its ingress; if no policy selects the source Pod for egress, NetworkPolicy does not isolate its egress. This does **not** mean the CNI is globally disabled: it may enforce policies for other Pods, and firewalls, service meshes, or cloud rules may still block traffic.
 2. **Does the policy's `podSelector` match the target Pod's labels?** `kubectl get pod --show-labels` vs the policy.
-3. **Is the right direction restricted?** A policy with `policyTypes: [Ingress]` does not affect egress; a policy with `[Egress]` does not affect ingress. The default is "no restriction in the un-listed direction."
+3. **Is the right direction restricted?** A policy with an explicit `policyTypes: [Ingress]` does not affect egress; one with `[Egress]` does not affect ingress. A direction no policy selects the Pod for stays unrestricted.
 4. **Do the `from` / `to` selectors match the actual client/server?** A namespaceSelector with a typo or a podSelector with a wrong label returns zero matches, and the rule is effectively a deny.
 5. **Is the protocol and destination port right?** A NetworkPolicy `port` matches the destination port on the Pod endpoint, not the Service's front-end `port`. For example, if a Service listens on `80` and forwards to Pod port `8080`, the policy normally needs to allow `8080`. `port` can be numeric or a named Pod port. With TCP (the default), a listener on `9090` is not matched by a rule for `8080`.
 6. **For egress-isolated Pods: is DNS actually permitted?** If no egress rule permits traffic to the configured DNS resolver on the protocol and port it uses, name lookups fail. Explicitly allow UDP 53 and TCP 53 where needed, scoped to the cluster DNS endpoints. Check `/etc/resolv.conf` and your cluster DNS setup rather than assuming every cluster queries the `kube-dns` Service IP directly.
@@ -7574,7 +8399,7 @@ A **timeout** is a common clue for dropped traffic, including a NetworkPolicy bl
 
 ### Common mistakes
 
-- Forgetting `policyTypes`. A policy with only `ingress:` rules is implicitly `policyTypes: [Ingress]`, but adding an `egress:` block without listing `Egress` in `policyTypes` makes the egress rule inert.
+- Forgetting `policyTypes`. A policy with only `ingress:` rules is implicitly `policyTypes: [Ingress]`. If `policyTypes` is omitted and an `egress:` block is present, **both** directions apply: egress rules are enforced, and ingress becomes default-deny even with no ingress rules. For egress-only, write `policyTypes: ["Egress"]`. It is an explicit `policyTypes: ["Ingress"]` that makes an `egress:` section inert.
 - A `namespaceSelector` without a `kubernetes.io/metadata.name` match. Every namespace has this label; use it instead of a custom `team: platform` label that some namespaces may not have.
 - A policy that selects all Pods (`podSelector: {}`) with `policyTypes: [Ingress]` and an empty `from:` list. This denies all **incoming** traffic to every Pod in the namespace, but it does **not** touch egress or DNS lookups — those are only affected by a policy whose `policyTypes` includes `Egress`. Do not "fix" a broken DNS lookup by editing an ingress-only deny-all; check for a separate egress-denying policy instead.
 - Setting `podSelector: {}` and forgetting this also selects Pods in other namespaces via the policy's own namespace. `podSelector` is intra-namespace; use `namespaceSelector` for cross-namespace selection.
@@ -7642,12 +8467,35 @@ kubectl run bad --rm -it --image=busybox:1.36 --restart=Never -n np -- wget -qO-
 
 Ingress defines HTTP/HTTPS routing to Services. It only works if an **Ingress controller** (for example ingress-nginx) is running in the cluster.
 
-**Note (checked 29 October 2026):** the official `ingress-nginx` repository was archived in March 2026; the project states that there will be no further releases or security fixes, although existing deployments are not automatically broken. The Kubernetes `Ingress` API remains a separate concept from any particular controller. For a new practice cluster, choose a maintained Ingress controller if you want to practice `Ingress` objects; a Gateway API implementation is an alternative for learning the distinct Gateway API resources and does not necessarily implement the same `Ingress` behavior. See the [official ingress-nginx retirement notice](https://github.com/kubernetes/ingress-nginx).
+**Note (checked 29 October 2026):** the official `ingress-nginx` repository was archived in March 2026; the project states that there will be no further releases or security fixes, although existing deployments are not automatically broken. The Kubernetes `Ingress` API remains a separate concept from any particular controller, and the exam still tests the Ingress API, so practice with whatever controller the cluster actually runs. For a new practice cluster, choose a maintained Ingress controller if you want to practice `Ingress` objects; a Gateway API implementation is an alternative for learning the distinct Gateway API resources and does not necessarily implement the same `Ingress` behavior. See the [official ingress-nginx retirement notice](https://github.com/kubernetes/ingress-nginx).
 
 ```mermaid
 flowchart LR
     C[Client] --> ING["Ingress (host/path rules, TLS)"] --> SVC[Service] --> P[Pods]
 ```
+
+### Why Ingress exists
+
+A `NodePort` or `LoadBalancer` Service works at layer 4 (TCP/UDP): it knows ports, not hostnames, URL paths or certificates. Exposing ten web applications that way means ten external addresses (usually ten paid cloud load balancers) and TLS handled separately in each application. **Ingress** gives you **one entry point** that works at layer 7 (HTTP/HTTPS): it routes by hostname and path, terminates TLS in one place, and sends each request to the right Service behind it.
+
+### Two parts: the rules and the thing that enforces them
+
+| Part | What it is | Does it act? |
+|---|---|---|
+| **Ingress resource** | A set of rules (host, path, backend Service, TLS Secret) stored as an API object | No. It is only data |
+| **Ingress controller** | Reverse-proxy Pods (NGINX, HAProxy, Traefik and others) plus a loop that watches Ingresses, Services, EndpointSlices and Secrets and rewrites the proxy's configuration when they change | Yes. It is what receives traffic |
+
+An Ingress with no controller does nothing. `ingressClassName` says which controller should own an Ingress, matching an `IngressClass` object; a class annotated `ingressclass.kubernetes.io/is-default-class: "true"` is used when none is named. The controller itself is exposed through a Service (typically `LoadBalancer` or `NodePort`), and that Service's address is the single entry point you see in the Ingress `ADDRESS` column.
+
+### Life of a request
+
+1. DNS points `shop.example.com` at the controller's external address (in a test you skip DNS and send a `Host` header instead).
+2. The request reaches a controller Pod through the controller's Service.
+3. The controller terminates TLS with the certificate from the referenced Secret, matches the `Host` header and path against its rules, and chooses the backend Service.
+4. Many controllers then send the request **straight to a Pod IP** taken from the Service's EndpointSlices, so they balance per HTTP request and skip the ClusterIP step. Details differ by controller.
+5. The Pod's response returns the same way.
+
+This explains the error pattern from §8.12: no matching rule gives a controller-generated `404`, a matching rule with no ready endpoints gives `503`, and a wrong `targetPort` gives a gateway error. The Kubernetes **Gateway API** is the newer, more expressive successor to Ingress, but Ingress remains the resource this guide covers.
 
 ### Complete example
 
@@ -7700,7 +8548,7 @@ kubectl get ingressclass
 
 ### Common mistakes
 
-- Forgetting `ingressClassName`. An Ingress with no class is silently ignored when the cluster has more than one Ingress controller, or rejected outright. The class must match an `IngressClass` object that has a controller running - `kubectl get ingressclass` shows the available classes.
+- Forgetting `ingressClassName`. An Ingress with no `ingressClassName` is only picked up if the cluster has a **default** `IngressClass`; otherwise no controller claims it and `kubectl get ingress` shows an empty `ADDRESS`. The class must match an `IngressClass` object that has a controller running - `kubectl get ingressclass` shows the available classes.
 - Mixing up the old and new fields. `networking.k8s.io/v1` requires `pathType` and uses `backend.service.name` + `backend.service.port.number`. The old `serviceName` / `servicePort` / `path` (without `pathType`) produces "field is required" or "unknown field" errors.
 - Putting the Ingress in the wrong namespace. An Ingress only resolves to Services in its own namespace. `web.dev` from the Ingress in `prod` does not match a `web` Service in `dev`.
 - Forgetting TLS. An `Ingress` with `tls:` references a Secret of type `kubernetes.io/tls`; a `generic` Secret will be rejected with "tls.crt / tls.key missing."
@@ -7826,6 +8674,43 @@ kubectl get pods --show-labels
 
 Check the IngressClass/controller as well as the backend Service.
 
+### Check the layers in this order
+
+| # | Question | Command | Typical fault |
+|---|---|---|---|
+| 1 | Did a controller pick the Ingress up? | `kubectl get ingress` (is `ADDRESS` filled?) and `kubectl get ingressclass` | Missing or wrong `ingressClassName` |
+| 2 | Do host and path match the request? | `kubectl describe ingress web` | Wrong host, or `pathType` `Exact` where `Prefix` was needed |
+| 3 | Does the backend name **and port** match the Service? | `kubectl get svc web` | Ingress points at the Pod/target port instead of the Service `port` |
+| 4 | Is the Service in the **same namespace** as the Ingress? | `kubectl get svc -n <ns>` | A backend can only be a Service in the Ingress's own namespace |
+| 5 | Does the Service have endpoints? | `kubectl get endpoints web` | Selector or readiness problem (§8.7) |
+| 6 | Does the Pod answer on `targetPort`? | Test the Pod IP directly | Wrong `targetPort` |
+
+### What the HTTP status usually tells you
+
+With NGINX-style controllers the status often identifies the failing layer (exact codes depend on the controller):
+
+| Response | Usual meaning | Look at |
+|---|---|---|
+| `404` from the controller | No rule matched the host/path, or no controller owns the Ingress | Steps 1-2 |
+| `503` | Rule matched, but the Service has no ready endpoints | Step 5 |
+| `502` / `504` | Endpoints exist, but the Pod refused or did not answer | Step 6, NetworkPolicy |
+
+Test without DNS by sending the host yourself:
+
+```bash
+curl -i -H "Host: shop.example.com" http://<ingress-address>/
+```
+
+### Worked example: 404 from the controller
+
+```text
+$ kubectl get ingress web
+NAME   CLASS    HOSTS              ADDRESS   PORTS
+web    <none>   shop.example.com             80
+```
+
+The `CLASS` is `<none>` and `ADDRESS` is empty: no controller claimed the Ingress, so no rule is programmed, which is why requests get a `404` (or nothing). Set `spec.ingressClassName` to a class listed by `kubectl get ingressclass`, apply, and watch `ADDRESS` fill in. Only after that is it worth checking host, path and backend. Ingress annotations (for example rewrite rules) are controller-specific, so read the annotation names from the controller your cluster runs, not from memory.
+
 ### ⚡ Remember
 
 An Ingress problem does not automatically mean the Pod is broken.
@@ -7872,7 +8757,7 @@ spec:
       serviceAccountName: web
       containers:
         - name: web
-          image: nginx:1.27
+          image: nginxinc/nginx-unprivileged:1.27   # listens on 8080 as UID 101 (stock nginx uses 80 and root)
           ports:
             - name: http
               containerPort: 8080
@@ -7895,6 +8780,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
+            runAsUser: 101
             capabilities:
               drop: ["ALL"]
 ---
@@ -7970,6 +8856,8 @@ spec:
         - protocol: TCP
           port: 53
 ```
+
+Image note: stock `nginx:1.27` listens on port 80 and runs as root, so with `runAsNonRoot: true` it fails with `CreateContainerConfigError`, and probes or `targetPort: http` on 8080 would miss the listener. Either keep the stock image on port 80 without `runAsNonRoot`, or use an image that really listens on 8080 as a numeric non-root user (as above) and set `runAsUser`.
 
 What this stack gives you:
 
@@ -8487,6 +9375,49 @@ Last State:  Terminated
 
 **Interpretation and fix:** `OOMKilled` is a container termination reason, commonly caused by exceeding its memory limit. Confirm the last termination state and compare the configured limit with observed usage and application behavior; `kubectl top` is only a recent sample and may miss a short spike. Raise the limit only if the workload legitimately needs more memory, and check namespace quota and node capacity; otherwise fix a leak or unbounded workload. CPU-limit pressure causes throttling, not `OOMKilled`.
 
+### Requests vs limits, and who kills what
+
+| Setting | Used by | What happens at the boundary |
+|---|---|---|
+| `requests.memory` | Scheduler (placement) and QoS class | Nothing is killed at the request; it only reserves room on the node |
+| `limits.memory` | Kernel (cgroup) | The container is killed with `OOMKilled` (exit `137`) when it exceeds the limit |
+
+Two different events look alike, so check which one you have:
+
+| Evidence | Event | Fix |
+|---|---|---|
+| `Last State: Terminated`, `Reason: OOMKilled` on the container | The container hit its own memory limit | Raise the limit or fix the memory use (this section) |
+| Pod `Failed`/`Evicted` with a node-pressure message | The kubelet evicted the Pod because the node ran low | See §9.17; set realistic requests |
+
+A container that is repeatedly OOM-killed then shows `CrashLoopBackOff` in `STATUS`; the OOM reason lives in `Last State`, not in `State`. A container with a memory limit but no matching request gets a request equal to the limit by default.
+
+### Check and fix quickly
+
+```bash
+kubectl get pod oom -o jsonpath='{.spec.containers[*].resources}{"\n"}'      # the limit you set
+kubectl get pod oom -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}{"\n"}'
+kubectl set resources deployment web --limits=memory=256Mi --requests=memory=128Mi
+kubectl rollout status deployment/web
+```
+
+For a bare Pod, resources cannot be edited in place; delete and recreate it with the new limit. If the new limit is rejected or the Pod stays `Pending`, check the namespace `ResourceQuota` and the node capacity (`kubectl describe quota`, `kubectl describe node`).
+
+Unit trap: memory `128m` means 0.128 bytes (millibytes); you want `128Mi`. A limit that small makes the container die almost instantly.
+
+### Worked example
+
+```text
+$ kubectl get pod
+NAME   READY   STATUS             RESTARTS      AGE
+oom    0/1     CrashLoopBackOff   4 (30s ago)   2m
+$ kubectl describe pod oom | grep -A5 'Last State'
+    Last State:     Terminated
+      Reason:       OOMKilled
+      Exit Code:    137
+```
+
+Reading it: `CrashLoopBackOff` is the symptom; `OOMKilled` with exit `137` is the cause, and the container is dying because it exceeds `limits.memory`, not because of its command or a probe. Raise the limit to what the workload genuinely needs (watch `kubectl top pod oom` after it runs), then confirm the restart count stops increasing. If memory keeps growing until any limit is hit, that is a leak in the application, and a bigger limit only delays the kill.
+
 ### 🧪 Practice task
 
 **Task:** Create a Pod with `limits.memory: 20Mi` that allocates more (`tail /dev/zero`). Confirm `OOMKilled` and exit code 137, then fix with a larger limit.
@@ -9002,6 +9933,10 @@ flowchart TD
 | Helm command without `-n` | Release "disappears" | `-n <ns>` or `helm list -A` |
 | Generated YAML never applied | Nothing exists | `apply`, then verify |
 | Editing an immutable field | `edit` or `apply` fails | `kubectl replace --force -f`, or delete and recreate |
+| Work-queue Job manifest with `completions: unset` | `apply` rejects it (not an integer) | Omit the field; `<unset>` in `describe` is display text |
+| NetworkPolicy with `egress:` but no `policyTypes` | Both directions apply; ingress becomes default-deny | Set `policyTypes` explicitly |
+| `runAsNonRoot: true` on a root image (stock `nginx`) | `CreateContainerConfigError` | Use a non-root image and set a numeric `runAsUser` |
+| `ReadWriteOnce` assumed to mean one Pod | Several Pods on one node can share it | Use `ReadWriteOncePod` for one Pod |
 | Memory written as `128m` | Millibytes, not mebibytes | Use `128Mi` |
 | Ingress without `pathType` or with old field names | Rejected by `networking.k8s.io/v1` | Use `pathType` and `service.port.number` |
 | `kubectl get all` used as a full inventory | ConfigMaps, Secrets, PVCs, Ingresses are missing | Query those kinds explicitly |
